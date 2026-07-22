@@ -3,18 +3,26 @@
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 
 // Pre-flight: refuse to start on Node versions known to break @qdrant/js-client-rest.
-// The qdrant client pins undici ^6 and constructs an undici.Agent it passes to Node's
-// built-in fetch() as a dispatcher. Node 26+ ships a stricter undici whose dispatcher
-// hook validation rejects the v6 Agent's contract — surfaces as
-// `UND_ERR_INVALID_ARG: invalid onError method` on the first qdrant request.
-// (The imports below are evaluated before this check at runtime per ESM semantics,
-// but qdrant-js's module-init is side-effect-light — only an actual request triggers
-// the undici path — so exiting here is enough to spare users the opaque error later.)
-// Tracked upstream: https://github.com/qdrant/qdrant-js/issues/134
-// Upstream PRs under discussion: qdrant/qdrant-js#123 (undici major upgrade) and
-// qdrant/qdrant-js#128 (inject fetch into REST transport). If either lands — or any
-// other fix supersedes them — raise the upper bound in package.json's `engines.node`
-// and remove this check.
+// The qdrant client bundles its own undici ^6 and constructs an undici.Agent it passes to
+// Node's built-in fetch() as init.dispatcher. On Node 26+ the built-in fetch is undici 8,
+// whose request handler renamed the legacy `onError` hook to `onResponseError`. qdrant's
+// bundled undici 6 Agent still validates that handler for a function `onError`, does not
+// find one, and throws `UND_ERR_INVALID_ARG: invalid onError method` on the first qdrant
+// call. (It is qdrant's old undici rejecting Node 26's new handler, not Node rejecting the
+// v6 Agent.)
+//
+// This runtime guard is deliberately the ONLY gate. Do NOT add an upper bound to
+// `engines.node` in package.json. An upper bound is actively harmful here: a bare
+// `npx socraticode` install resolves a version range, and npm engine-filters that range,
+// so a `<26.0.0` bound makes Node 26 silently resolve to the newest version *below* the
+// bound (which predates this guard) and boot into the broken client instead of refusing.
+// With no upper bound, Node 26 installs the guarded version and hits this loud exit.
+//
+// (Imports below are evaluated before this check per ESM semantics, but qdrant-js's
+// module-init is side-effect-light: only an actual request triggers the undici path, so
+// exiting here is enough to spare users the opaque error later.)
+// Tracked upstream: https://github.com/qdrant/qdrant-js/issues/134 (PRs #123, #128).
+// Remove or relax this check when qdrant-js supports the undici bundled in Node 26+.
 const nodeMajor = Number.parseInt(process.versions.node.split(".")[0], 10);
 if (Number.isFinite(nodeMajor) && nodeMajor >= 26) {
   // fs.writeSync(2, …) is the canonical Node idiom for "print fatal error then die":
