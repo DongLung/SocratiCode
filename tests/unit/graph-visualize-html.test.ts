@@ -135,4 +135,39 @@ describe("graph-visualize-html", () => {
     });
     expect(html).toContain('"cyclic":true');
   });
+
+  it("labels an extensionless node with its stored language in the embedded data", async () => {
+    const graph: CodeGraph = {
+      nodes: [{
+        filePath: "/proj/scripts/deploy", relativePath: "scripts/deploy", language: "shell",
+        imports: [], exports: [], dependencies: [], dependents: [],
+      }],
+      edges: [],
+    };
+    const { html } = await buildInteractiveGraphHtml({
+      projectPath: "/proj", projectName: "x", projectId: "p1", graph,
+    });
+    const match = html.match(/<script id="socraticode-data"[^>]*>([\s\S]*?)<\/script>/);
+    expect(match).toBeTruthy();
+    const data = JSON.parse(match?.[1] ?? "{}") as { files: Array<{ id: string; language: string }> };
+    const file = data.files.find((f) => f.id === "scripts/deploy");
+    expect(file?.language).toBe("shell");
+  });
+
+  it("falls back to path-derived language in the embedded data when a node has no stored language", async () => {
+    const graph: CodeGraph = {
+      nodes: [
+        { filePath: "/proj/a.ts", relativePath: "a.ts", imports: [], exports: [], dependencies: [], dependents: [] },
+        { filePath: "/proj/scripts/legacy", relativePath: "scripts/legacy", imports: [], exports: [], dependencies: [], dependents: [] },
+      ],
+      edges: [],
+    };
+    const { html } = await buildInteractiveGraphHtml({
+      projectPath: "/proj", projectName: "x", projectId: "p1", graph,
+    });
+    const match = html.match(/<script id="socraticode-data"[^>]*>([\s\S]*?)<\/script>/);
+    const data = JSON.parse(match?.[1] ?? "{}") as { files: Array<{ id: string; language: string }> };
+    expect(data.files.find((f) => f.id === "a.ts")?.language).toBe("typescript");
+    expect(data.files.find((f) => f.id === "scripts/legacy")?.language).toBe("plaintext");
+  });
 });

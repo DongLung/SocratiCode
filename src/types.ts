@@ -14,6 +14,13 @@ export interface FileChunk {
 export interface CodeGraphNode {
   filePath: string;
   relativePath: string;
+  /**
+   * Language label for display/stats, set at graph-build time. For extensionless
+   * files this carries the content-detected language, which the path alone cannot
+   * yield. Absent on nodes from older persisted graphs and on import-target-only
+   * leaf nodes; consumers fall back to path-based derivation via nodeLanguage().
+   */
+  language?: string;
   imports: string[];
   exports: string[];
   dependencies: string[];
