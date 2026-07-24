@@ -2,7 +2,17 @@
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import path from "node:path";
 import { getLanguageFromExtension, toForwardSlash } from "../constants.js";
-import type { CodeGraph } from "../types.js";
+import type { CodeGraph, CodeGraphNode } from "../types.js";
+
+/**
+ * Resolve a graph node's language for display/stats. Prefers the language stored
+ * on the node at build time (correct for extensionless files, whose path carries
+ * no extension); falls back to deriving it from the path extension for nodes with
+ * no stored language (older persisted graphs and import-target-only leaf nodes).
+ */
+export function nodeLanguage(node: Pick<CodeGraphNode, "language" | "relativePath">): string {
+  return node.language ?? getLanguageFromExtension(path.extname(node.relativePath).toLowerCase());
+}
 
 /**
  * Get dependencies for a specific file.
@@ -101,8 +111,7 @@ export function getGraphStats(graph: CodeGraph): {
   // Language breakdown
   const languageBreakdown: Record<string, number> = {};
   for (const node of graph.nodes) {
-    const ext = path.extname(node.relativePath).toLowerCase();
-    const lang = getLanguageFromExtension(ext);
+    const lang = nodeLanguage(node);
     languageBreakdown[lang] = (languageBreakdown[lang] || 0) + 1;
   }
 
@@ -181,8 +190,7 @@ export function generateMermaidDiagram(graph: CodeGraph): string {
   // Style nodes by language
   const langNodes = new Map<string, string[]>();
   for (const node of graph.nodes) {
-    const ext = path.extname(node.relativePath).toLowerCase();
-    const lang = getLanguageFromExtension(ext);
+    const lang = nodeLanguage(node);
     if (!langNodes.has(lang)) langNodes.set(lang, []);
     const nid = nodeIds.get(node.relativePath);
     if (nid) langNodes.get(lang)?.push(nid);

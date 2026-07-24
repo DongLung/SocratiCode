@@ -778,6 +778,10 @@ export async function buildCodeGraph(
     }
     const node = nodesMap.get(relPath);
     if (!node) continue;
+    // Record the (post-detection) language so display/stats sites don't have to
+    // re-derive it from the path — which silently mislabels extensionless files
+    // as plaintext.
+    node.language = language;
 
     // Extract imports using ast-grep
     const importInfos = extractImports(source, lang, ext);
