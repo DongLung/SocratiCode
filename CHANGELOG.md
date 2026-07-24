@@ -4,6 +4,12 @@ All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
 
+## [1.9.1](https://github.com/giancarloerra/socraticode/compare/v1.9.0...v1.9.1) (2026-07-24)
+
+### Bug Fixes
+
+* **engines:** drop the <26 upper bound so Node 26 hits the guard, not a silent downgrade ([6d6a298](https://github.com/giancarloerra/socraticode/commit/6d6a2986ecd2cebc8495e2efe04b0db081733d36)), closes [123/#128](https://github.com/123/socraticode/issues/128) [#82](https://github.com/giancarloerra/socraticode/issues/82)
+
 ## [1.9.0](https://github.com/giancarloerra/socraticode/compare/v1.8.18...v1.9.0) (2026-07-21)
 
 ### Features
