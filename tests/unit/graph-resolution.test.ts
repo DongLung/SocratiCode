@@ -9,6 +9,7 @@ import {
   buildCsNamespaceMap,
   buildGoModuleInfo,
   buildJvmSuffixMap,
+  hasLiteralShellPathShape,
   resolveImport,
 } from "../../src/services/graph-resolution.js";
 
@@ -732,8 +733,11 @@ describe("graph-resolution", () => {
     });
   });
 
-  describe("Bash resolution", () => {
-    it("resolves relative source paths", () => {
+  describe("Shell resolution", () => {
+    // resolveImport accepts two spellings: the ast-grep grammar name ("bash")
+    // and the display name from getLanguageFromExtension ("shell"), which is
+    // what buildCodeGraph passes. Both must resolve.
+    it("resolves relative source paths for the ast-grep grammar spelling", () => {
       project = createTempProject({
         "run.sh": "",
         "config.sh": "",
@@ -748,6 +752,210 @@ describe("graph-resolution", () => {
       );
 
       expect(result).toBe("config.sh");
+    });
+
+    it("resolves relative source paths for the shell display-name spelling", () => {
+      project = createTempProject({
+        "run.sh": "",
+        "config.sh": "",
+      });
+
+      const result = resolveImport(
+        "./config.sh",
+        path.join(project.root, "run.sh"),
+        project.root,
+        project.fileSet,
+        "shell",
+      );
+
+      expect(result).toBe("config.sh");
+    });
+
+    it("resolves parent-relative source paths", () => {
+      project = createTempProject({
+        "nested/deep/run.sh": "",
+        "nested/helper.sh": "",
+        "helper.sh": "",
+      });
+
+      // A leading run of `.`/`..` anchors, so more than one level has to resolve,
+      // and an empty segment from `//` does not end the run.
+      for (const [specifier, expected] of [
+        ["../helper.sh", "nested/helper.sh"],
+        ["../../helper.sh", "helper.sh"],
+        [".//../helper.sh", "nested/helper.sh"],
+      ]) {
+        const result = resolveImport(
+          specifier,
+          path.join(project.root, "nested/deep/run.sh"),
+          project.root,
+          project.fileSet,
+          "shell",
+        );
+
+        expect(result, specifier).toBe(expected);
+      }
+    });
+
+    it("resolves a forward subdirectory path with a punctuated, mixed-case name", () => {
+      project = createTempProject({
+        "scripts/run.sh": "",
+        "scripts/lib/My_helper-2.sh": "",
+      });
+
+      // A literal path is matched verbatim, so ordinary filename punctuation and
+      // casing must survive the screens above the resolver.
+      const result = resolveImport(
+        "./lib/My_helper-2.sh",
+        path.join(project.root, "scripts/run.sh"),
+        project.root,
+        project.fileSet,
+        "shell",
+      );
+
+      expect(result).toBe("scripts/lib/My_helper-2.sh");
+    });
+
+    it("does not resolve a specifier without a ./ or ../ prefix", () => {
+      project = createTempProject({
+        "run.sh": "",
+        "config.sh": "",
+        "lib/util.sh": "",
+      });
+
+      // `source config.sh` searches PATH, then the run-time cwd when bash is not
+      // in POSIX mode, and `source lib/util.sh` is cwd-relative. Either can land
+      // on a same-named file, but never on one knowable at index time, so neither
+      // implies an edge to the sibling here.
+      for (const specifier of ["config.sh", "lib/util.sh"]) {
+        const result = resolveImport(
+          specifier,
+          path.join(project.root, "run.sh"),
+          project.root,
+          project.fileSet,
+          "shell",
+        );
+
+        expect(result, specifier).toBeNull();
+      }
+    });
+
+    // Shell performs no extension search, so resolution is literal: the two
+    // cases below are the shapes a candidate extension list would resolve, and
+    // each must stay null. The siblings cover both `.bash` and `.zsh`, and an
+    // extensionless specifier sits alongside, so these fail for any list
+    // containing `.sh`, `.bash`, or `.zsh`.
+    it("does not substitute a same-stem sibling for a missing source target", () => {
+      project = createTempProject({
+        "run.sh": "",
+        "config.bash": "",
+        "config.zsh": "",
+      });
+
+      const result = resolveImport(
+        "./config.sh",
+        path.join(project.root, "run.sh"),
+        project.root,
+        project.fileSet,
+        "shell",
+      );
+
+      expect(result).toBeNull();
+    });
+
+    it("does not append an extension to an extensionless source specifier", () => {
+      project = createTempProject({
+        "run.sh": "",
+        "config.sh": "",
+      });
+
+      const result = resolveImport(
+        "./config",
+        path.join(project.root, "run.sh"),
+        project.root,
+        project.fileSet,
+        "shell",
+      );
+
+      expect(result).toBeNull();
+    });
+
+    it("does not resolve a `..` that cancels a named segment", () => {
+      project = createTempProject({
+        "scripts/run.sh": "",
+        "scripts/lib.sh": "",
+      });
+
+      // Each of these normalises onto scripts/lib.sh, a file the script never
+      // names. The first needs no shell syntax at all — the segment simply does
+      // not exist, which the shell discovers by walking components.
+      for (const specifier of ["./nosuchdir/../lib.sh", "./$DIR/../lib.sh", "./*/../lib.sh"]) {
+        const result = resolveImport(
+          specifier,
+          path.join(project.root, "scripts/run.sh"),
+          project.root,
+          project.fileSet,
+          "shell",
+        );
+
+        expect(result, specifier).toBeNull();
+      }
+    });
+
+    it("does not normalise a directory-shaped specifier onto the same-named file", () => {
+      project = createTempProject({
+        "run.sh": "",
+        "lib.sh": "",
+      });
+
+      for (const specifier of ["./lib.sh/", "./lib.sh/."]) {
+        const result = resolveImport(
+          specifier,
+          path.join(project.root, "run.sh"),
+          project.root,
+          project.fileSet,
+          "shell",
+        );
+
+        expect(result, specifier).toBeNull();
+      }
+    });
+
+    // Asserted on the predicate rather than through resolveImport because the
+    // backslash screen only alters resolution on win32: `path.resolve` treats `\`
+    // as a separator there, while on POSIX it is an ordinary character and such a
+    // specifier misses the file set either way.
+    it("screens non-literal shapes and admits literal ones", () => {
+      for (const specifier of ["./x\\..\\lib.sh", "./x/../lib.sh", "./lib.sh/", "./lib.sh/.", "./a b/lib.sh"]) {
+        expect(hasLiteralShellPathShape(specifier), specifier).toBe(false);
+      }
+
+      for (const specifier of ["./lib.sh", "../lib.sh", "../../lib.sh", ".//../lib.sh", "./lib/My_helper-2.sh"]) {
+        expect(hasLiteralShellPathShape(specifier), specifier).toBe(true);
+      }
+    });
+
+    it("does not resolve a specifier containing whitespace", () => {
+      project = createTempProject({
+        "run.sh": "",
+        "lib.sh": "",
+        "dir name/lib.sh": "",
+      });
+
+      // The captured specifier is the whole argument list, so any whitespace-class
+      // character disqualifies it: unquoted, the shell word-splits and loads
+      // nothing; quoted, it is not a bare path.
+      for (const specifier of ["./dir name/lib.sh", "./lib.sh --verbose"]) {
+        const result = resolveImport(
+          specifier,
+          path.join(project.root, "run.sh"),
+          project.root,
+          project.fileSet,
+          "shell",
+        );
+
+        expect(result, specifier).toBeNull();
+      }
     });
   });
 

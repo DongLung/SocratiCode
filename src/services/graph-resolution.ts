@@ -332,6 +332,13 @@ function findGoModFiles(projectPath: string): string[] {
 /**
  * Resolve a module specifier to a relative file path within the project.
  * Returns null if the module is external (e.g., npm package, stdlib).
+ *
+ * `language` is a display label as produced by `getLanguageFromExtension`
+ * (e.g. "shell", "typescript") — that is what `buildCodeGraph` passes. "bash"
+ * has its own case below as a synonym for "shell". The capitalised `Lang`
+ * grammar names ("JavaScript", "TypeScript", "Tsx", "Html", "Css") match no
+ * case. Not every display label has one either, so a switch miss is always
+ * possible, and it returns the same null an external module does.
  */
 export function resolveImport(
   moduleSpecifier: string,
@@ -605,12 +612,21 @@ export function resolveImport(
       return null;
     }
 
+    case "shell":
     case "bash": {
-      // source ./script.sh
-      if (moduleSpecifier.startsWith("./") || moduleSpecifier.startsWith("../")) {
-        return resolveRelativePath(moduleSpecifier, sourceDir, projectPath, fileSet, [".sh", ".bash"]);
-      }
-      return null;
+      // `source ./script.sh` / `. ./script.sh` (see extractImports). Shell
+      // resolves the argument against the run-time cwd, so nothing here is
+      // exact; an explicit ./ or ../ is assumed script-relative by convention,
+      // which is the only form worth guessing. Anything else stays unresolved:
+      // a bare `source lib.sh` searches PATH and then the run-time cwd when bash
+      // is not in POSIX mode, and `source lib/x.sh` is cwd-relative too but
+      // carries no ./ to invoke that convention.
+      if (!moduleSpecifier.startsWith("./") && !moduleSpecifier.startsWith("../")) return null;
+      if (!hasLiteralShellPathShape(moduleSpecifier)) return null;
+
+      // No candidate extensions — shell loads the literal path, with no
+      // extension search.
+      return resolveRelativePath(moduleSpecifier, sourceDir, projectPath, fileSet, []);
     }
 
     case "dart": {
@@ -703,6 +719,46 @@ function resolveAliasPath(
     }
   }
   return null;
+}
+
+/**
+ * Whether a shell `source` specifier has the shape of a literal path. This reads
+ * the text only — a well-shaped specifier naming a file that does not exist is
+ * still true here, and fails later at the file-set lookup.
+ *
+ * None of the shapes below can be told apart from a literal path here, and each
+ * has to be screened before resolution rather than after, because normalising
+ * them lands on a file the shell would not open — and a match there is the
+ * failure being prevented rather than a salvage:
+ *
+ * - extractImports captures the whole argument list, so any whitespace-class
+ *   character means the text cannot be told apart from a word list or a path
+ *   still carrying its quotes. Bash splits on fewer of them than `\s` matches —
+ *   its default IFS is space, tab and newline — but skipping all of them errs
+ *   toward dropping an edge rather than inventing one.
+ * - A backslash is a shell escape and never a separator, so the unescaped path
+ *   is unknowable here; `path.resolve` treats it as a separator on win32, which
+ *   would cancel `./x\..\lib.sh` down to a file the script never names.
+ * - A trailing `/` or `/.` names a directory, which cannot be sourced, and
+ *   normalisation would drop that trailing segment, landing on the same-named
+ *   file.
+ * - A `..` following a named segment cancels it lexically during normalisation,
+ *   so `./x/../lib.sh` lands on lib.sh beside the script. The shell walks
+ *   components instead and loads nothing when `x` is absent or is not a
+ *   directory. Only a leading run of `.`/`..` anchors, and an empty segment from
+ *   `//` does not end that run.
+ *
+ * These screen the raw captured text, so a change that honours quoting and
+ * strips arguments has to unquote and split upstream of here.
+ */
+export function hasLiteralShellPathShape(specifier: string): boolean {
+  if (/\s/.test(specifier) || specifier.includes("\\")) return false;
+  if (specifier.endsWith("/") || specifier.endsWith("/.")) return false;
+  const segments = specifier.split("/");
+  const firstNamedIndex = segments.findIndex((s) => s !== "" && s !== "." && s !== "..");
+  // The index check is not redundant: a negative `fromIndex` counts back from
+  // the end, so dropping it would search only the last segment.
+  return firstNamedIndex === -1 || !segments.includes("..", firstNamedIndex);
 }
 
 /** Resolve a potentially extensionless path to an actual file */

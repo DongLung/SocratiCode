@@ -20,6 +20,10 @@ describe("buildCodeGraph node language", () => {
   beforeAll(() => {
     vi.stubEnv("INDEX_EXTENSIONLESS", "1"); // deterministic: content detection on
     ensureDynamicLanguages();
+    // Every fixture here is shared by all tests below, some of which assert an
+    // exact `progress.filesSkipped`. Adding a file that skips breaks those, not
+    // just your own — oversized, unreadable, or extensionless content that
+    // detects a grammar on the 8 KB head but not on the full read.
     fixture = createFixtureProject("node-language");
     addFileToFixture(fixture.root, "scripts/deploy", "#!/bin/bash\necho deploying\n");
 
@@ -34,6 +38,18 @@ describe("buildCodeGraph node language", () => {
     addFileToFixture(fixture.root, "zzz_target", oversizedPy());
     addFileToFixture(fixture.root, "aaa_target", oversizedPy());
     addFileToFixture(fixture.root, "zzz_import.py", "import aaa_target\n");
+
+    // Fixture pair for the shell source-directive edge. The unit tests in
+    // graph-resolution.test.ts call resolveImport directly, so only a full
+    // buildCodeGraph run pins the language label that reaches it.
+    addFileToFixture(fixture.root, "a.sh", "source ./b.sh\n");
+    addFileToFixture(fixture.root, "b.sh", "#!/bin/bash\necho hi\n");
+
+    // Literal resolution is the only path shell has, so an extensionless target
+    // must match on its own relative path. This pair carries its own target so
+    // neither test's target picks up a dependent belonging to the other.
+    addFileToFixture(fixture.root, "scripts/setup", "#!/bin/bash\necho setting up\n");
+    addFileToFixture(fixture.root, "scripts/run.sh", "source ./setup\n");
   });
 
   afterAll(() => {
@@ -74,5 +90,17 @@ describe("buildCodeGraph node language", () => {
     expect(target).toBeDefined();
     expect(target?.language).toBe("python");
     expect(progress.filesSkipped).toBe(2);
+  });
+
+  it("resolves a shell source directive to a graph edge", async () => {
+    const graph = await buildCodeGraph(fixture.root);
+    expect(graph.edges.some((e) => e.source === "a.sh" && e.target === "b.sh")).toBe(true);
+  });
+
+  it("resolves a shell source directive naming an extensionless target", async () => {
+    const graph = await buildCodeGraph(fixture.root);
+    expect(
+      graph.edges.some((e) => e.source === "scripts/run.sh" && e.target === "scripts/setup"),
+    ).toBe(true);
   });
 });
