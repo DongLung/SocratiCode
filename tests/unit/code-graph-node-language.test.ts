@@ -50,6 +50,15 @@ describe("buildCodeGraph node language", () => {
     // neither test's target picks up a dependent belonging to the other.
     addFileToFixture(fixture.root, "scripts/setup", "#!/bin/bash\necho setting up\n");
     addFileToFixture(fixture.root, "scripts/run.sh", "source ./setup\n");
+
+    // Stylus is graphed through the CSS grammar, so a .styl file is parsed and
+    // its @require edges resolve; the node carries the Stylus label. Both are
+    // small and grammar-bearing, so neither adds to `progress.filesSkipped`.
+    // The @require deliberately omits the extension: resolveRelativePath tries a
+    // direct fileSet match first, so spelling it "./base.styl" would resolve on
+    // that and never reach the extension-append loop that consults `.styl`.
+    addFileToFixture(fixture.root, "theme.styl", '@require "./base"\n');
+    addFileToFixture(fixture.root, "base.styl", ".btn { color: red; }\n");
   });
 
   afterAll(() => {
@@ -102,5 +111,16 @@ describe("buildCodeGraph node language", () => {
     expect(
       graph.edges.some((e) => e.source === "scripts/run.sh" && e.target === "scripts/setup"),
     ).toBe(true);
+  });
+
+  it("labels .styl nodes stylus", async () => {
+    const graph = await buildCodeGraph(fixture.root);
+    expect(graph.nodes.find((n) => n.relativePath === "theme.styl")?.language).toBe("stylus");
+    expect(graph.nodes.find((n) => n.relativePath === "base.styl")?.language).toBe("stylus");
+  });
+
+  it("resolves @require edges between .styl files", async () => {
+    const graph = await buildCodeGraph(fixture.root);
+    expect(graph.edges.some((e) => e.source === "theme.styl" && e.target === "base.styl")).toBe(true);
   });
 });
