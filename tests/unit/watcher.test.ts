@@ -71,6 +71,7 @@ vi.mock("../../src/services/lock.js", () => ({
   isProjectLocked: (...args: unknown[]) => mockIsProjectLocked(...(args as [string, string])),
 }));
 
+import { DETECT_HEAD_BYTES } from "../../src/constants.js";
 import { shouldIgnore } from "../../src/services/ignore.js";
 import { logger } from "../../src/services/logger.js";
 // Import after mocks
@@ -756,6 +757,24 @@ describe("watcher isIndexableFile — extensionless", () => {
   it("ignores a readable non-code extensionless file", async () => {
     const p = path.join(dir, "LICENSE");
     fs.writeFileSync(p, "MIT License\n\nCopyright (c) 2026\n");
+    expect(await isIndexableFile(p)).toBe(false);
+  });
+
+  it("scores lossily-decoded content on the same window discovery uses", async () => {
+    // Latin-1 bytes each re-encode to three, so markers sitting past
+    // DETECT_HEAD_BYTES / 3 characters are outside the shared window. Scoring the
+    // raw head instead would call this code and schedule an update for a file
+    // discovery will not admit — this check's answer decides whether an edit is
+    // scheduled at all, so it has to agree with discovery.
+    const p = path.join(dir, "deploy-latin1");
+    fs.writeFileSync(
+      p,
+      Buffer.concat([
+        Buffer.from("# "),
+        Buffer.alloc(Math.ceil(DETECT_HEAD_BYTES / 3) + 100, 0xe9),
+        Buffer.from("\nif [ -d /tmp ]; then\n  export PATH=/bin\nfi\n"),
+      ]),
+    );
     expect(await isIndexableFile(p)).toBe(false);
   });
 
