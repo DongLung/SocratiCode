@@ -292,7 +292,7 @@ When `SOCRATICODE_BRANCH_AWARE=true`, the current git branch is detected via `gi
 
 `loadLinkedProjects()` reads `.socraticode.json` and `SOCRATICODE_LINKED_PROJECTS` env var. `resolveLinkedCollections()` maps linked paths to `{ name, label }` descriptors for `searchMultipleCollections()`. The current project is always first (highest dedup priority).
 
-### Supported File Extensions (54)
+### Supported File Extensions (55)
 
 | Category | Extensions |
 |----------|-----------|
@@ -307,7 +307,7 @@ When `SOCRATICODE_BRANCH_AWARE=true`, the current git branch is detected via `gi
 | PHP | `.php` |
 | Swift | `.swift` |
 | Shell | `.sh`, `.bash`, `.zsh` |
-| Web | `.html`, `.htm`, `.css`, `.scss`, `.sass`, `.less`, `.vue`, `.svelte` |
+| Web | `.html`, `.htm`, `.css`, `.scss`, `.sass`, `.less`, `.styl`, `.vue`, `.svelte` |
 | Config | `.json`, `.yaml`, `.yml`, `.toml`, `.xml`, `.ini`, `.cfg` |
 | Documentation | `.md`, `.mdx`, `.rst`, `.txt` |
 | SQL | `.sql` |

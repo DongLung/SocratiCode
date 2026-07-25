@@ -983,13 +983,13 @@ Dart: symbols (classes, mixins, enums, extensions, typedefs, functions, getters,
 
 ### Code Graph via Regex + Indexing
 
-Lua (require/dofile/loadfile), SASS, LESS (CSS `@import` extraction)
+Lua (require/dofile/loadfile), SASS, LESS, Stylus (CSS `@import`/`@require` extraction)
 
 ### Indexing Only (hybrid search, line-based chunking)
 
 JSON, YAML, TOML, XML, INI/CFG, Markdown/MDX, RST, SQL, R, Dockerfile, TXT, and any file matching a supported extension or special filename (Dockerfile, Makefile, Gemfile, Rakefile, etc.)
 
-**54 file extensions** + 8 special filenames supported out of the box.
+**55 file extensions** + 8 special filenames supported out of the box.
 
 Extensionless files (Unix scripts, health probes, sourced libraries) are also indexed via content-based language detection when `INDEX_EXTENSIONLESS` is enabled (the default) — see that environment variable below.
 

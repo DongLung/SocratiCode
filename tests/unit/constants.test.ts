@@ -177,6 +177,7 @@ describe("constants", () => {
       expect(SUPPORTED_EXTENSIONS.has(".html")).toBe(true);
       expect(SUPPORTED_EXTENSIONS.has(".css")).toBe(true);
       expect(SUPPORTED_EXTENSIONS.has(".scss")).toBe(true);
+      expect(SUPPORTED_EXTENSIONS.has(".styl")).toBe(true);
       expect(SUPPORTED_EXTENSIONS.has(".vue")).toBe(true);
       expect(SUPPORTED_EXTENSIONS.has(".svelte")).toBe(true);
     });

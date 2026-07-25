@@ -94,6 +94,7 @@ describe("indexer utilities", () => {
       expect(isIndexableFile("main.py")).toBe(true);
       expect(isIndexableFile("index.js")).toBe(true);
       expect(isIndexableFile("styles.css")).toBe(true);
+      expect(isIndexableFile("theme.styl")).toBe(true);
       expect(isIndexableFile("data.json")).toBe(true);
       expect(isIndexableFile("readme.md")).toBe(true);
     });

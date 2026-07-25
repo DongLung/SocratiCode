@@ -220,7 +220,7 @@ export const SUPPORTED_EXTENSIONS = new Set([
   // Shell
   ".sh", ".bash", ".zsh",
   // Web
-  ".html", ".htm", ".css", ".scss", ".sass", ".less", ".vue", ".svelte",
+  ".html", ".htm", ".css", ".scss", ".sass", ".less", ".styl", ".vue", ".svelte",
   // Config/Data
   ".json", ".yaml", ".yml", ".toml", ".xml", ".ini", ".cfg",
   // Docs
