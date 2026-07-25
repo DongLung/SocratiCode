@@ -47,6 +47,40 @@ export async function readFileHead(absolutePath: string, maxBytes = DETECT_HEAD_
 }
 
 /**
+ * Detect the canonical extension of source text already held in memory, scoring
+ * the same window {@link readFileHead} reads from disk: the first
+ * {@link DETECT_HEAD_BYTES} **bytes** of UTF-8, not characters.
+ *
+ * The byte window is load-bearing, not incidental. `detectExtensionlessExtension`
+ * counts pattern hits, so a larger window can change its answer; a character
+ * slice of a file with multibyte text near the top would cover more content than
+ * the disk head and could disagree about identical bytes. Re-encoding keeps the
+ * two answers comparable — including at the boundary, where each decodes a
+ * character split by the cut to U+FFFD.
+ *
+ * Content that was lossily decoded — invalid UTF-8 replaced by U+FFFD — re-encodes
+ * to at least as many bytes as it came from, three per U+FFFD, so it scores a
+ * window no longer than the raw file's. A decoded string cannot recover the bytes
+ * it came from, so the in-memory and on-disk sides cannot be made to score the
+ * same span of such a file; the disk-side resolver routes through this helper so
+ * both settle on the narrower window instead of disagreeing. The window is
+ * therefore about {@link DETECT_HEAD_BYTES} / 3 characters for wholly lossy
+ * content, and a latin-1 file whose only code markers sit past that point reads as
+ * "not code" wherever this window is scored.
+ *
+ * The leading character slice only bounds the allocation, keeping a whole-file
+ * encode off this path: the first N characters always encode to at least N
+ * bytes, so slicing to N characters cannot drop anything inside the N-byte
+ * window.
+ */
+export function detectExtensionFromSource(source: string): string | null {
+  const head = Buffer.from(source.slice(0, DETECT_HEAD_BYTES), "utf-8")
+    .subarray(0, DETECT_HEAD_BYTES)
+    .toString("utf-8");
+  return detectExtensionlessExtension(head);
+}
+
+/**
  * Like {@link resolveExtensionlessExtension} but **throws** on a read/stat
  * failure instead of collapsing it to `null`, so a caller that must not conflate
  * "unreadable" with "not code" can tell them apart — e.g. the incremental
@@ -68,7 +102,7 @@ export async function resolveExtensionlessExtensionStrict(absolutePath: string):
   // files (the watcher's isIndexableFile guards the same way).
   const stats = await fsp.lstat(absolutePath);
   if (!stats.isFile()) return null;
-  return detectExtensionlessExtension(await readFileHead(absolutePath));
+  return detectExtensionFromSource(await readFileHead(absolutePath));
 }
 
 /**

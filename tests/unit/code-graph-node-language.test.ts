@@ -16,6 +16,19 @@ describe("buildCodeGraph node language", () => {
     ensureDynamicLanguages();
     fixture = createFixtureProject("node-language");
     addFileToFixture(fixture.root, "scripts/deploy", "#!/bin/bash\necho deploying\n");
+
+    // An oversized (>1 MB) extensionless Python script that another module
+    // imports. It is admitted by discovery (which reads only the 8 KB head),
+    // then skipped at the size guard — so its only node is the placeholder its
+    // importer creates, which must still carry the detected language.
+    // Two pairs cover both processing orders under the sorted walk:
+    // aaa_import.py runs before zzz_target (importer first), and aaa_target
+    // runs before zzz_import.py (target first).
+    const oversizedScript = `def configure(conf):\n    return 1\n${"# pad\n".repeat(170_000)}`;
+    addFileToFixture(fixture.root, "aaa_import.py", "import zzz_target\n");
+    addFileToFixture(fixture.root, "zzz_target", oversizedScript);
+    addFileToFixture(fixture.root, "aaa_target", oversizedScript);
+    addFileToFixture(fixture.root, "zzz_import.py", "import aaa_target\n");
   });
 
   afterAll(() => {
@@ -35,5 +48,19 @@ describe("buildCodeGraph node language", () => {
     const graph = await buildCodeGraph(fixture.root);
     const index = graph.nodes.find((n) => n.relativePath === "src/index.ts");
     expect(index?.language).toBe("typescript");
+  });
+
+  it("labels an oversized extensionless import target by detected language (importer first)", async () => {
+    const graph = await buildCodeGraph(fixture.root);
+    const target = graph.nodes.find((n) => n.relativePath === "zzz_target");
+    expect(target).toBeDefined();
+    expect(target?.language).toBe("python");
+  });
+
+  it("labels an oversized extensionless import target by detected language (target first)", async () => {
+    const graph = await buildCodeGraph(fixture.root);
+    const target = graph.nodes.find((n) => n.relativePath === "aaa_target");
+    expect(target).toBeDefined();
+    expect(target?.language).toBe("python");
   });
 });

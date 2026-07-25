@@ -389,3 +389,13 @@ export function removeFixtureFile(projectRoot: string, relativePath: string): vo
     fs.unlinkSync(fullPath);
   }
 }
+
+// ── Graph-build fixtures ─────────────────────────────────────────────────
+
+/**
+ * Whether this environment can observe a permission-denied read. Root bypasses
+ * mode bits, and Windows does not enforce them the same way, so tests that chmod
+ * a file or directory to 000 have nothing to assert on either.
+ */
+export const canTestPermissionDenied =
+  process.platform !== "win32" && process.getuid?.() !== 0;

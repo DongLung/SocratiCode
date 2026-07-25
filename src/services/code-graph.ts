@@ -11,7 +11,7 @@ import type {
   CodeGraph, CodeGraphEdge, CodeGraphNode,
   SymbolEdge, SymbolGraphFilePayload, SymbolGraphMeta, SymbolNode, SymbolRef,
 } from "../types.js";
-import { resolveExtensionlessExtension } from "./extensionless.js";
+import { detectExtensionFromSource, resolveExtensionlessExtension } from "./extensionless.js";
 import { loadPathAliases } from "./graph-aliases.js";
 import { extractImports } from "./graph-imports.js";
 import { buildCsNamespaceMap, buildGoModuleInfo, buildJvmSuffixMap, resolveImport } from "./graph-resolution.js";
@@ -593,16 +593,30 @@ export function getAstGrepLang(
 // ── Graph building ───────────────────────────────────────────────────────
 
 /**
- * Get all source files in a project for graph analysis.
- * Includes files with known AST grammars and any extra extensions.
+ * Get all source files in a project for graph analysis, with the detected
+ * extension of every extensionless file admitted by content detection.
+ *
+ * Includes files with known AST grammars and any extra extensions. Extensionless
+ * files are head-read here to decide admission, and the extension that decision
+ * used is returned in `detectedExts` so the build pass can reuse it instead of
+ * reading the head again.
+ *
+ * `files` is sorted lexicographically. Node documents no readdir ordering, and a
+ * depth-first walk additionally interleaves a directory's contents with the
+ * sibling entries that sort after it — `a/x.ts` is yielded before `a.ts`.
+ * Processing order determines node insertion order, and `buildJvmSuffixMap`'s
+ * first-match-wins tie-break for duplicate class paths reads the set in that
+ * order directly (`buildCsNamespaceMap` and `buildGoModuleInfo` sort their own
+ * filtered views instead). Normalize here rather than leaving it to the traversal.
  */
 export async function getGraphableFiles(
   projectPath: string,
   extraExts?: Set<string>,
-): Promise<string[]> {
+): Promise<{ files: string[]; detectedExts: Map<string, string> }> {
   const ig = createIgnoreFilter(projectPath);
   const extras = extraExts ?? EXTRA_EXTENSIONS;
   const files: string[] = [];
+  const detectedExts = new Map<string, string>();
   // Match getIndexableFiles' dotfile policy (glob dot:false by default) so the
   // graph and the index admit the same extensionless *dotfiles* — otherwise a
   // dot-named file like .bashrc/.profile would be graphed but never indexed
@@ -641,6 +655,7 @@ export async function getGraphableFiles(
           const detected = await resolveExtensionlessExtension(fullPath);
           if (detected && getAstGrepLang(detected) !== null) {
             files.push(relPath);
+            detectedExts.set(relPath, detected);
           }
         }
       }
@@ -648,7 +663,8 @@ export async function getGraphableFiles(
   }
 
   await walk(projectPath);
-  return files;
+  files.sort();
+  return { files, detectedExts };
 }
 
 /**
@@ -671,7 +687,7 @@ export async function buildCodeGraph(
 
   const resolvedPath = path.resolve(projectPath);
   const aliases = await loadPathAliases(resolvedPath);
-  const files = await getGraphableFiles(resolvedPath, extraExtensions);
+  const { files, detectedExts } = await getGraphableFiles(resolvedPath, extraExtensions);
   const fileSet = new Set(files);
 
   if (progress) {
@@ -717,18 +733,17 @@ export async function buildCodeGraph(
   for (const relPath of files) {
     let ext = path.extname(relPath).toLowerCase();
     let lang = getAstGrepLang(ext);
+    const wasExtensionless = ext === "";
 
-    // Extensionless entries were admitted by getGraphableFiles only when
-    // detection yields a grammar-bearing extension, but it admits by path and
-    // does not carry the detected extension forward — so re-detect here to
-    // recover ext/lang.
-    if (!lang && ext === "") {
-      const detected = await resolveExtensionlessExtension(path.join(resolvedPath, relPath));
+    // Extensionless entries carry the extension discovery detected when it
+    // head-read them to decide admission; reuse it so the file clears the
+    // grammar-less-leaf gate below without a second head-read — without it an
+    // extensionless file would become a leaf node instead of being parsed. What it
+    // is actually parsed as comes from the re-detection on the read bytes further
+    // down, which supersedes this one.
+    if (!lang && wasExtensionless) {
+      const detected = detectedExts.get(relPath);
       const detectedLang = detected ? getAstGrepLang(detected) : null;
-      // getGraphableFiles admits an extensionless entry only when detection
-      // yields a grammar-bearing extension. If the content changed since
-      // discovery (TOCTOU) so it no longer does — null, or a grammar-less
-      // `.txt` — skip it rather than adding a spurious grammar-less leaf node.
       if (!detected || !detectedLang) continue;
       ext = detected;
       lang = detectedLang;
@@ -753,7 +768,6 @@ export async function buildCodeGraph(
       continue;
     }
 
-    const language = getLanguageFromExtension(ext);
     const absolutePath = path.join(resolvedPath, relPath);
 
     let source: string;
@@ -764,6 +778,23 @@ export async function buildCodeGraph(
     } catch {
       continue;
     }
+
+    // Detection ran on a head-read during discovery, so content may have changed
+    // before this read. Re-detect on the bytes about to be parsed and parse under
+    // the grammar those bytes call for: the fresh answer describes what is in
+    // hand, so it supersedes discovery's rather than being compared to it. Only
+    // content that no longer detects as a grammar-bearing language has nothing to
+    // parse with, and that is the skip — labelling it from the stale detection
+    // would write junk imports and symbols into the graph.
+    if (wasExtensionless) {
+      const redetected = detectExtensionFromSource(source);
+      const redetectedLang = redetected ? getAstGrepLang(redetected) : null;
+      if (!redetected || !redetectedLang) continue;
+      ext = redetected;
+      lang = redetectedLang;
+    }
+
+    const language = getLanguageFromExtension(ext);
 
     // Create node for this file
     if (!nodesMap.has(relPath)) {
@@ -810,6 +841,10 @@ export async function buildCodeGraph(
 
         // Ensure target node exists
         if (!nodesMap.has(resolved)) {
+          // A target may be skipped when its own turn comes and so never build
+          // its own node; carry the discovery-detected language here, since the
+          // path alone would report an extensionless script as plaintext.
+          const targetExt = detectedExts.get(resolved);
           nodesMap.set(resolved, {
             filePath: path.join(resolvedPath, resolved),
             relativePath: resolved,
@@ -817,6 +852,7 @@ export async function buildCodeGraph(
             exports: [],
             dependencies: [],
             dependents: [],
+            language: targetExt ? getLanguageFromExtension(targetExt) : undefined,
           });
         }
         nodesMap.get(resolved)?.dependents.push(relPath);
