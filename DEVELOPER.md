@@ -456,12 +456,20 @@ When `codebase_graph_build` is called:
 1. BACKGROUND EXECUTION (fire-and-forget)
    ├── Tool returns immediately with "build started" message
    ├── Actual build runs asynchronously on the event loop
-   ├── Progress tracked via GraphBuildProgress { filesTotal, filesProcessed, phase }
+   ├── Progress tracked via GraphBuildProgress { filesTotal, filesProcessed, filesSkipped, phase }
    └── Client polls codebase_graph_status for progress %
 
 2. FILE DISCOVERY (phase: "scanning files")
    ├── Get graphable files from project (same ignore filters as indexing)
-   └── Include files with AST-grep grammar + files with extra extensions
+   ├── Include files with AST-grep grammar + files with extra extensions
+   ├── Extensionless files: admitted only when content detection on the first
+   │   8 KB yields a grammar-bearing extension; that extension is returned
+   │   alongside the path so the parse step need not head-read them again
+   └── Sort the file list lexicographically — Node documents no readdir ordering,
+       and a depth-first walk additionally interleaves a directory's contents with
+       the sibling entries that sort after it (a/x.ts before a.ts), while
+       processing order drives node insertion order and the JVM suffix map's
+       duplicate-class tie-break
 
 3. PARSE IMPORTS (phase: "analyzing imports", per file, via ast-grep)
    ├── Determine AST-grep language from file extension
@@ -486,6 +494,21 @@ When `codebase_graph_build` is called:
    │   └── CSS/SCSS/SASS/LESS: @import/@import url()/@require regex extraction
    ├── Tag CSS imports with isCssImport flag (for correct resolution extensions)
    ├── Update progress: filesProcessed++
+   ├── Extensionless files are re-detected on the bytes about to be parsed and
+   │   parsed under the grammar those bytes call for, so content that changed
+   │   since discovery is followed rather than dropped
+   ├── Skipped files count toward filesProcessed too and increment filesSkipped,
+   │   with the reason logged at debug and a per-reason breakdown in the
+   │   "Code graph built" log: oversized (> MAX_GRAPH_FILE_BYTES), vanished
+   │   (ENOENT between discovery and read), read-failed (any other fault, e.g.
+   │   EACCES/EIO/EMFILE), content-changed (extensionless only: re-detection on
+   │   the parsed bytes no longer yields a grammar-bearing language, so there is
+   │   no grammar to parse it with). A skipped file builds no node of its own and
+   │   contributes no outgoing edges; if another file imports it, the importer's
+   │   placeholder node still represents it — labelled by the discovery-detected
+   │   language when the target was extensionless, and left unlabelled otherwise
+   │   so nodeLanguage() derives it from the path, since detectedExts holds no
+   │   entry for an extensioned file.
    └── Return ImportInfo[] with module specifiers
 
 4. RESOLVE IMPORTS
@@ -1164,8 +1187,8 @@ Parameters:
   projectPath?: string  — Absolute path (defaults to cwd)
 
 Returns:
-  If build in progress: Status BUILDING with phase, progress %, elapsed time
-  If ready: Status READY with node/edge count, last built time, cache status, last build duration
+  If build in progress: Status BUILDING with phase, progress % (and a skipped count when non-zero), elapsed time
+  If ready: Status READY with node/edge count, last built time, cache status, last build duration, and files skipped when non-zero
   If not found: Instructions to build
 ```
 
