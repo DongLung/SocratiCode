@@ -2,18 +2,20 @@
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import fs from "node:fs";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { projectIdFromPath } from "../../src/config.js";
 import {
   invalidateGraphCache,
   rebuildGraph,
 } from "../../src/services/code-graph.js";
+import { logger } from "../../src/services/logger.js";
 import { updateChangedFilesSymbolGraph } from "../../src/services/symbol-graph-incremental.js";
 import {
   loadFilePayload,
   loadSymbolGraphMeta,
 } from "../../src/services/symbol-graph-store.js";
 import {
+  canTestPermissionDenied,
   createFixtureProject,
   type FixtureProject,
   isDockerAvailable,
@@ -318,7 +320,7 @@ describe.skipIf(!dockerAvailable)(
       }
     });
 
-    it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    it.skipIf(!canTestPermissionDenied)(
       "keeps a changed extensionless file's payload when its head-read fails transiently",
       async () => {
         const rel = "ro/probe";
@@ -352,6 +354,51 @@ describe.skipIf(!dockerAvailable)(
           }
           try {
             fs.rmSync(path.join(fixture.root, "ro"), { recursive: true, force: true });
+          } catch {
+            /* ignore */
+          }
+        }
+      },
+    );
+
+    it.skipIf(!canTestPermissionDenied)(
+      "logs a transient read failure for a changed extensioned file and keeps its payload",
+      async () => {
+        const rel = "ro2/probe.py";
+        const abs = path.join(fixture.root, rel);
+        fs.mkdirSync(path.dirname(abs), { recursive: true });
+        fs.writeFileSync(abs, "def a():\n    return b()\n\ndef b():\n    return 1\n", "utf-8");
+        const debugSpy = vi.spyOn(logger, "debug");
+        try {
+          await rebuildGraph(fixture.root);
+          const before = await loadFilePayload(projectId, rel);
+          expect((before?.symbols ?? []).map((s) => s.name)).toContain("a");
+
+          fs.chmodSync(abs, 0o000);
+          const graph = await rebuildGraph(fixture.root, { skipSymbolGraph: true });
+          const result = await updateChangedFilesSymbolGraph(projectId, fixture.root, graph, [rel], []);
+          expect(result.filesRemoved).toBe(0);
+
+          // The payload survives — that is what the continue exists to protect.
+          const after = await loadFilePayload(projectId, rel);
+          expect((after?.symbols ?? []).map((s) => s.name)).toContain("a");
+
+          // The fault is reported, not swallowed. Matched in full because the
+          // extensionless catch above ends in the same "keeping prior symbols
+          // (skipping)" fragment, so a substring match would not tell the two apart.
+          expect(debugSpy).toHaveBeenCalledWith(
+            "Could not read changed file; keeping prior symbols (skipping)",
+            expect.objectContaining({ relPath: rel }),
+          );
+        } finally {
+          debugSpy.mockRestore();
+          try {
+            fs.chmodSync(abs, 0o644);
+          } catch {
+            /* ignore */
+          }
+          try {
+            fs.rmSync(path.join(fixture.root, "ro2"), { recursive: true, force: true });
           } catch {
             /* ignore */
           }

@@ -195,7 +195,18 @@ export async function updateChangedFilesSymbolGraph(
     let source: string;
     try {
       source = await fs.readFile(path.join(projectPath, relPath), "utf-8");
-    } catch {
+    } catch (err) {
+      // ENOENT (deleted between change-detection and read) is an expected skip —
+      // a real delete is reconciled via removedRelPaths. Any other fault
+      // (EACCES/EIO) means we are keeping a now-stale payload for a changed file
+      // we could not read; surface it at debug rather than swallowing it, and
+      // skip without purging so a transient blip cannot drop valid symbols.
+      if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+        logger.debug("Could not read changed file; keeping prior symbols (skipping)", {
+          relPath,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
       continue;
     }
     const language = getLanguageFromExtension(ext) ?? "plaintext";
