@@ -6,6 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { buildCodeGraph, ensureDynamicLanguages, getGraphableFiles } from "../../src/services/code-graph.js";
+import { logger } from "../../src/services/logger.js";
+import { canTestPermissionDenied } from "../helpers/fixtures.js";
 
 // Regression for the whitelist .gitignore discovery fix: a `/*` then `!/src/`
 // pattern ignores everything at the root but re-includes `src/`. The old walk
@@ -168,6 +170,52 @@ describe("getGraphableFiles — depth-first interleaving", () => {
     const { files } = await getGraphableFiles(root);
     expect(files).toEqual(["a.py", "a/x.py"]);
   });
+});
+
+// A directory the walk cannot read takes its whole subtree out of the file list
+// before any of those files has a path to report, so they never reach the build
+// loop's skip accounting. The log is the only trace, which is what this pins.
+describe("getGraphableFiles — unreadable directory", () => {
+  let root: string;
+  let locked: string;
+
+  beforeAll(() => {
+    ensureDynamicLanguages();
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-discovery-eacces-"));
+    fs.writeFileSync(path.join(root, "top.py"), "def a():\n    return 1\n");
+    locked = path.join(root, "locked");
+    fs.mkdirSync(locked, { recursive: true });
+    fs.writeFileSync(path.join(locked, "hidden.py"), "def b():\n    return 2\n");
+  });
+
+  afterAll(() => {
+    try {
+      fs.chmodSync(locked, 0o755);
+      fs.rmSync(root, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
+
+  it.skipIf(!canTestPermissionDenied)(
+    "logs the directory and omits its subtree",
+    async () => {
+      const debug = vi.spyOn(logger, "debug");
+      fs.chmodSync(locked, 0o000);
+      try {
+        const { files } = await getGraphableFiles(root);
+
+        expect(files).toEqual(["top.py"]);
+        expect(debug).toHaveBeenCalledWith(
+          "Could not read directory in graph discovery (subtree omitted)",
+          expect.objectContaining({ dir: "locked", error: expect.stringContaining("EACCES") }),
+        );
+      } finally {
+        fs.chmodSync(locked, 0o755);
+        debug.mockRestore();
+      }
+    },
+  );
 });
 
 // Sorting discovery output also settles buildJvmSuffixMap's tie-break for a class

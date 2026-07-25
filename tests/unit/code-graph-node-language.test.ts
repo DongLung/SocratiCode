@@ -6,7 +6,13 @@ import {
   ensureDynamicLanguages,
   invalidateGraphCache,
 } from "../../src/services/code-graph.js";
-import { addFileToFixture, createFixtureProject, type FixtureProject } from "../helpers/fixtures.js";
+import {
+  addFileToFixture,
+  createFixtureProject,
+  type FixtureProject,
+  freshProgress,
+  oversizedPy,
+} from "../helpers/fixtures.js";
 
 describe("buildCodeGraph node language", () => {
   let fixture: FixtureProject;
@@ -24,10 +30,9 @@ describe("buildCodeGraph node language", () => {
     // Two pairs cover both processing orders under the sorted walk:
     // aaa_import.py runs before zzz_target (importer first), and aaa_target
     // runs before zzz_import.py (target first).
-    const oversizedScript = `def configure(conf):\n    return 1\n${"# pad\n".repeat(170_000)}`;
     addFileToFixture(fixture.root, "aaa_import.py", "import zzz_target\n");
-    addFileToFixture(fixture.root, "zzz_target", oversizedScript);
-    addFileToFixture(fixture.root, "aaa_target", oversizedScript);
+    addFileToFixture(fixture.root, "zzz_target", oversizedPy());
+    addFileToFixture(fixture.root, "aaa_target", oversizedPy());
     addFileToFixture(fixture.root, "zzz_import.py", "import aaa_target\n");
   });
 
@@ -51,16 +56,23 @@ describe("buildCodeGraph node language", () => {
   });
 
   it("labels an oversized extensionless import target by detected language (importer first)", async () => {
-    const graph = await buildCodeGraph(fixture.root);
+    const progress = freshProgress();
+    const graph = await buildCodeGraph(fixture.root, undefined, progress);
     const target = graph.nodes.find((n) => n.relativePath === "zzz_target");
     expect(target).toBeDefined();
     expect(target?.language).toBe("python");
+    // Both padded fixtures must actually exceed MAX_GRAPH_FILE_BYTES, or this and
+    // the test below stop exercising the placeholder branch: a processed file gets
+    // its own node and is labelled python by a different code path.
+    expect(progress.filesSkipped).toBe(2);
   });
 
   it("labels an oversized extensionless import target by detected language (target first)", async () => {
-    const graph = await buildCodeGraph(fixture.root);
+    const progress = freshProgress();
+    const graph = await buildCodeGraph(fixture.root, undefined, progress);
     const target = graph.nodes.find((n) => n.relativePath === "aaa_target");
     expect(target).toBeDefined();
     expect(target?.language).toBe("python");
+    expect(progress.filesSkipped).toBe(2);
   });
 });
