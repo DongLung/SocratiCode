@@ -4,6 +4,29 @@ All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
 
+## [1.9.2](https://github.com/giancarloerra/socraticode/compare/v1.9.1...v1.9.2) (2026-07-28)
+
+### Bug Fixes
+
+* **graph:** carry detected language from discovery into graph build ([e0a77c7](https://github.com/giancarloerra/socraticode/commit/e0a77c7543f64d6dd0b89e193e042ef4e43370e3))
+* **graph:** count and log files skipped during code graph build ([64f466b](https://github.com/giancarloerra/socraticode/commit/64f466b3243b89871f5ed07e09ec1686e57b629d))
+* **graph:** keep a symbol-graph failure recorded across incremental rebuilds ([79034e3](https://github.com/giancarloerra/socraticode/commit/79034e3ad444627f183a22acd4349baad88514d3))
+* **graph:** label extensionless files by detected language in graph stats and visualization ([bcad5d2](https://github.com/giancarloerra/socraticode/commit/bcad5d2e3697465c5a107df164570c40e786f7a5))
+* **graph:** log unreadable files in the incremental symbol-graph update ([874091f](https://github.com/giancarloerra/socraticode/commit/874091f0b2d1872956f8f6f8f9c4be5cb76a71a3))
+* **graph:** pack symbol-graph upserts by bytes and surface persist failures ([1fb7928](https://github.com/giancarloerra/socraticode/commit/1fb7928281fd08a877eb5f0ca8eefffcb5ced0c5)), closes [#89](https://github.com/giancarloerra/socraticode/issues/89)
+* **graph:** preserve a symbol-graph failure across a total build failure too ([4cd0f48](https://github.com/giancarloerra/socraticode/commit/4cd0f488f1b871809f3fdc2bea5454cd78457d40))
+* **graph:** warn on symbol-level tools when the symbol graph failed to persist ([73f2ab6](https://github.com/giancarloerra/socraticode/commit/73f2ab696cfdfac6099b6629946ac7934e937c26)), closes [#89](https://github.com/giancarloerra/socraticode/issues/89)
+* **watcher:** score the extensionless watch check on the shared byte window ([f971504](https://github.com/giancarloerra/socraticode/commit/f971504e1baa10ad8f866d556f6271823f246a2f))
+
+### Documentation
+
+* document graph-build skip accounting and discovery ordering ([61f4cd2](https://github.com/giancarloerra/socraticode/commit/61f4cd2ef5bb98757376e841671af68dd6ce3c50))
+* name doRebuildGraph, not buildCodeGraph, as the symbol-graph error recorder ([0a4f9e0](https://github.com/giancarloerra/socraticode/commit/0a4f9e03d01e0a909f6fd28f4d5ae9af3dea6e35))
+
+### Tests
+
+* **graph:** drop a redundant conditional type; document the abandon-on-oversize choice ([d1d3a6d](https://github.com/giancarloerra/socraticode/commit/d1d3a6d9519dc385ed7d9dfb4b793c4100287d49))
+
 ## [1.9.1](https://github.com/giancarloerra/socraticode/compare/v1.9.0...v1.9.1) (2026-07-24)
 
 ### Bug Fixes
