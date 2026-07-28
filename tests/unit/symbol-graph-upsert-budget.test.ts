@@ -13,7 +13,7 @@ interface CapturedUpsert {
 }
 const upserts: CapturedUpsert[] = [];
 
-const mockUpsert = vi.fn(async (collName: string, body: CapturedUpsert["points"] extends never ? never : { points: CapturedUpsert["points"] }) => {
+const mockUpsert = vi.fn(async (collName: string, body: { points: CapturedUpsert["points"] }) => {
   upserts.push({ collName, points: body.points });
 });
 

@@ -161,6 +161,11 @@ async function upsertWithinBudget(
     const point = points[i];
     const bytes = pointBytes(point);
     if (bytes > QDRANT_MAX_REQUEST_BYTES) {
+      // Deliberately abandon the queued batch rather than flushing it first.
+      // This throw aborts persistSymbolGraph, so the run's metadata is never
+      // written and the symbol graph stays unusable until a later build
+      // rewrites every payload anyway. Flushing here would add points nothing
+      // will read, to a collection already known to be incomplete.
       throw new SymbolGraphPointTooLargeError(describe(i), bytes);
     }
     // Start a new request when this point would push the body over budget, or
