@@ -251,6 +251,14 @@ async function doRebuildGraph(
           error: symbolGraphError,
         });
       }
+    } else {
+      // This build deliberately did not touch the symbol graph (the incremental
+      // watcher path passes skipSymbolGraph), so it has no standing to declare
+      // the symbol graph healthy. Carry any recorded failure forward, or a
+      // single edited file after a failed persist would overwrite the record
+      // with a clean one and hide a still-broken graph. Only the branch above,
+      // an actual successful persist, clears it.
+      symbolGraphError = lastGraphBuildCompleted.get(resolvedPath)?.symbolGraphError;
     }
 
     lastGraphBuildCompleted.set(resolvedPath, {
