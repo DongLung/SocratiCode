@@ -21,6 +21,12 @@ import { createIgnoreFilter, shouldIgnore } from "./ignore.js";
  * found via the standard prefix-based scan (e.g. src/main/java/…).
  *
  * Call this once per graph build and pass the result to resolveImport.
+ *
+ * When two modules provide the same class path, the first one iterated wins, so
+ * `fileSet`'s order decides between them — pass a lexicographically ordered set
+ * (as `buildCodeGraph` does) for a stable pick. Either file resolves the import;
+ * ordering only settles which, so an unordered caller gets a valid map with an
+ * arbitrary winner.
  */
 export function buildJvmSuffixMap(fileSet: Set<string>): Map<string, string> {
   const map = new Map<string, string>();
@@ -93,8 +99,8 @@ export function buildCsNamespaceMap(
   const namespaceRegex =
     /^\s*namespace\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*(?=[;{])/gm;
 
-  // `fileSet` reflects fs.readdir() traversal order, which POSIX does not
-  // guarantee. Sort .cs paths lexically so candidate lists are stable.
+  // Sort .cs paths lexically so `candidates[0]` is deterministic without relying
+  // on how the caller ordered `fileSet` — this map owns its own ordering.
   const csFiles = [...fileSet]
     .filter((f) => path.extname(f).toLowerCase() === ".cs")
     .sort();

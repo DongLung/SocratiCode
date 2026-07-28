@@ -6,11 +6,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DETECT_HEAD_BYTES, detectExtensionlessExtension } from "../../src/constants.js";
 import {
+  detectExtensionFromSource,
   readFileHead,
   resolveExtensionlessExtension,
   resolveExtensionlessExtensionStrict,
 } from "../../src/services/extensionless.js";
+import { canTestPermissionDenied } from "../helpers/fixtures.js";
 
 describe("extensionless I/O helpers", () => {
   let root: string;
@@ -139,7 +142,7 @@ describe("extensionless I/O helpers", () => {
       const p = write("probe", "#!/bin/bash\nexit 0\n");
       expect(await resolveExtensionlessExtensionStrict(p)).toBe(".sh");
     });
-    it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    it.skipIf(!canTestPermissionDenied)(
       "throws on a head-read failure (EACCES), distinct from a stat failure",
       async () => {
         // The stat-failure path is covered above (missing file → lstat throws).
@@ -157,5 +160,72 @@ describe("extensionless I/O helpers", () => {
         }
       },
     );
+  });
+
+  describe("detectExtensionFromSource", () => {
+    it("detects a shebang script", () => {
+      expect(detectExtensionFromSource("#!/bin/bash\nexit 0\n")).toBe(".sh");
+    });
+    it("detects Python by content sniff", () => {
+      expect(detectExtensionFromSource("def configure(conf):\n    return 1\n")).toBe(".py");
+    });
+    it("returns null for prose", () => {
+      expect(detectExtensionFromSource("All rights reserved.\n")).toBeNull();
+    });
+    it("returns null for content containing a NUL byte", () => {
+      expect(detectExtensionFromSource(`abc${String.fromCharCode(0)}def`)).toBeNull();
+    });
+    it("scores an 8192-BYTE head, not an 8192-character one", async () => {
+      // "é" is 1 character but 2 UTF-8 bytes. 5000 of them is 10000 bytes — past
+      // the 8192-byte head — while being only ~5003 characters, so a character
+      // slice would reach the shell markers below and score them.
+      const padding = `# ${"é".repeat(5000)}\n`;
+      const source = `${padding}if [ -d /tmp ]; then\n  export PATH=/bin\nfi\n`;
+
+      // Byte window: the head is all padding, so nothing is detected.
+      expect(detectExtensionFromSource(source)).toBeNull();
+
+      // Sanity check that the markers WOULD score if they were in the window —
+      // otherwise this test would pass for the wrong reason.
+      expect(detectExtensionFromSource("if [ -d /tmp ]; then\n  export PATH=/bin\nfi\n")).toBe(".sh");
+
+      // And in-memory detection agrees with the on-disk reader on the same bytes.
+      const p = write("wide", source);
+      expect(await resolveExtensionlessExtensionStrict(p)).toBeNull();
+    });
+    it("narrows the window for lossily-decoded content, on disk as well as in memory", async () => {
+      // Latin-1 bytes are invalid UTF-8, so each decodes to U+FFFD and re-encodes
+      // to three bytes: a head of them fills the byte window in a third of the
+      // characters, leaving the shell markers after the padding outside it — even
+      // though the whole file fits inside the raw head the disk reader takes.
+      const padBytes = Math.ceil(DETECT_HEAD_BYTES / 3) + 100;
+      const markers = "\nif [ -d /tmp ]; then\n  export PATH=/bin\nfi\n";
+      const latin1 = Buffer.concat([
+        Buffer.from("# "),
+        Buffer.alloc(padBytes, 0xe9),
+        Buffer.from(markers),
+      ]);
+      expect(latin1.length).toBeLessThan(DETECT_HEAD_BYTES);
+      const p = write("latin1", latin1);
+
+      // Scoring the raw decoded head reaches the markers, so the two windows
+      // genuinely diverge here and the assertions below are not a dead fixture.
+      expect(detectExtensionlessExtension(await readFileHead(p))).toBe(".sh");
+
+      // The helper's window stops short of them, and the disk-side resolver routes
+      // through the helper, so both sides answer "not code" rather than disagreeing.
+      expect(detectExtensionFromSource(await readFileHead(p))).toBeNull();
+      expect(await resolveExtensionlessExtensionStrict(p)).toBeNull();
+      expect(detectExtensionFromSource(fs.readFileSync(p, "utf-8"))).toBeNull();
+
+      // Same length, same markers, valid UTF-8: still detected, so it is the lossy
+      // decode that moves the window and not the padding length.
+      const ascii = Buffer.concat([
+        Buffer.from("# "),
+        Buffer.alloc(padBytes, 0x61),
+        Buffer.from(markers),
+      ]);
+      expect(await resolveExtensionlessExtensionStrict(write("ascii", ascii))).toBe(".sh");
+    });
   });
 });

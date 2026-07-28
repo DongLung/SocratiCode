@@ -13,6 +13,7 @@ import { execSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { GraphBuildProgress } from "../../src/services/code-graph.js";
 
 // ── Docker availability ──────────────────────────────────────────────────
 
@@ -389,3 +390,47 @@ export function removeFixtureFile(projectRoot: string, relativePath: string): vo
     fs.unlinkSync(fullPath);
   }
 }
+
+// ── Graph-build fixtures ─────────────────────────────────────────────────
+
+/**
+ * Whether this environment can observe a permission-denied read. Root bypasses
+ * mode bits, and Windows does not enforce them the same way, so tests that chmod
+ * a file or directory to 000 have nothing to assert on either.
+ */
+export const canTestPermissionDenied =
+  process.platform !== "win32" && process.getuid?.() !== 0;
+
+let _oversizedTs: string | undefined;
+let _oversizedPy: string | undefined;
+
+/**
+ * Padding that puts a file over MAX_GRAPH_FILE_BYTES (1_000_000, compared with a
+ * strict `>`), so the graph build skips it at the size guard.
+ *
+ * The byte counts are literal rather than derived from the limit: deriving them
+ * would scale these fixtures with any future increase, and the tests that rely on
+ * the skip assert `filesSkipped`, so a raised limit fails loudly instead of
+ * silently no longer exercising the skip.
+ *
+ * Built on first call and memoised, so the test files that never ask for a
+ * megabyte of padding do not allocate one just by importing this module.
+ */
+export const oversizedTs = (): string => (_oversizedTs ??= "// pad\n".repeat(150_000)); // 1_050_000 bytes
+
+/**
+ * As {@link oversizedTs}, but content-detected as Python so it can stand in for an
+ * extensionless script. The padding is NUL-free on purpose: written to an
+ * extensionless path, discovery head-reads it and rejects anything that looks
+ * binary, so the file would never be admitted.
+ */
+export const oversizedPy = (): string =>
+  (_oversizedPy ??= `def configure(conf):\n    return 1\n${"# pad\n".repeat(170_000)}`); // 1_020_034 bytes
+
+/** A GraphBuildProgress seeded the way `doRebuildGraph` seeds it. */
+export const freshProgress = (): GraphBuildProgress => ({
+  startedAt: Date.now(),
+  filesTotal: 0,
+  filesProcessed: 0,
+  phase: "scanning files",
+});

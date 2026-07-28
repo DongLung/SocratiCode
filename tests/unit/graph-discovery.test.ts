@@ -6,6 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { buildCodeGraph, ensureDynamicLanguages, getGraphableFiles } from "../../src/services/code-graph.js";
+import { logger } from "../../src/services/logger.js";
+import { canTestPermissionDenied } from "../helpers/fixtures.js";
 
 // Regression for the whitelist .gitignore discovery fix: a `/*` then `!/src/`
 // pattern ignores everything at the root but re-includes `src/`. The old walk
@@ -37,7 +39,7 @@ describe("getGraphableFiles — whitelist .gitignore", () => {
   });
 
   it("descends into re-included src/ and discovers its files", async () => {
-    const files = await getGraphableFiles(root);
+    const { files } = await getGraphableFiles(root);
     expect(files).toContain("src/mod.lua");
     // The `/*` pattern still ignores top-level entries that are not re-included.
     expect(files).not.toContain("ignored.lua");
@@ -71,6 +73,9 @@ describe("getGraphableFiles / buildCodeGraph — extensionless", () => {
       path.join(root, ".profile"),
       'set -eu\nif [ -d "$HOME/bin" ]; then\n  export PATH="$HOME/bin"\nfi\n',
     );
+    // Extensioned file: admitted by extension alone, so detection never runs and
+    // it must carry no detectedExts entry.
+    fs.writeFileSync(path.join(root, "mod.py"), "def f():\n    return 1\n");
   });
 
   afterAll(() => {
@@ -82,7 +87,7 @@ describe("getGraphableFiles / buildCodeGraph — extensionless", () => {
   });
 
   it("includes grammar-bearing extensionless files, excludes .txt-detected and non-code", async () => {
-    const files = await getGraphableFiles(root);
+    const { files } = await getGraphableFiles(root);
     expect(files).toContain("wscript");
     expect(files).not.toContain("helper"); // .txt — grammar-less, stays out of graph
     expect(files).not.toContain("NOTICE");
@@ -93,7 +98,7 @@ describe("getGraphableFiles / buildCodeGraph — extensionless", () => {
   it("excludes all extensionless files when INDEX_EXTENSIONLESS=false", async () => {
     vi.stubEnv("INDEX_EXTENSIONLESS", "false");
     try {
-      const files = await getGraphableFiles(root);
+      const { files } = await getGraphableFiles(root);
       expect(files).not.toContain("wscript");
       expect(files).not.toContain("helper");
     } finally {
@@ -104,7 +109,7 @@ describe("getGraphableFiles / buildCodeGraph — extensionless", () => {
   it("includes a detected extensionless dotfile when INCLUDE_DOT_FILES=true", async () => {
     vi.stubEnv("INCLUDE_DOT_FILES", "true");
     try {
-      const files = await getGraphableFiles(root);
+      const { files } = await getGraphableFiles(root);
       expect(files).toContain(".profile"); // shell dotfile now admitted (matches the index)
     } finally {
       vi.unstubAllEnvs();
@@ -116,6 +121,141 @@ describe("getGraphableFiles / buildCodeGraph — extensionless", () => {
     const symbols = graph.symbolsByFile.get("wscript");
     expect(symbols).toBeDefined();
     expect((symbols ?? []).map((s) => s.name)).toEqual(expect.arrayContaining(["configure", "build"]));
+  });
+
+  it("carries the discovery-detected extension for admitted extensionless files", async () => {
+    const { files, detectedExts } = await getGraphableFiles(root);
+    expect(files).toContain("wscript");
+    expect(detectedExts.get("wscript")).toBe(".py");
+    // Extensioned files are admitted by extension, so detection never ran.
+    expect(files).toContain("mod.py");
+    expect(detectedExts.has("mod.py")).toBe(false);
+    // Rejected extensionless files carry no entry either.
+    expect(detectedExts.has("NOTICE")).toBe(false);
+  });
+
+  it("returns files in lexicographic order", async () => {
+    // wscript is written before mod.py above, so this fails on a filesystem that
+    // yields creation order. Where readdir is already sorted it cannot fail —
+    // the interleaving test below is the one that pins the sort on those.
+    const { files } = await getGraphableFiles(root);
+    expect(files).toEqual(["mod.py", "wscript"]);
+  });
+});
+
+// The half of the sort's job that is observable on every filesystem, sorted
+// readdir included: a depth-first walk yields a directory's contents before the
+// sibling entries that sort after it, because "/" (0x2F) sorts after "." (0x2E).
+// So the raw traversal order is not lexicographic even when each readdir is.
+describe("getGraphableFiles — depth-first interleaving", () => {
+  let root: string;
+
+  beforeAll(() => {
+    ensureDynamicLanguages();
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-discovery-order-"));
+    fs.mkdirSync(path.join(root, "a"), { recursive: true });
+    fs.writeFileSync(path.join(root, "a", "x.py"), "def x():\n    return 1\n");
+    fs.writeFileSync(path.join(root, "a.py"), "def y():\n    return 2\n");
+  });
+
+  afterAll(() => {
+    try {
+      fs.rmSync(root, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
+
+  it("puts a.py before a/x.py, the opposite of what the walk yields", async () => {
+    const { files } = await getGraphableFiles(root);
+    expect(files).toEqual(["a.py", "a/x.py"]);
+  });
+});
+
+// A directory the walk cannot read takes its whole subtree out of the file list
+// before any of those files has a path to report, so they never reach the build
+// loop's skip accounting. The log is the only trace, which is what this pins.
+describe("getGraphableFiles — unreadable directory", () => {
+  let root: string;
+  let locked: string;
+
+  beforeAll(() => {
+    ensureDynamicLanguages();
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-discovery-eacces-"));
+    fs.writeFileSync(path.join(root, "top.py"), "def a():\n    return 1\n");
+    locked = path.join(root, "locked");
+    fs.mkdirSync(locked, { recursive: true });
+    fs.writeFileSync(path.join(locked, "hidden.py"), "def b():\n    return 2\n");
+  });
+
+  afterAll(() => {
+    try {
+      fs.chmodSync(locked, 0o755);
+      fs.rmSync(root, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
+
+  it.skipIf(!canTestPermissionDenied)(
+    "logs the directory and omits its subtree",
+    async () => {
+      const debug = vi.spyOn(logger, "debug");
+      fs.chmodSync(locked, 0o000);
+      try {
+        const { files } = await getGraphableFiles(root);
+
+        expect(files).toEqual(["top.py"]);
+        expect(debug).toHaveBeenCalledWith(
+          "Could not read directory in graph discovery (subtree omitted)",
+          expect.objectContaining({ dir: "locked", error: expect.stringContaining("EACCES") }),
+        );
+      } finally {
+        fs.chmodSync(locked, 0o755);
+        debug.mockRestore();
+      }
+    },
+  );
+});
+
+// Sorting discovery output also settles buildJvmSuffixMap's tie-break for a class
+// path that two modules both provide: it keeps the first path it sees, so the
+// winner is the lexicographically first module rather than whichever the walk
+// reached first. "mod-b/…" sorts before "mod/…" ("-" 0x2D < "/" 0x2F) while the
+// walk descends "mod" first, so the two orders disagree on this fixture.
+describe("buildCodeGraph — duplicate JVM class path tie-break", () => {
+  let root: string;
+
+  beforeAll(() => {
+    ensureDynamicLanguages();
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-jvm-tiebreak-"));
+    for (const module of ["mod", "mod-b"]) {
+      const dir = path.join(root, module, "src", "main", "java", "com", "example");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "Foo.java"), "package com.example;\n\npublic class Foo {}\n");
+    }
+    const appDir = path.join(root, "app", "src", "main", "java", "com", "other");
+    fs.mkdirSync(appDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(appDir, "App.java"),
+      "package com.other;\n\nimport com.example.Foo;\n\npublic class App {}\n",
+    );
+  });
+
+  afterAll(() => {
+    try {
+      fs.rmSync(root, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
+
+  it("resolves a duplicated class to the lexicographically first module", async () => {
+    const graph = await buildCodeGraph(root);
+    const app = graph.nodes.find(
+      (n) => n.relativePath === "app/src/main/java/com/other/App.java",
+    );
+    expect(app?.dependencies).toEqual(["mod-b/src/main/java/com/example/Foo.java"]);
   });
 });
 

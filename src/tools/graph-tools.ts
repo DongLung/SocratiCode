@@ -43,8 +43,9 @@ export async function handleGraphTool(
           const pct = progress.filesTotal > 0
             ? ` (${Math.round((progress.filesProcessed / progress.filesTotal) * 100)}%)`
             : "";
+          const skippedNote = progress.filesSkipped ? ` — ${progress.filesSkipped} skipped` : "";
           lines.push(`Phase: ${progress.phase}`);
-          lines.push(`Progress: ${progress.filesProcessed}/${progress.filesTotal} files${pct}`);
+          lines.push(`Progress: ${progress.filesProcessed}/${progress.filesTotal} files${pct}${skippedNote}`);
           lines.push(`Elapsed: ${elapsed}s`);
         }
         lines.push("", "Call codebase_graph_status to check progress.");
@@ -59,6 +60,7 @@ export async function handleGraphTool(
             projectPath: resolved,
             nodes: graph.nodes.length,
             edges: graph.edges.length,
+            filesSkipped: getLastGraphBuildCompleted(resolved)?.filesSkipped ?? 0,
           });
         })
         .catch((err) => {
@@ -272,7 +274,7 @@ export async function handleGraphTool(
           "",
           `Status: BUILDING`,
           `Phase: ${progress.phase}`,
-          `Progress: ${progress.filesProcessed}/${progress.filesTotal} files (${pct}%)`,
+          `Progress: ${progress.filesProcessed}/${progress.filesTotal} files (${pct}%)${progress.filesSkipped ? ` — ${progress.filesSkipped} skipped` : ""}`,
           `Elapsed: ${elapsed}s`,
           ...renderGrammarBlock(),
           "",
@@ -309,6 +311,9 @@ export async function handleGraphTool(
 
       if (lastBuild) {
         lines.push(`Last build duration: ${(lastBuild.durationMs / 1000).toFixed(1)}s`);
+        if (lastBuild.filesSkipped) {
+          lines.push(`Files skipped: ${lastBuild.filesSkipped}`);
+        }
       }
 
       if (graphInfo.symbol) {

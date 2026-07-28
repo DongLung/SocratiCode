@@ -6,14 +6,13 @@ import type { AsyncSubscription, Event } from "@parcel/watcher";
 import watcher from "@parcel/watcher";
 import { collectionName, projectIdFromPath } from "../config.js";
 import {
-  detectExtensionlessExtension,
   EXTENSION_LANGUAGE_MAP,
   indexExtensionlessEnabled,
   SPECIAL_FILES,
   SUPPORTED_EXTENSIONS,
 } from "../constants.js";
 import { invalidateGraphCache } from "./code-graph.js";
-import { readFileHead } from "./extensionless.js";
+import { detectExtensionFromSource, readFileHead } from "./extensionless.js";
 import { createIgnoreFilter, shouldIgnore } from "./ignore.js";
 import { FILE_SCAN_BATCH, isIndexingInProgress, updateProjectIndex } from "./indexer.js";
 import { acquireProjectLock, isProjectLocked, releaseProjectLock } from "./lock.js";
@@ -82,7 +81,7 @@ export async function isIndexableFile(filePath: string): Promise<boolean> {
   // updateProjectIndex (any other change / nightly / manual codebase_update) —
   // a bounded, self-healing gap.
   try {
-    return detectExtensionlessExtension(await readFileHead(filePath)) !== null;
+    return detectExtensionFromSource(await readFileHead(filePath)) !== null;
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
       logger.debug("Extensionless watch check could not read file (scheduling update)", {

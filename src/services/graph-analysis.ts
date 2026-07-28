@@ -8,7 +8,8 @@ import type { CodeGraph, CodeGraphNode } from "../types.js";
  * Resolve a graph node's language for display/stats. Prefers the language stored
  * on the node at build time (correct for extensionless files, whose path carries
  * no extension); falls back to deriving it from the path extension for nodes with
- * no stored language (older persisted graphs and import-target-only leaf nodes).
+ * no stored language (older persisted graphs, grammar-less extra-extension nodes,
+ * and import-target-only nodes that discovery never content-detected).
  */
 export function nodeLanguage(node: Pick<CodeGraphNode, "language" | "relativePath">): string {
   return node.language ?? getLanguageFromExtension(path.extname(node.relativePath).toLowerCase());

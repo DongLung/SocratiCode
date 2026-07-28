@@ -17,8 +17,10 @@ export interface CodeGraphNode {
   /**
    * Language label for display/stats, set at graph-build time. For extensionless
    * files this carries the content-detected language, which the path alone cannot
-   * yield. Absent on nodes from older persisted graphs and on import-target-only
-   * leaf nodes; consumers fall back to path-based derivation via nodeLanguage().
+   * yield. Absent on nodes from older persisted graphs, on grammar-less
+   * extra-extension nodes, and on import-target-only nodes that discovery never
+   * content-detected; consumers fall back to path-based derivation via
+   * nodeLanguage().
    */
   language?: string;
   imports: string[];

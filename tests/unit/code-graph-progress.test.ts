@@ -13,8 +13,11 @@ import {
   isGraphBuildInProgress,
 } from "../../src/services/code-graph.js";
 import {
+  addFileToFixture,
   createFixtureProject,
   type FixtureProject,
+  freshProgress,
+  oversizedTs,
 } from "../helpers/fixtures.js";
 
 // ── Progress tracking API (pure in-memory, no Docker needed) ─────────────
@@ -51,12 +54,7 @@ describe("graph build progress tracking", () => {
 
   describe("buildCodeGraph with progress tracking", () => {
     it("updates progress.filesTotal after scanning", async () => {
-      const progress: GraphBuildProgress = {
-        startedAt: Date.now(),
-        filesTotal: 0,
-        filesProcessed: 0,
-        phase: "scanning files",
-      };
+      const progress = freshProgress();
 
       const graph = await buildCodeGraph(fixture.root, undefined, progress);
 
@@ -71,12 +69,7 @@ describe("graph build progress tracking", () => {
     });
 
     it("tracks filesProcessed incrementally during build", async () => {
-      const progress: GraphBuildProgress = {
-        startedAt: Date.now(),
-        filesTotal: 0,
-        filesProcessed: 0,
-        phase: "scanning files",
-      };
+      const progress = freshProgress();
 
       await buildCodeGraph(fixture.root, undefined, progress);
 
@@ -90,6 +83,25 @@ describe("graph build progress tracking", () => {
       const graph = await buildCodeGraph(fixture.root);
       expect(graph.nodes.length).toBeGreaterThan(0);
       expect(graph.edges.length).toBeGreaterThanOrEqual(0);
+    });
+
+    it("keeps filesProcessed equal to filesTotal when a file is skipped", async () => {
+      // A skipped file still counts toward filesProcessed, so a finished build
+      // reports every file discovery admitted. Its own fixture on purpose —
+      // an oversized file in this file's shared fixture would add a permanent
+      // skip to every sibling test's filesTotal and filesSkipped.
+      const skipFixture = createFixtureProject("graph-progress-skip");
+      addFileToFixture(skipFixture.root, "src/oversized.ts", oversizedTs());
+      try {
+        const progress = freshProgress();
+
+        await buildCodeGraph(skipFixture.root, undefined, progress);
+
+        expect(progress.filesProcessed).toBe(progress.filesTotal);
+        expect(progress.filesSkipped).toBe(1);
+      } finally {
+        skipFixture.cleanup();
+      }
     });
   });
 

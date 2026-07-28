@@ -10,8 +10,6 @@ import { collectionName, projectIdFromPath } from "../config.js";
 import {
   CHUNK_OVERLAP,
   CHUNK_SIZE,
-  DETECT_HEAD_BYTES,
-  detectExtensionlessExtension,
   EXTENSION_LANGUAGE_MAP,
   EXTRA_EXTENSIONS,
   getLanguageFromExtension,
@@ -26,7 +24,7 @@ import type { FileChunk } from "../types.js";
 import { ensureDynamicLanguages, getAstGrepLang, rebuildGraph, removeGraph } from "./code-graph.js";
 import { ensureArtifactsIndexed, loadConfig, removeAllArtifacts } from "./context-artifacts.js";
 import { generateEmbeddings, prepareDocumentText } from "./embeddings.js";
-import { resolveExtensionlessExtension } from "./extensionless.js";
+import { detectExtensionFromSource, resolveExtensionlessExtension } from "./extensionless.js";
 import { createIgnoreFilter, shouldIgnore } from "./ignore.js";
 import { acquireProjectLock, releaseProjectLock } from "./lock.js";
 import { logger } from "./logger.js";
@@ -442,14 +440,10 @@ export function chunkFileContent(
   // stay consistent. The on-disk path is never rewritten — only the
   // language/grammar selection changes.
   if (ext === "" && indexExtensionlessEnabled() && !SPECIAL_FILES.has(path.basename(filePath))) {
-    // Detect on the same byte window as discovery's readFileHead. `content` is
-    // a decoded string, so slice counts UTF-16 units, not bytes; take the first
-    // DETECT_HEAD_BYTES chars (which encode to >= that many bytes) and truncate
-    // to DETECT_HEAD_BYTES bytes so both paths inspect an identical head.
-    const head = Buffer.from(content.slice(0, DETECT_HEAD_BYTES), "utf-8")
-      .subarray(0, DETECT_HEAD_BYTES)
-      .toString("utf-8");
-    const detected = detectExtensionlessExtension(head);
+    // Scores the same byte window as discovery's readFileHead, via the one
+    // helper that owns that rule, so chunking and discovery cannot disagree
+    // about the same bytes.
+    const detected = detectExtensionFromSource(content);
     // If the content changed since discovery admitted this file (TOCTOU) and it
     // no longer detects as code, produce no chunks rather than indexing it as
     // plaintext — keeping chunking consistent with getIndexableFiles' contract.

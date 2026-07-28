@@ -401,9 +401,10 @@ export function getLanguageFromExtension(
 // ── Extensionless file detection ──────────────────────────────────────────
 
 /**
- * Bytes of file head inspected for extensionless language detection. Shared by
- * the discovery head-read (`readFileHead`) and the chunk-time re-detection so
- * the two paths always look at the same window and agree on the language.
+ * Bytes of file head inspected for extensionless language detection. Read by the
+ * two functions that bound a detection window — `readFileHead` on disk and
+ * `detectExtensionFromSource` in memory — so every site that decides an
+ * extensionless file's language scores the same bytes and cannot disagree about it.
  */
 export const DETECT_HEAD_BYTES = 8192;
 
