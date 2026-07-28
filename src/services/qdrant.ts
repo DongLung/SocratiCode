@@ -36,6 +36,32 @@ async function withRetry<T>(
 }
 
 /**
+ * Render a Qdrant client error including the reason the server actually gave.
+ *
+ * `@qdrant/js-client-rest` builds an `ApiError` whose `message` is only the HTTP
+ * status text — a 400 reads as the bare, useless "Bad Request" — while the
+ * server's explanation ("JSON payload (N bytes) is larger than allowed …") sits
+ * in `err.data.status.error`. Logging `err.message` alone therefore throws away
+ * the one part a user can act on, so every symbol-graph failure looked
+ * identical. Appends that reason when present, and looks through a `cause`
+ * chain so an error already wrapped by {@link wrapQdrantError} still resolves.
+ */
+export function describeQdrantError(err: unknown): string {
+  const base = err instanceof Error ? err.message : String(err);
+  // Walk the cause chain (bounded — these are never deep) looking for the
+  // client's `data` envelope, which may sit on the error or on its cause.
+  let current: unknown = err;
+  for (let depth = 0; depth < 5 && current; depth++) {
+    const reason = (current as { data?: { status?: { error?: unknown } } })?.data?.status?.error;
+    if (typeof reason === "string" && reason.length > 0) {
+      return base.includes(reason) ? base : `${base}: ${reason}`;
+    }
+    current = (current as { cause?: unknown })?.cause;
+  }
+  return base;
+}
+
+/**
  * Wrap a Qdrant client error with operation context so callers further up the
  * stack (and ultimately the MCP response) get a useful message instead of a
  * bare "Internal Server Error". Preserves the original error via `cause` and

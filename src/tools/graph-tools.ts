@@ -19,7 +19,37 @@ import { logger } from "../services/logger.js";
 import { getSymbolGraphCache } from "../services/symbol-graph-cache.js";
 import { ensureWatcherStarted } from "../services/watcher.js";
 
+/**
+ * Tools that answer purely from the persisted symbol graph. If the last build
+ * could not persist it, they read whatever cache survived, so their answers may
+ * be stale or absent with nothing on screen to say why — the "0 callers, no
+ * explanation" report behind #89. They get the failure prepended.
+ */
+const SYMBOL_GRAPH_TOOLS = new Set([
+  "codebase_impact",
+  "codebase_flow",
+  "codebase_symbol",
+  "codebase_symbols",
+]);
+
 export async function handleGraphTool(
+  name: string,
+  args: Record<string, unknown>,
+): Promise<string> {
+  const result = await dispatchGraphTool(name, args);
+  if (!SYMBOL_GRAPH_TOOLS.has(name)) return result;
+  const resolved = path.resolve((args.projectPath as string) || process.cwd());
+  const symbolGraphError = getLastGraphBuildCompleted(resolved)?.symbolGraphError;
+  if (!symbolGraphError) return result;
+  return [
+    `WARNING: the last graph build could not persist the symbol graph: ${symbolGraphError}`,
+    "Results below may be stale or incomplete until a rebuild succeeds.",
+    "",
+    result,
+  ].join("\n");
+}
+
+async function dispatchGraphTool(
   name: string,
   args: Record<string, unknown>,
 ): Promise<string> {
@@ -313,6 +343,15 @@ export async function handleGraphTool(
         lines.push(`Last build duration: ${(lastBuild.durationMs / 1000).toFixed(1)}s`);
         if (lastBuild.filesSkipped) {
           lines.push(`Files skipped: ${lastBuild.filesSkipped}`);
+        }
+        if (lastBuild.symbolGraphError) {
+          // The file-import graph above is real; the symbol half is not. Say so
+          // here rather than letting codebase_impact answer "0 callers" as if
+          // that were a finding.
+          lines.push(
+            `Symbol graph FAILED to persist: ${lastBuild.symbolGraphError}`,
+            "  Symbol-level tools (codebase_impact, codebase_flow, codebase_symbol) will be incomplete or empty until a rebuild succeeds.",
+          );
         }
       }
 

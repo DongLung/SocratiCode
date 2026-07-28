@@ -879,6 +879,12 @@ buildCodeGraph (one pass per file)
 
 All points use the dummy-vector-`[0]` pattern (Qdrant requires a vector even when not used for similarity search). Points use UUID-formatted SHA-256 IDs via `uuidFromString`. The `on_disk_payload: true` flag keeps memory usage bounded.
 
+**Upserts are bounded by bytes, not just by point count.** Qdrant rejects any request body over `service.max_request_size_mb` (default 32 MiB) with an HTTP 400 whose client-side message is only `Bad Request`. A per-file payload scales with the source file, so a few large files (a 900 KB Java file yields a ~6 MB point) used to overflow a fixed 50-point batch and fail the whole request — issue #89. `saveFilePayloads` therefore packs each request up to `QDRANT_UPSERT_BUDGET_BYTES` (24 MiB, headroom under the 32 MiB ceiling) *and* the historic 50-point cap, so ordinary repos batch exactly as before while large files simply get more requests. Point ids and payload shapes are unchanged, so this is purely a transport-level change with nothing to migrate.
+
+A single point that cannot fit under `QDRANT_MAX_REQUEST_BYTES` even alone throws `SymbolGraphPointTooLargeError`, naming the file or shard and pointing at `service.max_request_size_mb`, rather than being dropped. Name shards (27 of them, one per leading character) are the one structure that can grow unbounded with repo size; they are size-checked before write for the same reason. Splitting a shard across multiple points would change the on-disk layout and is deliberately not done here.
+
+When symbol-graph persistence fails, `doRebuildGraph` (the rebuild driver around `buildCodeGraph`, which itself only parses files) still returns and saves the file-import graph, but records the reason on `GraphBuildCompleted.symbolGraphError` (unwrapped via `describeQdrantError`, which digs the server's real explanation out of `err.data.status.error`). `codebase_graph_status` prints it, so a half-built graph is no longer reported as a clean success while `codebase_impact` silently answers "0 callers".
+
 #### Languages with first-class symbol extraction
 
 TypeScript / JavaScript / TSX, Python, Go, Rust, Java, Kotlin, Scala, C#, C, C++, Ruby, PHP, Swift, Bash. Dart, Lua, Svelte, Vue and unknown languages fall through to a regex fallback that still produces a `<module>` symbol plus best-effort function/class detection.

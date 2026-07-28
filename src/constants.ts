@@ -107,6 +107,22 @@ export const MAX_FILE_BYTES = Math.round(
 export const MAX_GRAPH_FILE_BYTES = 1_000_000;
 
 /**
+ * Qdrant's default `service.max_request_size_mb` (32 MiB), in bytes. A request
+ * body over this is rejected with HTTP 400 before it reaches the collection, so
+ * it is a hard ceiling on any single upsert, not a tuning knob we control: the
+ * server enforces it and self-hosted deployments may set it lower.
+ */
+export const QDRANT_MAX_REQUEST_BYTES = 33_554_432;
+
+/**
+ * Byte budget we pack a single upsert body up to. Deliberately below
+ * {@link QDRANT_MAX_REQUEST_BYTES} so the JSON envelope around the points
+ * (and any server-side accounting that differs slightly from ours) still fits
+ * under the hard ceiling.
+ */
+export const QDRANT_UPSERT_BUDGET_BYTES = 25_165_824;
+
+/**
  * Maximum average line length (in characters) before a file is treated as
  * minified/bundled and switched to character-based chunking. Minified files
  * have very long lines that would make line-based chunks exceed the embedding

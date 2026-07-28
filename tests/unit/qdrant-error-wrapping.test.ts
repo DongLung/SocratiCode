@@ -131,3 +131,47 @@ describe("qdrant error wrapping (issue #55)", () => {
     });
   });
 });
+
+// ── describeQdrantError (#89) ────────────────────────────────────────────
+//
+// A Qdrant 400 arrives as an ApiError whose `message` is only the HTTP status
+// text ("Bad Request"); the server's actual explanation lives in
+// `err.data.status.error`. Logging just `.message` is what made every failed
+// symbol-graph persist look identical and unactionable.
+
+describe("describeQdrantError", () => {
+  it("appends the server's reason from err.data.status.error", async () => {
+    const { describeQdrantError } = await import("../../src/services/qdrant.js");
+    const apiError = Object.assign(new Error("Bad Request"), {
+      status: 400,
+      data: { status: { error: "JSON payload (35651584 bytes) is larger than allowed (limit: 33554432 bytes)" } },
+    });
+    const described = describeQdrantError(apiError);
+    expect(described).toContain("Bad Request");
+    expect(described).toContain("larger than allowed");
+    expect(described).toContain("33554432");
+  });
+
+  it("finds the reason through a wrapped error's cause chain", async () => {
+    const { describeQdrantError } = await import("../../src/services/qdrant.js");
+    const inner = Object.assign(new Error("Bad Request"), {
+      data: { status: { error: "payload too large" } },
+    });
+    const outer = Object.assign(new Error("saveFilePayloads failed [status 400]: Bad Request"), { cause: inner });
+    expect(describeQdrantError(outer)).toContain("payload too large");
+  });
+
+  it("does not duplicate the reason when it is already in the message", async () => {
+    const { describeQdrantError } = await import("../../src/services/qdrant.js");
+    const err = Object.assign(new Error("failed: payload too large"), {
+      data: { status: { error: "payload too large" } },
+    });
+    expect(describeQdrantError(err)).toBe("failed: payload too large");
+  });
+
+  it("falls back to the plain message when there is no structured reason", async () => {
+    const { describeQdrantError } = await import("../../src/services/qdrant.js");
+    expect(describeQdrantError(new Error("Bad Request"))).toBe("Bad Request");
+    expect(describeQdrantError("not an error")).toBe("not an error");
+  });
+});
