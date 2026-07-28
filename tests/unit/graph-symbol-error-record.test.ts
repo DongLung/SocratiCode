@@ -97,6 +97,24 @@ describe("symbol-graph failure is recorded and not silently cleared (#89)", () =
     expect(last?.symbolGraphError).toContain("larger than allowed");
   });
 
+  it("keeps the failure recorded when a later build dies before the symbol phase", async () => {
+    await rebuildGraph(root);
+    expect(getLastGraphBuildCompleted(root)?.symbolGraphError).toBeDefined();
+
+    // A total build failure (here: the file-graph save blows up, as a transient
+    // Qdrant outage would) must not erase the symbol-graph failure, or the next
+    // incremental build carries the blank forward and reports it healthy.
+    const qdrant = await import("../../src/services/qdrant.js");
+    const saveSpy = vi.spyOn(qdrant, "saveGraphData").mockRejectedValueOnce(new Error("connect ECONNREFUSED"));
+    invalidateGraphCache(root);
+    await expect(rebuildGraph(root)).rejects.toThrow("ECONNREFUSED");
+    saveSpy.mockRestore();
+
+    const last = getLastGraphBuildCompleted(root);
+    expect(last?.error).toContain("ECONNREFUSED");
+    expect(last?.symbolGraphError).toContain("larger than allowed");
+  });
+
   it("clears the failure only when a real symbol-graph persist succeeds", async () => {
     await rebuildGraph(root);
     expect(getLastGraphBuildCompleted(root)?.symbolGraphError).toBeDefined();

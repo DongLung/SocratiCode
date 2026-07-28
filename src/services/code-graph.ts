@@ -283,6 +283,13 @@ async function doRebuildGraph(
       nodesCreated: 0,
       edgesCreated: 0,
       error: message,
+      // A build that died before (or during) the symbol-graph phase did not fix
+      // it either, so preserve any failure the last build recorded. Reading it
+      // back out of the map is deliberate: this catch is outside the scope of
+      // the try's symbolGraphError, and the get resolves before the set.
+      // Without this a transient outage would wipe the record, and the next
+      // incremental build would carry the blank forward as "healthy".
+      symbolGraphError: lastGraphBuildCompleted.get(resolvedPath)?.symbolGraphError,
     });
     throw err;
   } finally {
