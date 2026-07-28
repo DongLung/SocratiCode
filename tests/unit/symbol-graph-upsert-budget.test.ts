@@ -33,6 +33,7 @@ import {
   SymbolGraphPointTooLargeError,
   saveFilePayloads,
   saveNameShard,
+  saveReverseShard,
 } from "../../src/services/symbol-graph-store.js";
 
 /** Build a payload whose serialized size is ~`targetBytes`. */
@@ -118,6 +119,15 @@ describe("symbol-graph-store: byte-aware upsert batching (#89)", () => {
     };
     await expect(saveNameShard("p", "b", nameToSymbols)).rejects.toThrow(SymbolGraphPointTooLargeError);
     await expect(saveNameShard("p", "b", nameToSymbols)).rejects.toThrow(/name index shard 'b'/);
+    expect(upserts).toHaveLength(0);
+  });
+
+  it("names the offending shard when a reverse-call shard cannot fit", async () => {
+    // Same guard as the name shard above; reverse shards reach it by a separate
+    // call path, so it is pinned separately.
+    const reverseEdges = { "src/Callee.java": ["x".repeat(QDRANT_MAX_REQUEST_BYTES + 1024)] };
+    await expect(saveReverseShard("p", 7, reverseEdges)).rejects.toThrow(SymbolGraphPointTooLargeError);
+    await expect(saveReverseShard("p", 7, reverseEdges)).rejects.toThrow(/reverse-call index shard 07/);
     expect(upserts).toHaveLength(0);
   });
 

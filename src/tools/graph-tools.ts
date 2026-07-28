@@ -19,7 +19,37 @@ import { logger } from "../services/logger.js";
 import { getSymbolGraphCache } from "../services/symbol-graph-cache.js";
 import { ensureWatcherStarted } from "../services/watcher.js";
 
+/**
+ * Tools that answer purely from the persisted symbol graph. If the last build
+ * could not persist it, they read whatever cache survived, so their answers may
+ * be stale or absent with nothing on screen to say why — the "0 callers, no
+ * explanation" report behind #89. They get the failure prepended.
+ */
+const SYMBOL_GRAPH_TOOLS = new Set([
+  "codebase_impact",
+  "codebase_flow",
+  "codebase_symbol",
+  "codebase_symbols",
+]);
+
 export async function handleGraphTool(
+  name: string,
+  args: Record<string, unknown>,
+): Promise<string> {
+  const result = await dispatchGraphTool(name, args);
+  if (!SYMBOL_GRAPH_TOOLS.has(name)) return result;
+  const resolved = path.resolve((args.projectPath as string) || process.cwd());
+  const symbolGraphError = getLastGraphBuildCompleted(resolved)?.symbolGraphError;
+  if (!symbolGraphError) return result;
+  return [
+    `WARNING: the last graph build could not persist the symbol graph: ${symbolGraphError}`,
+    "Results below may be stale or incomplete until a rebuild succeeds.",
+    "",
+    result,
+  ].join("\n");
+}
+
+async function dispatchGraphTool(
   name: string,
   args: Record<string, unknown>,
 ): Promise<string> {
