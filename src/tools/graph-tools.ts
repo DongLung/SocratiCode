@@ -314,6 +314,15 @@ export async function handleGraphTool(
         if (lastBuild.filesSkipped) {
           lines.push(`Files skipped: ${lastBuild.filesSkipped}`);
         }
+        if (lastBuild.symbolGraphError) {
+          // The file-import graph above is real; the symbol half is not. Say so
+          // here rather than letting codebase_impact answer "0 callers" as if
+          // that were a finding.
+          lines.push(
+            `Symbol graph FAILED to persist: ${lastBuild.symbolGraphError}`,
+            "  Symbol-level tools (codebase_impact, codebase_flow, codebase_symbol) will be incomplete or empty until a rebuild succeeds.",
+          );
+        }
       }
 
       if (graphInfo.symbol) {

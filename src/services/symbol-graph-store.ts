@@ -20,7 +20,11 @@ import {
   symgraphIndexCollectionName,
   symgraphMetaCollectionName,
 } from "../config.js";
-import { SYMBOL_REVERSE_SHARDS } from "../constants.js";
+import {
+  QDRANT_MAX_REQUEST_BYTES,
+  QDRANT_UPSERT_BUDGET_BYTES,
+  SYMBOL_REVERSE_SHARDS,
+} from "../constants.js";
 import type {
   SymbolGraphFilePayload,
   SymbolGraphMeta,
@@ -78,6 +82,101 @@ function nameShardPointId(projectId: string, shardKey: string): string {
 function revShardPointId(projectId: string, bucketHex: string): string {
   return uuidFromString(`${projectId}::revidx::${bucketHex}`);
 }
+
+// ── Upsert sizing ────────────────────────────────────────────────────────
+
+/** A Qdrant point as this module writes them (dummy `[0]` vector throughout). */
+interface SymgraphPoint {
+  id: string;
+  vector: number[];
+  payload: Record<string, unknown>;
+}
+
+/**
+ * A single point that cannot be written at all because it alone exceeds the
+ * server's request ceiling. Thrown rather than skipped: dropping it would leave
+ * the symbol graph silently missing a file's symbols, which is the failure mode
+ * this whole area exists to avoid. The message names the offending item and the
+ * knob that raises the ceiling.
+ */
+export class SymbolGraphPointTooLargeError extends Error {
+  constructor(
+    readonly what: string,
+    readonly bytes: number,
+    readonly limit: number = QDRANT_MAX_REQUEST_BYTES,
+  ) {
+    super(
+      `${what} serializes to ${bytes} bytes, over Qdrant's ${limit}-byte request limit. ` +
+        "Raise service.max_request_size_mb on the Qdrant server to accept it.",
+    );
+    this.name = "SymbolGraphPointTooLargeError";
+  }
+}
+
+/** Serialized size of a point, matching what the client will send for it. */
+function pointBytes(point: SymgraphPoint): number {
+  return Buffer.byteLength(JSON.stringify(point), "utf-8");
+}
+
+/**
+ * Guard a single-point upsert: a point over the hard ceiling can never be
+ * written, so fail with a message naming it instead of letting Qdrant answer
+ * with a bare "Bad Request" that says nothing about which shard was at fault.
+ */
+function assertPointFits(point: SymgraphPoint, what: string): void {
+  const bytes = pointBytes(point);
+  if (bytes > QDRANT_MAX_REQUEST_BYTES) {
+    throw new SymbolGraphPointTooLargeError(what, bytes);
+  }
+}
+
+/**
+ * Upsert points in requests bounded by BOTH a point count and a byte budget.
+ *
+ * The count cap alone (what this module used to do) is the bug behind #89: a
+ * fixed 50 points per request says nothing about how big those points are, and
+ * large source files produce multi-MB payload points, so a handful of them in
+ * one request pushes the body past Qdrant's 32 MiB ceiling and the whole batch
+ * is rejected with HTTP 400. Packing by bytes keeps every request under the
+ * ceiling regardless of how large individual files are; the count cap is kept
+ * so ordinary repos still batch exactly as before.
+ */
+async function upsertWithinBudget(
+  collName: string,
+  points: SymgraphPoint[],
+  describe: (index: number) => string,
+): Promise<void> {
+  const qdrant = getClient();
+  let batch: SymgraphPoint[] = [];
+  let batchBytes = 0;
+
+  const flush = async (): Promise<void> => {
+    if (batch.length === 0) return;
+    await qdrant.upsert(collName, { points: batch });
+    batch = [];
+    batchBytes = 0;
+  };
+
+  for (let i = 0; i < points.length; i++) {
+    const point = points[i];
+    const bytes = pointBytes(point);
+    if (bytes > QDRANT_MAX_REQUEST_BYTES) {
+      throw new SymbolGraphPointTooLargeError(describe(i), bytes);
+    }
+    // Start a new request when this point would push the body over budget, or
+    // when the count cap is reached. A point larger than the budget but under
+    // the ceiling ends up in a request of its own, which is what we want.
+    if (batch.length > 0 && (batchBytes + bytes > QDRANT_UPSERT_BUDGET_BYTES || batch.length >= UPSERT_MAX_POINTS)) {
+      await flush();
+    }
+    batch.push(point);
+    batchBytes += bytes;
+  }
+  await flush();
+}
+
+/** Point-count cap per upsert. Unchanged from before the byte budget existed. */
+const UPSERT_MAX_POINTS = 50;
 
 // ── Collection lifecycle ─────────────────────────────────────────────────
 
@@ -159,18 +258,21 @@ export async function saveFilePayload(
   const collName = symgraphFileCollectionName(projectId);
   await ensureCollection(collName);
   const qdrant = getClient();
-  await qdrant.upsert(collName, {
-    points: [
-      {
-        id: filePointId(projectId, payload.file),
-        vector: [0],
-        payload: { filePayload: payload },
-      },
-    ],
-  });
+  const point: SymgraphPoint = {
+    id: filePointId(projectId, payload.file),
+    vector: [0],
+    payload: { filePayload: payload },
+  };
+  assertPointFits(point, `symbol payload for ${payload.file}`);
+  await qdrant.upsert(collName, { points: [point] });
 }
 
-/** Bulk upsert per-file payloads. Caller is expected to batch sensibly. */
+/**
+ * Bulk upsert per-file payloads, in requests bounded by size as well as count.
+ *
+ * Point ids and payload shape are unchanged, so this writes exactly the same
+ * data as before; only how it is split across HTTP requests differs.
+ */
 export async function saveFilePayloads(
   projectId: string,
   payloads: SymbolGraphFilePayload[],
@@ -178,19 +280,12 @@ export async function saveFilePayloads(
   if (payloads.length === 0) return;
   const collName = symgraphFileCollectionName(projectId);
   await ensureCollection(collName);
-  const qdrant = getClient();
-  // Chunk to avoid massive single requests
-  const CHUNK = 50;
-  for (let i = 0; i < payloads.length; i += CHUNK) {
-    const slice = payloads.slice(i, i + CHUNK);
-    await qdrant.upsert(collName, {
-      points: slice.map((p) => ({
-        id: filePointId(projectId, p.file),
-        vector: [0],
-        payload: { filePayload: p },
-      })),
-    });
-  }
+  const points: SymgraphPoint[] = payloads.map((p) => ({
+    id: filePointId(projectId, p.file),
+    vector: [0],
+    payload: { filePayload: p },
+  }));
+  await upsertWithinBudget(collName, points, (i) => `symbol payload for ${payloads[i].file}`);
 }
 
 export async function loadFilePayload(
@@ -247,15 +342,17 @@ export async function saveNameShard(
   const collName = symgraphIndexCollectionName(projectId);
   await ensureCollection(collName);
   const qdrant = getClient();
-  await qdrant.upsert(collName, {
-    points: [
-      {
-        id: nameShardPointId(projectId, shardKey),
-        vector: [0],
-        payload: { kind: "name", shard: shardKey, nameToSymbols },
-      },
-    ],
-  });
+  const point: SymgraphPoint = {
+    id: nameShardPointId(projectId, shardKey),
+    vector: [0],
+    payload: { kind: "name", shard: shardKey, nameToSymbols },
+  };
+  // A name shard holds every symbol whose name starts with one character, so on
+  // a large enough repo one shard can outgrow the request ceiling on its own.
+  // Splitting it would change the on-disk layout; naming it in the error keeps
+  // the failure honest and actionable without that.
+  assertPointFits(point, `name index shard '${shardKey}'`);
+  await qdrant.upsert(collName, { points: [point] });
 }
 
 export async function loadNameShard(
@@ -293,15 +390,13 @@ export async function saveReverseShard(
   await ensureCollection(collName);
   const qdrant = getClient();
   const bucketHex = reverseShardHex(bucket);
-  await qdrant.upsert(collName, {
-    points: [
-      {
-        id: revShardPointId(projectId, bucketHex),
-        vector: [0],
-        payload: { kind: "reverse", bucket, reverseEdges },
-      },
-    ],
-  });
+  const point: SymgraphPoint = {
+    id: revShardPointId(projectId, bucketHex),
+    vector: [0],
+    payload: { kind: "reverse", bucket, reverseEdges },
+  };
+  assertPointFits(point, `reverse-call index shard ${bucketHex}`);
+  await qdrant.upsert(collName, { points: [point] });
 }
 
 export async function loadReverseShard(

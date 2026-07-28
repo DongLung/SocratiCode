@@ -19,7 +19,7 @@ import { computeUnresolvedPct, resolveCallSites } from "./graph-symbol-resolutio
 import { extractSymbolsAndCalls, rawCallsToUnresolvedEdges } from "./graph-symbols.js";
 import { createIgnoreFilter, shouldIgnore } from "./ignore.js";
 import { logger } from "./logger.js";
-import { deleteGraphData, getGraphMetadata, loadGraphData, saveGraphData } from "./qdrant.js";
+import { deleteGraphData, describeQdrantError, getGraphMetadata, loadGraphData, saveGraphData } from "./qdrant.js";
 import {
   dropSymbolGraphCache,
   SymbolGraphCache,
@@ -81,6 +81,13 @@ export interface GraphBuildCompleted {
   nodesCreated: number;
   edgesCreated: number;
   error?: string;
+  /**
+   * Set when the file-import graph was built and saved but the symbol graph
+   * could not be persisted. That half-failure used to be logged and otherwise
+   * dropped, so the build reported success while `codebase_impact` silently had
+   * nothing to answer with; recording it here is what lets status say so.
+   */
+  symbolGraphError?: string;
 }
 
 /** Track which projects currently have a graph build in flight */
@@ -224,6 +231,7 @@ async function doRebuildGraph(
 
     // Build & persist symbol graph (resolution + sharded persistence) — unless
     // the caller asked to skip it (Phase F watcher path).
+    let symbolGraphError: string | undefined;
     if (!opts.skipSymbolGraph) {
       try {
         progress.phase = "resolving symbols";
@@ -232,9 +240,15 @@ async function doRebuildGraph(
         progress.phase = "persisting symbols";
         await persistSymbolGraph(projectId, resolvedPath, built.symbolsByFile, built.outgoingCallsByFile);
       } catch (err) {
-        logger.warn("Symbol graph build failed (file-import graph saved)", {
+        // Keep returning the file-import graph: it is built and saved, and the
+        // caller asked for it. But record WHY the symbol half is missing, with
+        // the server's own reason (a bare "Bad Request" names nothing), so the
+        // build is no longer reported as an unqualified success while
+        // codebase_impact quietly has no data.
+        symbolGraphError = describeQdrantError(err);
+        logger.error("Symbol graph build failed (file-import graph saved)", {
           projectPath: resolvedPath,
-          error: err instanceof Error ? err.message : String(err),
+          error: symbolGraphError,
         });
       }
     }
@@ -246,6 +260,7 @@ async function doRebuildGraph(
       filesSkipped: progress.filesSkipped,
       nodesCreated: graph.nodes.length,
       edgesCreated: graph.edges.length,
+      symbolGraphError,
     });
 
     return graph;
