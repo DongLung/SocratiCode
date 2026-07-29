@@ -226,6 +226,59 @@ describe("indexer utilities", () => {
       }
     });
 
+    // ── empty-chunk invariant ──────────────────────────────────
+    //
+    // Three code paths could emit a chunk whose content is "". Because such a
+    // chunk embeds as a path-only document, BM25 length-normalisation floats it
+    // to rank 1 — a blank top hit for an otherwise good query.
+
+    it("emits no blank chunk for a newline-terminated file (epilogue guard)", () => {
+      // `lines.slice(lastEnd)` on a trailing "\n" yields [""], which is a
+      // non-empty ARRAY of empty CONTENT. Guarding on array length is therefore
+      // always true and emits content:"" at line N+1.
+      const functions = Array.from({ length: 40 }, (_, i) => {
+        const body = Array.from({ length: 3 }, (_, j) => `  const v${j} = ${i * j};`).join("\n");
+        return `export function fn${i}(): void {\n${body}\n}`;
+      });
+      const content = `${functions.join("\n\n")}\n`;
+
+      const chunks = chunkFileContent("/test/epilogue.ts", "epilogue.ts", content);
+
+      expect(chunks.length).toBeGreaterThan(0);
+      expect(chunks.filter((c) => c.content.trim().length === 0)).toHaveLength(0);
+    });
+
+    it("emits no blank chunk for a file whose first line is blank (preamble guard)", () => {
+      // Same tautology in the preamble branch: `lines.slice(0, startLine)` with
+      // startLine > 0 is never an empty array, so a leading blank line emits
+      // content:"" at 1-1.
+      const functions = Array.from({ length: 40 }, (_, i) => {
+        const body = Array.from({ length: 3 }, (_, j) => `  const v${j} = ${i * j};`).join("\n");
+        return `export function fn${i}(): void {\n${body}\n}`;
+      });
+      const content = `\n${functions.join("\n\n")}\n`;
+
+      const chunks = chunkFileContent("/test/preamble.ts", "preamble.ts", content);
+
+      expect(chunks.length).toBeGreaterThan(0);
+      expect(chunks.filter((c) => c.content.trim().length === 0)).toHaveLength(0);
+    });
+
+    it("emits no chunks at all for zero-byte and whitespace-only files", () => {
+      // These reach chunkByLines and would otherwise yield a single blank chunk.
+      // Real corpora contain them: Python package markers such as __init__.py.
+      expect(chunkFileContent("/test/__init__.py", "__init__.py", "")).toHaveLength(0);
+      expect(chunkFileContent("/test/blank.py", "blank.py", "\n\n\n")).toHaveLength(0);
+      expect(chunkFileContent("/test/ws.txt", "ws.txt", "   \n\t\n  ")).toHaveLength(0);
+    });
+
+    it("still chunks ordinary files normally", () => {
+      // Guards against an over-broad filter silently emptying the index.
+      const chunks = chunkFileContent("/test/ok.ts", "ok.ts", 'export const x = 1;\n');
+      expect(chunks.length).toBeGreaterThan(0);
+      expect(chunks[0].content).toContain("export const x = 1;");
+    });
+
     it("uses AST-aware chunking for Dart files (class and signature/body boundaries)", () => {
       // Two large Dart classes plus a top-level function, exceeding CHUNK_SIZE
       // lines. Dart splits a top-level function into sibling signature and

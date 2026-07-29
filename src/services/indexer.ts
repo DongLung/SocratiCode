@@ -353,6 +353,14 @@ function findAstBoundaries(source: string, lang: Lang | string): AstRegion[] {
  * defence; this cap ensures chunks are already within bounds before that.
  */
 function applyCharCap(chunks: FileChunk[]): FileChunk[] {
+  // Terminal invariant: never emit a chunk with no non-whitespace content.
+  // Four of the five `return` paths in chunkFileContent pass through here (the
+  // fifth returns []), so this is the one place that can guarantee the property
+  // for every chunking strategy — including zero-byte and whitespace-only files,
+  // which reach chunkByLines and would otherwise yield a single blank chunk.
+  // Safe to drop: chunk ids are sha256(relativePath + ":" + startLine), so
+  // removing a chunk never renumbers any other.
+  chunks = chunks.filter((c) => c.content.trim().length > 0);
   if (chunks.every((c) => c.content.length <= MAX_CHUNK_CHARS)) return chunks;
   return chunks.map((c) =>
     c.content.length > MAX_CHUNK_CHARS
@@ -506,7 +514,7 @@ function chunkByAstRegions(
   // Preamble: everything before the first declaration (imports, constants, comments)
   if (regions[0].startLine > 0) {
     const preambleLines = lines.slice(0, regions[0].startLine);
-    if (preambleLines.length > 0) {
+    if (preambleLines.some((line) => line.length > 0)) {
       chunks.push({
         id: chunkId(relativePath, 1),
         filePath,
@@ -592,7 +600,7 @@ function chunkByAstRegions(
   const lastEnd = regions[regions.length - 1].endLine;
   if (lastEnd < lines.length) {
     const epilogueLines = lines.slice(lastEnd);
-    if (epilogueLines.length > 0) {
+    if (epilogueLines.some((line) => line.length > 0)) {
       chunks.push({
         id: chunkId(relativePath, lastEnd + 1),
         filePath,
