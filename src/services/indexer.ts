@@ -360,13 +360,19 @@ function applyCharCap(chunks: FileChunk[]): FileChunk[] {
   // which reach chunkByLines and would otherwise yield a single blank chunk.
   // Safe to drop: chunk ids are sha256(relativePath + ":" + startLine), so
   // removing a chunk never renumbers any other.
-  chunks = chunks.filter((c) => c.content.trim().length > 0);
-  if (chunks.every((c) => c.content.length <= MAX_CHUNK_CHARS)) return chunks;
-  return chunks.map((c) =>
-    c.content.length > MAX_CHUNK_CHARS
-      ? { ...c, content: c.content.substring(0, MAX_CHUNK_CHARS) }
-      : c,
-  );
+  //
+  // ORDER MATTERS: cap first, then filter. Filtering first lets a chunk whose only
+  // non-whitespace content sits past MAX_CHUNK_CHARS pass the filter and then be
+  // truncated back into a blank chunk, so the invariant would not actually hold.
+  const capped =
+    chunks.every((c) => c.content.length <= MAX_CHUNK_CHARS)
+      ? chunks
+      : chunks.map((c) =>
+          c.content.length > MAX_CHUNK_CHARS
+            ? { ...c, content: c.content.substring(0, MAX_CHUNK_CHARS) }
+            : c,
+        );
+  return capped.filter((c) => c.content.trim().length > 0);
 }
 
 /**

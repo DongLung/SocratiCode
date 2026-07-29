@@ -232,7 +232,7 @@ describe("indexer utilities", () => {
     // chunk embeds as a path-only document, BM25 length-normalisation floats it
     // to rank 1 — a blank top hit for an otherwise good query.
 
-    it("emits no blank chunk for a newline-terminated file (epilogue guard)", () => {
+    it("emits no blank chunk for a newline-terminated file", () => {
       // `lines.slice(lastEnd)` on a trailing "\n" yields [""], which is a
       // non-empty ARRAY of empty CONTENT. Guarding on array length is therefore
       // always true and emits content:"" at line N+1.
@@ -248,7 +248,7 @@ describe("indexer utilities", () => {
       expect(chunks.filter((c) => c.content.trim().length === 0)).toHaveLength(0);
     });
 
-    it("emits no blank chunk for a file whose first line is blank (preamble guard)", () => {
+    it("emits no blank chunk for a file whose first line is blank", () => {
       // Same tautology in the preamble branch: `lines.slice(0, startLine)` with
       // startLine > 0 is never an empty array, so a leading blank line emits
       // content:"" at 1-1.
@@ -270,6 +270,28 @@ describe("indexer utilities", () => {
       expect(chunkFileContent("/test/__init__.py", "__init__.py", "")).toHaveLength(0);
       expect(chunkFileContent("/test/blank.py", "blank.py", "\n\n\n")).toHaveLength(0);
       expect(chunkFileContent("/test/ws.txt", "ws.txt", "   \n\t\n  ")).toHaveLength(0);
+    });
+
+    it("does not let the character cap re-create a blank chunk", () => {
+      // applyCharCap must truncate BEFORE the blank filter. If it filters first, a
+      // chunk whose only non-whitespace content sits past MAX_CHUNK_CHARS passes the
+      // filter and is then truncated back into a blank chunk — so the invariant would
+      // hold at the filter and be violated by the time the chunk is returned.
+      // 99 lines x 23 spaces = 2376 chars of padding, real code only on line 100.
+      const padding = Array.from({ length: 99 }, () => " ".repeat(23)).join("\n");
+      const content = `${padding}\nrealCode();\n`;
+
+      const chunks = chunkFileContent("/test/padded.txt", "padded.txt", content);
+
+      expect(chunks.length).toBeGreaterThan(0);
+      expect(chunks.filter((c) => c.content.trim().length === 0)).toHaveLength(0);
+    });
+
+    it("still truncates oversized chunks rather than dropping them", () => {
+      // Guards the other direction: cap-then-filter must not discard real content.
+      const chunks = chunkFileContent("/test/big.txt", "big.txt", "x".repeat(5000));
+      expect(chunks.length).toBeGreaterThan(0);
+      expect(chunks[0].content.length).toBe(2000);
     });
 
     it("still chunks ordinary files normally", () => {
