@@ -859,7 +859,7 @@ Pass `includeLinked: true` to `codebase_search`:
 
 > Search for "authentication middleware" with includeLinked: true
 
-Results are tagged with `[project-name]` labels showing which project each result came from. The current project always has highest priority for deduplication — if the same file exists in multiple linked projects, the current project's version wins.
+Results are tagged with `[project-name]` labels showing which project each result came from. Deduplication is scoped to a single project: the same relative path in two different projects is kept as two separate results, because they are genuinely different files (your own `src/util.ts` and a linked project's are not interchangeable). Within one project, the higher-priority occurrence of a path wins.
 
 > **Note:** Each linked project must be independently indexed (`codebase_index`) before it can be searched.
 
