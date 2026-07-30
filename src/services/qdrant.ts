@@ -444,11 +444,22 @@ async function searchChunksWithVector(
     };
     if (includeDenseScore) {
       const dense = extractDenseVector(r.vector);
-      // A point can legitimately come back without a usable vector (BM25-only
-      // match under some configurations). Leaving denseScore unset marks the
+      // A point can legitimately come back without a usable vector (a BM25-only
+      // match under some configurations), and cosine is undefined against a
+      // vector of another dimensionality. Leaving denseScore unset marks the
       // whole batch as unrankable by cosine, which the merge step detects and
-      // falls back on, rather than inventing a 0 that would bury the hit.
-      if (dense) result.denseScore = cosineSimilarity(dense, queryVector);
+      // falls back on, rather than inventing a number that would mis-rank.
+      const cosine = dense ? cosineSimilarity(dense, queryVector) : null;
+      if (cosine === null) {
+        logger.warn("Cross-project ranking: no usable dense vector, falling back to rank fusion", {
+          collection: collectionName,
+          relativePath: result.relativePath,
+          pointDim: dense?.length ?? 0,
+          queryDim: queryVector.length,
+        });
+      } else {
+        result.denseScore = cosine;
+      }
     }
     return result;
   });
@@ -463,20 +474,27 @@ function extractDenseVector(vector: unknown): number[] | null {
 }
 
 /**
- * Cosine similarity between two equal-length vectors, or 0 when either has no
- * magnitude (which would otherwise divide by zero).
+ * Cosine similarity between two vectors, or `null` when it is not defined for
+ * them: differing dimensionality, or either having no magnitude.
+ *
+ * Null rather than a number on purpose. Comparing only the overlapping prefix of
+ * mismatched vectors would return a plausible figure computed from two different
+ * embedding spaces — the signature of a collection indexed with another model —
+ * and mis-rank silently, which is the failure this whole change is about. A null
+ * leaves `denseScore` unset, which the merge step reads as "cannot rank by
+ * cosine" and answers by falling back to rank fusion for the whole query.
  */
-function cosineSimilarity(a: number[], b: number[]): number {
-  const n = Math.min(a.length, b.length);
+function cosineSimilarity(a: number[], b: number[]): number | null {
+  if (a.length !== b.length) return null;
   let dot = 0;
   let magA = 0;
   let magB = 0;
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < a.length; i++) {
     dot += a[i] * b[i];
     magA += a[i] * a[i];
     magB += b[i] * b[i];
   }
-  if (magA === 0 || magB === 0) return 0;
+  if (magA === 0 || magB === 0) return null;
   return dot / (Math.sqrt(magA) * Math.sqrt(magB));
 }
 

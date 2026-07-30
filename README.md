@@ -861,6 +861,8 @@ Pass `includeLinked: true` to `codebase_search`:
 
 Results are ranked by **cosine similarity** against the query, not by each hit's position within its own project. A rank only means something inside the list it came from, so ranking on it let the top hit of a small project outrank a far stronger hit from a large one, and capped every cross-project score at `1/61 ≈ 0.016` — below the `SEARCH_MIN_SCORE` default of `0.10`, which then discarded everything. Cosine is an absolute measure against the same query vector, so it is comparable across projects and lands on the same scale the threshold expects. Single-project search is unaffected and still uses Qdrant's server-side RRF.
 
+If a cosine cannot be computed for every hit — a chunk that comes back without a usable dense vector, or a collection indexed with a different embedding model, both of which are logged — ranking falls back to the previous rank fusion for that query rather than mixing two different measures. Scores then sit on the old `≤ 0.0164` scale, so lower `minScore` for that query if you hit it.
+
 Results are tagged with `[project-name]` labels showing which project each result came from. Deduplication is scoped to a single project: the same relative path in two different projects is kept as two separate results, because they are genuinely different files (your own `src/util.ts` and a linked project's are not interchangeable). Within one project, the higher-priority occurrence of a path wins.
 
 > **Note:** Each linked project must be independently indexed (`codebase_index`) before it can be searched.

@@ -81,7 +81,9 @@ describe("cross-project ranking by cosine (#94)", () => {
       [
         {
           label: "repo-a",
-          results: [cosineHit("src/multi.ts", 0.60), cosineHit("src/multi.ts", 0.55), cosineHit("src/multi.ts", 0.51)],
+          // Best chunk deliberately LAST: with it first, an implementation that
+          // simply keeps whichever it saw first would pass without comparing.
+          results: [cosineHit("src/multi.ts", 0.51), cosineHit("src/multi.ts", 0.55), cosineHit("src/multi.ts", 0.60)],
         },
         { label: "repo-b", results: [cosineHit("src/single.ts", 0.70)] },
       ],
@@ -152,7 +154,12 @@ describe("cross-project ranking falls back to fusion (backwards compatibility)",
       10,
     );
 
-    expect(merged.every((r) => r.score <= 1 / 61 + 1e-9)).toBe(true);
+    // Assert the hits survive and carry fusion scores, not just that the values
+    // are small: `[]` would also satisfy a bare upper-bound check.
+    expect(merged).toHaveLength(2);
+    expect(merged.map((r) => r.relativePath).sort()).toEqual(["src/withCosine.ts", "src/withoutCosine.ts"]);
+    // Each is rank 0 of its own collection, so both get the historic 1/61.
+    expect(merged.every((r) => Math.abs(r.score - 1 / 61) < 1e-9)).toBe(true);
   });
 
   it("returns an empty array for empty input", () => {
