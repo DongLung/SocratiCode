@@ -50,6 +50,16 @@ export interface SearchResult {
   score: number;
   /** Source project label (set when searching across multiple collections) */
   project?: string;
+  /**
+   * Cosine similarity of this chunk against the query vector, when the caller
+   * asked for it. `score` from a hybrid query is a Reciprocal Rank Fusion value
+   * derived from ranks *within one collection*, so it says nothing comparable
+   * across collections: an irrelevant top hit in a small project and a perfect
+   * match in a large one both land near the same number. Cosine is an absolute
+   * measure against the same query vector, so it is the one figure that can
+   * order results from different collections against each other.
+   */
+  denseScore?: number;
 }
 
 export interface HealthStatus {

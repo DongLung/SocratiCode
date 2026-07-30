@@ -386,6 +386,14 @@ async function searchChunksWithVector(
   limit: number,
   fileFilter?: string,
   languageFilter?: string,
+  /**
+   * Also return each hit's cosine similarity against `queryVector` as
+   * `denseScore`. Costs one extra field per point on the wire (the dense vector,
+   * fetched by name so the sparse BM25 vector stays behind) and is only needed
+   * when results from different collections have to be ordered against each
+   * other. Off by default, so single-collection search is unchanged.
+   */
+  includeDenseScore = false,
 ): Promise<SearchResult[]> {
   const qdrant = getClient();
 
@@ -415,21 +423,79 @@ async function searchChunksWithVector(
     limit,
     with_payload: true,
     filter: activeFilter,
+    // Ask for the dense vector by name: `true` would also drag back the sparse
+    // BM25 vector, which is bigger and useless for cosine.
+    ...(includeDenseScore ? { with_vector: ["dense"] } : {}),
   };
   const results = await withRetry(
     () => qdrant.query(collectionName, queryPayload),
     "Qdrant hybrid search",
   );
 
-  return results.points.map((r) => ({
-    filePath: r.payload?.filePath as string,
-    relativePath: r.payload?.relativePath as string,
-    content: r.payload?.content as string,
-    startLine: r.payload?.startLine as number,
-    endLine: r.payload?.endLine as number,
-    language: r.payload?.language as string,
-    score: r.score,
-  }));
+  return results.points.map((r) => {
+    const result: SearchResult = {
+      filePath: r.payload?.filePath as string,
+      relativePath: r.payload?.relativePath as string,
+      content: r.payload?.content as string,
+      startLine: r.payload?.startLine as number,
+      endLine: r.payload?.endLine as number,
+      language: r.payload?.language as string,
+      score: r.score,
+    };
+    if (includeDenseScore) {
+      const dense = extractDenseVector(r.vector);
+      // A point can legitimately come back without a usable vector (a BM25-only
+      // match under some configurations), and cosine is undefined against a
+      // vector of another dimensionality. Leaving denseScore unset marks the
+      // whole batch as unrankable by cosine, which the merge step detects and
+      // falls back on, rather than inventing a number that would mis-rank.
+      const cosine = dense ? cosineSimilarity(dense, queryVector) : null;
+      if (cosine === null) {
+        logger.warn("Cross-project ranking: no usable dense vector, falling back to rank fusion", {
+          collection: collectionName,
+          relativePath: result.relativePath,
+          pointDim: dense?.length ?? 0,
+          queryDim: queryVector.length,
+        });
+      } else {
+        result.denseScore = cosine;
+      }
+    }
+    return result;
+  });
+}
+
+/** Pull the dense vector out of a point, whichever shape the client returns. */
+function extractDenseVector(vector: unknown): number[] | null {
+  if (Array.isArray(vector) && typeof vector[0] === "number") return vector as number[];
+  const named = (vector as { dense?: unknown } | null | undefined)?.dense;
+  if (Array.isArray(named) && typeof named[0] === "number") return named as number[];
+  return null;
+}
+
+/**
+ * Cosine similarity between two vectors, or `null` when it is not defined for
+ * them: differing dimensionality, or either having no magnitude.
+ *
+ * Null rather than a number on purpose. Comparing only the overlapping prefix of
+ * mismatched vectors would return a plausible figure computed from two different
+ * embedding spaces — the signature of a collection indexed with another model —
+ * and mis-rank silently, which is the failure this whole change is about. A null
+ * leaves `denseScore` unset, which the merge step reads as "cannot rank by
+ * cosine" and answers by falling back to rank fusion for the whole query.
+ */
+function cosineSimilarity(a: number[], b: number[]): number | null {
+  if (a.length !== b.length) return null;
+  let dot = 0;
+  let magA = 0;
+  let magB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    magA += a[i] * a[i];
+    magB += b[i] * b[i];
+  }
+  if (magA === 0 || magB === 0) return null;
+  return dot / (Math.sqrt(magA) * Math.sqrt(magB));
 }
 
 /** Merge results from multiple collection queries using client-side Reciprocal Rank Fusion.
@@ -441,6 +507,43 @@ export function mergeMultiCollectionResults(
   collectionResults: Array<{ label: string; results: SearchResult[] }>,
   limit: number,
 ): SearchResult[] {
+  // Prefer cosine when every hit carries one. Rank-based fusion cannot order
+  // results from different collections: a rank is only meaningful inside the
+  // list it came from, so the top hit of a tiny project always outranks the
+  // second hit of a large one however weak it is (issue #94). It also caps every
+  // cross-project score at 1/(60+0+1) = 0.0164, six times below the documented
+  // SEARCH_MIN_SCORE default of 0.10, so the threshold silently discarded every
+  // cross-project result. Cosine is comparable across collections and lands on
+  // the same scale as ordinary scores, which fixes both.
+  //
+  // The requirement is deliberately all-or-nothing: mixing a cosine with an RRF
+  // value would compare two different quantities. When any hit lacks one — an
+  // older caller, or a point that came back without a vector — the original
+  // fusion below runs unchanged, so this function's contract for existing
+  // callers is exactly what it was.
+  const everyHitHasCosine =
+    collectionResults.some(({ results }) => results.length > 0) &&
+    collectionResults.every(({ results }) => results.every((r) => typeof r.denseScore === "number"));
+
+  if (everyHitHasCosine) {
+    const byKey = new Map<string, SearchResult>();
+    for (const { label, results } of collectionResults) {
+      for (const r of results) {
+        // Same key as the fusion path: identical relative paths in different
+        // projects are different files and both survive (see this docstring).
+        const key = `${label}::${r.relativePath}`;
+        const candidate: SearchResult = { ...r, project: label, score: r.denseScore as number };
+        delete candidate.denseScore;
+        const existing = byKey.get(key);
+        // Within one project a file can match as several chunks; keep its best.
+        if (!existing || candidate.score > existing.score) byKey.set(key, candidate);
+      }
+    }
+    return Array.from(byKey.values())
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit);
+  }
+
   const RRF_K = 60;
   const scored = new Map<string, SearchResult & { rrfScore: number }>();
 
@@ -504,7 +607,10 @@ export async function searchMultipleCollections(
   const allResults = await Promise.all(
     collections.map(async ({ name, label }) => {
       try {
-        const results = await searchChunksWithVector(name, query, queryVector, perCollectionLimit, fileFilter, languageFilter);
+        // includeDenseScore: results from different collections are about to be
+        // ordered against each other, which their per-collection RRF scores
+        // cannot support.
+        const results = await searchChunksWithVector(name, query, queryVector, perCollectionLimit, fileFilter, languageFilter, true);
         return { label, results };
       } catch (err) {
         logger.warn("searchMultipleCollections: collection query failed, skipping", {
