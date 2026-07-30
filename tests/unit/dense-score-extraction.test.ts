@@ -138,7 +138,12 @@ describe("dense-vector handling for cross-project ranking (#94)", () => {
 
     await searchMultipleCollections(COLLECTIONS, "q", 10);
 
-    expect(mockQuery.mock.calls[0][1]).toMatchObject({ with_vector: ["dense"] });
+    // Every collection, not just the first: one omitting it would leave its hits
+    // without a cosine, which silently drops the whole query to rank fusion.
+    expect(mockQuery.mock.calls).toHaveLength(COLLECTIONS.length);
+    for (const [, payload] of mockQuery.mock.calls) {
+      expect(payload).toMatchObject({ with_vector: ["dense"] });
+    }
   });
 
   it("does not request vectors for a single-collection search", async () => {
