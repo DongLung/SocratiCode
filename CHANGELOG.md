@@ -4,6 +4,25 @@ All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
 
+## [1.10.0](https://github.com/giancarloerra/socraticode/compare/v1.9.2...v1.10.0) (2026-07-30)
+
+### Bug Fixes
+
+* **graph:** resolve shell source directives in the file graph ([4afd144](https://github.com/giancarloerra/socraticode/commit/4afd1446aa8173195b421092fb76270aa7651fd3)), closes [#include](https://github.com/giancarloerra/socraticode/issues/include)
+* **indexer:** cap before filtering so the empty-chunk invariant actually holds ([a5d7edc](https://github.com/giancarloerra/socraticode/commit/a5d7edc1936a4f9de560e90232f512d5ea09728d))
+* **indexer:** never emit chunks with empty content ([255c55d](https://github.com/giancarloerra/socraticode/commit/255c55dd0be59d40eae86c66ca1e98841276359f))
+* **search:** correct the fallback docs and cover the dense-vector paths ([72a3a09](https://github.com/giancarloerra/socraticode/commit/72a3a096bcbbd0cd4dd91b1e99df066d2337f38a))
+* **search:** fall back rather than compare vectors of different shape ([5db7264](https://github.com/giancarloerra/socraticode/commit/5db7264b9f57cca7e2da4cdeddb91a3b18b96a2f))
+* **search:** rank cross-project results by cosine, not intra-collection rank ([38677a6](https://github.com/giancarloerra/socraticode/commit/38677a607a1b6d264d4ee75717b839f6aa1d5330)), closes [#94](https://github.com/giancarloerra/socraticode/issues/94)
+
+### Documentation
+
+* correct the cross-project deduplication claim in the README ([f98d2bc](https://github.com/giancarloerra/socraticode/commit/f98d2bcb9b6550a82aee5ae64c3c850ebf353072)), closes [#96](https://github.com/giancarloerra/socraticode/issues/96)
+
+### Tests
+
+* **search:** assert every collection requests the dense vector ([547a6e2](https://github.com/giancarloerra/socraticode/commit/547a6e2b930441a509e54606e763e0b8b13a837c))
+
 ## [1.9.2](https://github.com/giancarloerra/socraticode/compare/v1.9.1...v1.9.2) (2026-07-28)
 
 ### Bug Fixes
