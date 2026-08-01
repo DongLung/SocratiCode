@@ -127,6 +127,131 @@ export function buildCsNamespaceMap(
 }
 
 /**
+ * Discover every `composer.json` under `projectPath`, project-relative and
+ * forward-slash-normalized.
+ *
+ * `composer.json` is not a graphable file, so it is never in the set returned
+ * by `getGraphableFiles` — this walk is independent of that set, exactly like
+ * {@link findGoModFiles}. The same ignore filter (`createIgnoreFilter` /
+ * `shouldIgnore`) `getGraphableFiles` uses is applied, with the same
+ * trailing-slash convention for directories, so a manifest under
+ * `node_modules/`, `.git/` or any gitignored or `.socraticodeignore`d path is
+ * skipped — matching what the graphable walk would do.
+ *
+ * `vendor/` is additionally skipped unconditionally. It is absent from
+ * DEFAULT_IGNORE_PATTERNS, and a Composer path repository symlinks
+ * `vendor/<pkg>` back to the in-repo source, so a manifest read through it
+ * would register a second directory for a prefix the in-repo manifest already
+ * declared — pointing at a path whose files were indexed under their real
+ * location.
+ */
+function findComposerManifests(projectPath: string): string[] {
+  const ig = createIgnoreFilter(projectPath);
+  const results: string[] = [];
+  const walk = (dir: string): void => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const relPath = toForwardSlash(path.relative(projectPath, path.join(dir, entry.name)));
+      if (shouldIgnore(ig, entry.isDirectory() ? `${relPath}/` : relPath)) continue;
+      if (entry.isDirectory()) {
+        if (entry.name === "vendor") continue;
+        walk(path.join(dir, entry.name));
+      } else if (entry.name === "composer.json") {
+        // Mirrors findGoModFiles: readdirSync Dirents do not follow symlinks,
+        // so a symlinked manifest reports isFile()===false and would be missed.
+        let isFile = entry.isFile();
+        if (!isFile && entry.isSymbolicLink()) {
+          try {
+            isFile = statSync(path.join(dir, entry.name)).isFile();
+          } catch {
+            continue;
+          }
+        }
+        if (isFile) results.push(relPath);
+      }
+    }
+  };
+  walk(projectPath);
+  // Sorted so the directory list for a prefix declared by several manifests is
+  // deterministic across machines — resolveImport tries them in order.
+  return results.sort();
+}
+
+/**
+ * Build a PSR-4 prefix map for PHP projects from every in-repo `composer.json`.
+ *
+ * PHP namespaces carry no path information — `App\Models\User` only maps to
+ * `app/Models/User.php` because `composer.json` says so. The convention-based
+ * fallback in `resolveImport` guesses that mapping from the directory layout,
+ * which works for a single-package project whose namespace root happens to
+ * match a real directory name, and silently drops every import that does not:
+ *
+ *   - `Database\Seeders\Foo`  → the directory is `database/seeders`, lowercase,
+ *                               so the case-sensitive guess misses it
+ *   - `Acme\Auth\Models\Role` → lives in `packages/auth/src/Models/Role.php`,
+ *                               a path no namespace-shaped guess can reach
+ *
+ * The second case is the norm in Composer monorepos (path repositories), where
+ * every domain package declares its own PSR-4 root. Those imports resolved to
+ * nothing, so package-to-package edges were absent from the graph entirely and
+ * impact analysis reported "no callers" for code with many callers.
+ *
+ * Reads the root manifest plus each nested one (`autoload` and `autoload-dev`),
+ * mapping every prefix to directories relative to the manifest that declared
+ * it.
+ *
+ * Call this once per graph build and pass the result to resolveImport.
+ */
+export function buildPhpPsr4Map(projectPath: string): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  const root = path.resolve(projectPath);
+
+  for (const relManifest of findComposerManifests(root)) {
+    const manifest = path.join(root, relManifest);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(manifest, "utf8"));
+    } catch {
+      continue; // malformed manifest — the other manifests still count
+    }
+    if (typeof parsed !== "object" || parsed === null) continue;
+
+    const manifestDir = path.dirname(manifest);
+    const doc = parsed as Record<string, unknown>;
+    const blocks = [doc.autoload, doc["autoload-dev"]];
+
+    for (const block of blocks) {
+      if (typeof block !== "object" || block === null) continue;
+      const psr4 = (block as Record<string, unknown>)["psr-4"];
+      if (typeof psr4 !== "object" || psr4 === null) continue;
+
+      for (const [prefix, target] of Object.entries(psr4 as Record<string, unknown>)) {
+        // PSR-4 allows a string or an array of directories per prefix.
+        const targets = Array.isArray(target) ? target : [target];
+        for (const rawTarget of targets) {
+          if (typeof rawTarget !== "string") continue;
+          const abs = path.resolve(manifestDir, rawTarget);
+          const rel = toForwardSlash(path.relative(root, abs)).replace(/\/+$/, "");
+          // A manifest outside the indexed tree (path.relative escapes upward)
+          // cannot contribute resolvable files.
+          if (rel.startsWith("..")) continue;
+          const list = map.get(prefix) ?? [];
+          if (!list.includes(rel)) list.push(rel);
+          map.set(prefix, list);
+        }
+      }
+    }
+  }
+
+  return map;
+}
+
+/**
  * Information needed to resolve Go imports to local files for ONE module.
  *
  * A project may contain several Go modules (a monorepo with nested
@@ -350,6 +475,7 @@ export function resolveImport(
   jvmSuffixMap?: Map<string, string>,
   csNamespaceMap?: Map<string, string[]>,
   goModuleInfo?: GoModuleInfo[] | null,
+  phpPsr4Map?: Map<string, string[]>,
 ): string | null {
   // Skip obvious external/stdlib modules. Go is excluded from this
   // pre-check because its external classifier in `isExternalModule`
@@ -533,6 +659,28 @@ export function resolveImport(
     case "php": {
       // PSR-4: App\Models\User → app/Models/User.php
       if (moduleSpecifier.includes("\\")) {
+        // Declared PSR-4 first — composer.json is the authority on where a
+        // namespace lives, and the heuristics below can only guess. Longest
+        // matching prefix wins so `Acme\Auth\Database\Seeders\` beats the
+        // shorter `Acme\Auth\` that also prefixes it.
+        if (phpPsr4Map && phpPsr4Map.size > 0) {
+          const namespaced = moduleSpecifier.replace(/^\\+/, "");
+          let bestPrefix = "";
+          for (const prefix of phpPsr4Map.keys()) {
+            if (namespaced.startsWith(prefix) && prefix.length > bestPrefix.length) {
+              bestPrefix = prefix;
+            }
+          }
+          if (bestPrefix) {
+            const relative = namespaced.slice(bestPrefix.length).replace(/\\/g, "/");
+            for (const dir of phpPsr4Map.get(bestPrefix) ?? []) {
+              const candidate = dir ? `${dir}/${relative}` : relative;
+              const hit = resolveRelativePath(candidate, projectPath, projectPath, fileSet, [".php"]);
+              if (hit) return hit;
+            }
+          }
+        }
+
         const filePath = moduleSpecifier.replace(/\\/g, "/");
         // Try exact case first
         const exact = resolveRelativePath(filePath, projectPath, projectPath, fileSet, [".php"]);

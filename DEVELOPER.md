@@ -520,6 +520,11 @@ When `codebase_graph_build` is called:
    ├── Handle relative paths: ./foo → foo.ts, foo/index.ts, etc.
    ├── Try path alias resolution: $lib/foo → src/lib/foo.ts, @/bar → src/bar.ts
    ├── Try extension variations per language (JS/TS extensions or CSS extensions)
+   ├── PHP: PSR-4 prefixes from every in-repo composer.json (once per build)
+   │   ├── Root manifest + each package manifest; autoload and autoload-dev
+   │   ├── Longest matching prefix wins (Acme\Auth\Db\ beats Acme\Auth\)
+   │   ├── vendor/ skipped — path repositories symlink it back to the source
+   │   └── Falls back to the directory-shaped guess when no prefix matches
    ├── SCSS partial resolution: @import "vars" → _vars.scss
    ├── CSS imports from <style> blocks → resolved with CSS extensions (.css/.scss/.sass/.less/.styl)
    ├── Check against known file set for existence

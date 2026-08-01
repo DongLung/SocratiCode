@@ -688,6 +688,34 @@ function extractCalleeNameJs(text: string): string | null {
   return /^[A-Za-z_$][\w$]*$/.test(last) ? last : null;
 }
 
+/**
+ * Callee name for a PHP call expression.
+ *
+ * PHP separates a callee from its receiver with `::` (static) or `->`
+ * (instance), neither of which appears in the JS chain pattern `[\w$.]+`.
+ * Running PHP calls through `extractCalleeNameJs` therefore returned null for
+ * every method and static call — the match stopped dead at the `:` of
+ * `Cls::method(` or the `-` of `$obj->method(` — so only bare
+ * `function_call_expression` nodes survived, which in practice means stdlib
+ * calls. Every cross-file PHP call edge was dropped, leaving `codebase_impact`
+ * and `codebase_symbol` reporting no callers for code with many.
+ *
+ * Takes the identifier immediately before the call's opening parenthesis, which
+ * is the callee however deep the receiver chain is:
+ *
+ *   foo(…)                   → "foo"
+ *   Cls::make(…)             → "make"
+ *   $this->svc->blacklist(…) → "blacklist"
+ *   Acme\Support\Cls::of(…)  → "of"
+ */
+function extractCalleeNamePhp(text: string): string | null {
+  const paren = text.indexOf("(");
+  if (paren <= 0) return null;
+  const receiver = text.slice(0, paren).trimEnd();
+  const m = receiver.match(/([A-Za-z_]\w*)$/);
+  return m ? m[1] : null;
+}
+
 // ── Python ───────────────────────────────────────────────────────────────
 
 function extractFromPython(
@@ -1227,7 +1255,7 @@ function extractFromPhp(
   const rawCalls: ExtractedSymbols["rawCalls"] = [];
   for (const k of ["function_call_expression", "member_call_expression", "scoped_call_expression"]) {
     for (const node of safeFindAll(root, k)) {
-      const calleeName = extractCalleeNameJs(node.text());
+      const calleeName = extractCalleeNamePhp(node.text());
       if (!calleeName) continue;
       const r = node.range();
       const callLine = r.start.line + 1;

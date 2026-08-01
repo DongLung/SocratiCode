@@ -14,7 +14,7 @@ import type {
 import { detectExtensionFromSource, resolveExtensionlessExtension } from "./extensionless.js";
 import { loadPathAliases } from "./graph-aliases.js";
 import { extractImports } from "./graph-imports.js";
-import { buildCsNamespaceMap, buildGoModuleInfo, buildJvmSuffixMap, resolveImport } from "./graph-resolution.js";
+import { buildCsNamespaceMap, buildGoModuleInfo, buildJvmSuffixMap, buildPhpPsr4Map, resolveImport } from "./graph-resolution.js";
 import { computeUnresolvedPct, resolveCallSites } from "./graph-symbol-resolution.js";
 import { extractSymbolsAndCalls, rawCallsToUnresolvedEdges } from "./graph-symbols.js";
 import { createIgnoreFilter, shouldIgnore } from "./ignore.js";
@@ -789,6 +789,14 @@ export async function buildCodeGraph(
   });
   const jvmSuffixMap = hasJvm ? buildJvmSuffixMap(fileSet) : undefined;
 
+  // Build the PSR-4 prefix map for PHP projects. A namespace carries no path
+  // information, so without the declared mapping every `use` statement that
+  // does not happen to mirror the directory layout resolved to null — which is
+  // all of them in a Composer monorepo, where each package declares its own
+  // PSR-4 root under `packages/<name>/src`.
+  const hasPhp = files.some((f) => path.extname(f).toLowerCase() === ".php");
+  const phpPsr4Map = hasPhp ? buildPhpPsr4Map(resolvedPath) : undefined;
+
   // Build a namespace lookup map for C# projects. Each `namespace X.Y.Z` block
   // (or file-scoped `namespace X.Y.Z;`) is recorded so `using X.Y.Z;` directives
   // can be resolved to the file(s) that contribute to that namespace. Without
@@ -927,7 +935,7 @@ export async function buildCodeGraph(
       // Try to resolve to a project file
       // CSS imports from <style> blocks use CSS resolution even when the source file is Svelte/Vue
       const resolutionLanguage = imp.isCssImport ? "css" : language;
-      const resolved = resolveImport(imp.moduleSpecifier, absolutePath, resolvedPath, fileSet, resolutionLanguage, aliases, jvmSuffixMap, csNamespaceMap, goModuleInfo);
+      const resolved = resolveImport(imp.moduleSpecifier, absolutePath, resolvedPath, fileSet, resolutionLanguage, aliases, jvmSuffixMap, csNamespaceMap, goModuleInfo, phpPsr4Map);
       if (resolved) {
         node.dependencies.push(resolved);
 
