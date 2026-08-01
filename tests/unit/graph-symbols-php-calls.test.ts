@@ -73,12 +73,18 @@ class LogoutController {
 
   it("is not confused by a parenthesis inside a string literal", () => {
     // A depth scan that ignores quoting unbalances here and mis-slices.
-    expect(new Set(callsIn("<?php\nModel::where('a)b')->get();\n")))
-      .toEqual(new Set(["where", "get"]));
+    const names = callsIn("<?php\nModel::where('a)b')->get();\n");
+
+    // Length before the set: `new Set` collapses duplicates, so a partially
+    // wrong ["where", "where", "get"] would satisfy the set alone.
+    expect(names).toHaveLength(2);
+    expect(new Set(names)).toEqual(new Set(["where", "get"]));
   });
 
   it("names a nested call by its own callee, not the enclosing one", () => {
-    expect(new Set(callsIn("<?php\nFoo::bar(Baz::qux($v));\n")))
-      .toEqual(new Set(["bar", "qux"]));
+    const names = callsIn("<?php\nFoo::bar(Baz::qux($v));\n");
+
+    expect(names).toHaveLength(2);
+    expect(new Set(names)).toEqual(new Set(["bar", "qux"]));
   });
 });
