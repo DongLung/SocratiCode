@@ -60,4 +60,25 @@ class LogoutController {
     // Regression guard: the old JS extractor returned null here.
     expect(callsIn("<?php\nCls::of($a);\n")).toEqual(["of"]);
   });
+
+  it("names each link of a fluent chain distinctly", () => {
+    // ast-grep reports one node per link and each node's text starts at the
+    // head of the chain, so keying on the FIRST "(" names the outermost call
+    // `where` — three times — instead of where/orderBy/get.
+    const names = callsIn("<?php\nModel::where('x')->orderBy('y')->get();\n");
+
+    expect(names).toHaveLength(3);
+    expect(new Set(names)).toEqual(new Set(["where", "orderBy", "get"]));
+  });
+
+  it("is not confused by a parenthesis inside a string literal", () => {
+    // A depth scan that ignores quoting unbalances here and mis-slices.
+    expect(new Set(callsIn("<?php\nModel::where('a)b')->get();\n")))
+      .toEqual(new Set(["where", "get"]));
+  });
+
+  it("names a nested call by its own callee, not the enclosing one", () => {
+    expect(new Set(callsIn("<?php\nFoo::bar(Baz::qux($v));\n")))
+      .toEqual(new Set(["bar", "qux"]));
+  });
 });

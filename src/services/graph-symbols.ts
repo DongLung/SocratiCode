@@ -700,18 +700,47 @@ function extractCalleeNameJs(text: string): string | null {
  * calls. Every cross-file PHP call edge was dropped, leaving `codebase_impact`
  * and `codebase_symbol` reporting no callers for code with many.
  *
- * Takes the identifier immediately before the call's opening parenthesis, which
- * is the callee however deep the receiver chain is:
+ * The callee is the identifier before *this* call's own argument list, which is
+ * the last top-level parenthesis group in the node's text. Taking the first `(`
+ * instead names the wrong method on a fluent chain: ast-grep reports one node
+ * per link, and each node's text starts at the head of the chain, so
+ * `Model::where('x')->orderBy('y')->get()` would yield `where` three times
+ * rather than `where`, `orderBy`, `get`.
  *
- *   foo(…)                   → "foo"
- *   Cls::make(…)             → "make"
- *   $this->svc->blacklist(…) → "blacklist"
- *   Acme\Support\Cls::of(…)  → "of"
+ * Quoted sections are skipped so a parenthesis inside a string literal —
+ * `where('a)b')` — cannot unbalance the scan.
+ *
+ *   foo(…)                                 → "foo"
+ *   Cls::make(…)                           → "make"
+ *   $this->svc->blacklist(…)               → "blacklist"
+ *   Acme\Support\Cls::of(…)                → "of"
+ *   Model::where(…)->orderBy(…)->get()     → "get"   (outermost node)
  */
 function extractCalleeNamePhp(text: string): string | null {
-  const paren = text.indexOf("(");
-  if (paren <= 0) return null;
-  const receiver = text.slice(0, paren).trimEnd();
+  let depth = 0;
+  let quote: string | null = null;
+  let lastTopLevelOpen = -1;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+
+    if (quote !== null) {
+      if (ch === "\\") i++; // escaped char — consume the pair
+      else if (ch === quote) quote = null;
+      continue;
+    }
+
+    if (ch === "'" || ch === '"') quote = ch;
+    else if (ch === "(") {
+      if (depth === 0) lastTopLevelOpen = i;
+      depth++;
+    } else if (ch === ")") {
+      depth--;
+    }
+  }
+
+  if (lastTopLevelOpen <= 0) return null;
+  const receiver = text.slice(0, lastTopLevelOpen).trimEnd();
   const m = receiver.match(/([A-Za-z_]\w*)$/);
   return m ? m[1] : null;
 }
