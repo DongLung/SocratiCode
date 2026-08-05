@@ -82,6 +82,15 @@ function nameShardPointId(projectId: string, shardKey: string): string {
 function revShardPointId(projectId: string, bucketHex: string): string {
   return uuidFromString(`${projectId}::revidx::${bucketHex}`);
 }
+/**
+ * Id of continuation part `i` (i >= 1) of a shard whose part 0 lives at the
+ * shard's original id. Keeping part 0 on the original id is what makes the
+ * split invisible to graphs written before it existed: a legacy single-point
+ * shard *is* a part 0 with no `parts` field.
+ */
+function shardPartPointId(primaryKey: string, part: number): string {
+  return uuidFromString(`${primaryKey}::part${part}`);
+}
 
 // ── Upsert sizing ────────────────────────────────────────────────────────
 
@@ -183,6 +192,163 @@ async function upsertWithinBudget(
 /** Point-count cap per upsert. Unchanged from before the byte budget existed. */
 const UPSERT_MAX_POINTS = 50;
 
+// ── Multi-part shards (#99) ──────────────────────────────────────────────
+//
+// A name shard holds every symbol in the repo whose name starts with one
+// character, and a reverse shard every caller list in its hash bucket, so both
+// grow with the whole repo rather than with any one file. On a large enough
+// codebase a single bucket outgrows Qdrant's request ceiling and the build
+// aborts. When that happens the bucket is split across several points, entry by
+// entry: part 0 stays on the shard's original id and gains `parts: N`,
+// continuation parts live at derived ids. A shard that fits stays a single
+// point with no `parts` field — byte-identical to what every existing graph
+// already contains, so there is nothing to migrate and older graphs read
+// unchanged. The split is one-way: a version predating it would read only
+// part 0 of a split shard.
+
+/**
+ * Split a record's entries into groups whose serialized payloads each fit the
+ * per-part budget. Entries are never divided, so an entry whose own size
+ * exceeds the budget cannot be placed and is reported by name via
+ * {@link SymbolGraphPointTooLargeError} — with realistic reference sizes that
+ * takes a six-figure number of occurrences of one symbol name, so hitting it
+ * means something is genuinely pathological and silence would be worse.
+ */
+function splitRecordByBudget<V>(
+  record: Record<string, V>,
+  what: string,
+): Array<Record<string, V>> {
+  // Envelope allowance for the payload wrapper around the entries (kind, shard
+  // key, part counters, point id, vector). Generous on purpose; it costs a few
+  // hundred bytes of budget.
+  const ENVELOPE_BYTES = 1024;
+  const budget = QDRANT_UPSERT_BUDGET_BYTES - ENVELOPE_BYTES;
+
+  const groups: Array<Record<string, V>> = [];
+  let current: Record<string, V> = {};
+  let currentBytes = 0;
+
+  for (const [key, value] of Object.entries(record)) {
+    // +6 approximates the JSON glue ("key":value,) beyond key and value bytes.
+    const entryBytes = Buffer.byteLength(JSON.stringify(key), "utf-8") + Buffer.byteLength(JSON.stringify(value), "utf-8") + 6;
+    if (entryBytes > budget) {
+      throw new SymbolGraphPointTooLargeError(`${what} entry '${key}'`, entryBytes, budget);
+    }
+    if (currentBytes + entryBytes > budget && currentBytes > 0) {
+      groups.push(current);
+      current = {};
+      currentBytes = 0;
+    }
+    current[key] = value;
+    currentBytes += entryBytes;
+  }
+  if (currentBytes > 0 || groups.length === 0) groups.push(current);
+  return groups;
+}
+
+/**
+ * Write a shard as one point when it fits, or as parts when it does not, and
+ * remove continuation parts a previous, larger write left behind. The
+ * `payloadFor` callback supplies each part's payload so name and reverse
+ * shards keep their existing payload shapes exactly.
+ */
+async function saveShardPoints<V>(
+  collName: string,
+  primaryKey: string,
+  primaryId: string,
+  record: Record<string, V>,
+  what: string,
+  payloadFor: (entries: Record<string, V>, part: number, parts: number) => Record<string, unknown>,
+): Promise<void> {
+  const qdrant = getClient();
+
+  const single: SymgraphPoint = { id: primaryId, vector: [0], payload: payloadFor(record, 0, 1) };
+  const parts =
+    pointBytes(single) <= QDRANT_UPSERT_BUDGET_BYTES
+      ? [record]
+      : splitRecordByBudget(record, what);
+
+  const points: SymgraphPoint[] =
+    parts.length === 1
+      ? [single] // the common case: exactly the payload every graph has today
+      : parts.map((entries, i) => ({
+          id: i === 0 ? primaryId : shardPartPointId(primaryKey, i),
+          vector: [0],
+          payload: payloadFor(entries, i, parts.length),
+        }));
+
+  // How many continuation parts did the previous write leave? Read the old
+  // part 0 before overwriting it; absent point or absent field both mean one.
+  let oldParts = 1;
+  try {
+    const existing = await qdrant.retrieve(collName, { ids: [primaryId], with_payload: true });
+    const declared = existing[0]?.payload?.parts;
+    if (typeof declared === "number" && declared > 1) oldParts = declared;
+  } catch {
+    // A fresh collection has nothing to read; a transient read failure only
+    // delays cleanup until the next write, it cannot corrupt data.
+  }
+
+  await upsertWithinBudget(collName, points, () => what);
+
+  if (oldParts > parts.length) {
+    const stale: string[] = [];
+    for (let i = Math.max(1, parts.length); i < oldParts; i++) {
+      stale.push(shardPartPointId(primaryKey, i));
+    }
+    await qdrant.delete(collName, { points: stale });
+  }
+}
+
+/**
+ * Read a shard written by {@link saveShardPoints}: the point at the shard's
+ * original id, plus continuation parts when it declares any. Returns the
+ * merged entries, or null when a declared part is missing — the shard is then
+ * incomplete and pretending otherwise would under-report quietly.
+ */
+async function loadShardPoints<V>(
+  collName: string,
+  primaryKey: string,
+  primaryId: string,
+  entriesOf: (payload: Record<string, unknown> | null | undefined) => Record<string, V> | null,
+  logContext: Record<string, unknown>,
+): Promise<Record<string, V> | null> {
+  const qdrant = getClient();
+  const primary = await qdrant.retrieve(collName, { ids: [primaryId], with_payload: true });
+  if (primary.length === 0) return null;
+
+  const payload = primary[0].payload as Record<string, unknown> | null | undefined;
+  const first = entriesOf(payload);
+  if (first === null) return null;
+
+  const declared = payload?.parts;
+  const parts = typeof declared === "number" && declared > 1 ? declared : 1;
+  if (parts === 1) return first; // every pre-split graph, and most shards after
+
+  const restIds: string[] = [];
+  for (let i = 1; i < parts; i++) restIds.push(shardPartPointId(primaryKey, i));
+  const rest = await qdrant.retrieve(collName, { ids: restIds, with_payload: true });
+  if (rest.length !== restIds.length) {
+    logger.warn("Shard is missing continuation parts (returning null)", {
+      ...logContext,
+      declaredParts: parts,
+      found: rest.length + 1,
+    });
+    return null;
+  }
+
+  const merged: Record<string, V> = { ...first };
+  for (const point of rest) {
+    const entries = entriesOf(point.payload as Record<string, unknown> | null | undefined);
+    if (entries === null) {
+      logger.warn("Shard continuation part has no entries (returning null)", { ...logContext });
+      return null;
+    }
+    Object.assign(merged, entries);
+  }
+  return merged;
+}
+
 // ── Collection lifecycle ─────────────────────────────────────────────────
 
 const collectionsReady = new Set<string>();
@@ -226,9 +392,11 @@ export async function saveSymbolGraphMeta(
   const collName = symgraphMetaCollectionName(projectId);
   await ensureCollection(collName);
   const qdrant = getClient();
-  await qdrant.upsert(collName, {
-    points: [{ id: metaPointId(projectId), vector: [0], payload: { meta } }],
-  });
+  const point: SymgraphPoint = { id: metaPointId(projectId), vector: [0], payload: { meta } };
+  // Counters only, so it cannot realistically overflow — guarded anyway so
+  // this file has no unguarded upsert path (#99).
+  assertPointFits(point, "symbol graph metadata");
+  await qdrant.upsert(collName, { points: [point] });
 }
 
 export async function loadSymbolGraphMeta(
@@ -346,18 +514,17 @@ export async function saveNameShard(
 ): Promise<void> {
   const collName = symgraphIndexCollectionName(projectId);
   await ensureCollection(collName);
-  const qdrant = getClient();
-  const point: SymgraphPoint = {
-    id: nameShardPointId(projectId, shardKey),
-    vector: [0],
-    payload: { kind: "name", shard: shardKey, nameToSymbols },
-  };
-  // A name shard holds every symbol whose name starts with one character, so on
-  // a large enough repo one shard can outgrow the request ceiling on its own.
-  // Splitting it would change the on-disk layout; naming it in the error keeps
-  // the failure honest and actionable without that.
-  assertPointFits(point, `name index shard '${shardKey}'`);
-  await qdrant.upsert(collName, { points: [point] });
+  await saveShardPoints(
+    collName,
+    `${projectId}::nameidx::${shardKey}`,
+    nameShardPointId(projectId, shardKey),
+    nameToSymbols,
+    `name index shard '${shardKey}'`,
+    (entries, part, parts) =>
+      parts === 1
+        ? { kind: "name", shard: shardKey, nameToSymbols: entries }
+        : { kind: "name", shard: shardKey, part, parts, nameToSymbols: entries },
+  );
 }
 
 export async function loadNameShard(
@@ -367,13 +534,13 @@ export async function loadNameShard(
   try {
     const collName = symgraphIndexCollectionName(projectId);
     await ensureCollection(collName);
-    const qdrant = getClient();
-    const points = await qdrant.retrieve(collName, {
-      ids: [nameShardPointId(projectId, shardKey)],
-      with_payload: true,
-    });
-    if (points.length === 0) return null;
-    return (points[0].payload?.nameToSymbols as Record<string, SymbolRef[]>) ?? null;
+    return await loadShardPoints<SymbolRef[]>(
+      collName,
+      `${projectId}::nameidx::${shardKey}`,
+      nameShardPointId(projectId, shardKey),
+      (payload) => (payload?.nameToSymbols as Record<string, SymbolRef[]>) ?? null,
+      { projectId, shardKey },
+    );
   } catch (err) {
     logger.warn("loadNameShard failed (returning null)", {
       projectId,
@@ -393,15 +560,18 @@ export async function saveReverseShard(
 ): Promise<void> {
   const collName = symgraphIndexCollectionName(projectId);
   await ensureCollection(collName);
-  const qdrant = getClient();
   const bucketHex = reverseShardHex(bucket);
-  const point: SymgraphPoint = {
-    id: revShardPointId(projectId, bucketHex),
-    vector: [0],
-    payload: { kind: "reverse", bucket, reverseEdges },
-  };
-  assertPointFits(point, `reverse-call index shard ${bucketHex}`);
-  await qdrant.upsert(collName, { points: [point] });
+  await saveShardPoints(
+    collName,
+    `${projectId}::revidx::${bucketHex}`,
+    revShardPointId(projectId, bucketHex),
+    reverseEdges,
+    `reverse-call index shard ${bucketHex}`,
+    (entries, part, parts) =>
+      parts === 1
+        ? { kind: "reverse", bucket, reverseEdges: entries }
+        : { kind: "reverse", bucket, part, parts, reverseEdges: entries },
+  );
 }
 
 export async function loadReverseShard(
@@ -411,14 +581,14 @@ export async function loadReverseShard(
   try {
     const collName = symgraphIndexCollectionName(projectId);
     await ensureCollection(collName);
-    const qdrant = getClient();
     const bucketHex = reverseShardHex(bucket);
-    const points = await qdrant.retrieve(collName, {
-      ids: [revShardPointId(projectId, bucketHex)],
-      with_payload: true,
-    });
-    if (points.length === 0) return null;
-    return (points[0].payload?.reverseEdges as Record<string, string[]>) ?? null;
+    return await loadShardPoints<string[]>(
+      collName,
+      `${projectId}::revidx::${bucketHex}`,
+      revShardPointId(projectId, bucketHex),
+      (payload) => (payload?.reverseEdges as Record<string, string[]>) ?? null,
+      { projectId, bucket },
+    );
   } catch (err) {
     logger.warn("loadReverseShard failed (returning null)", {
       projectId,
