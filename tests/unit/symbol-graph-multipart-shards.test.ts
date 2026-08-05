@@ -133,11 +133,16 @@ describe("multi-part symbol shards (#99)", () => {
     for (const p of points) {
       expect(Buffer.byteLength(JSON.stringify(p), "utf-8")).toBeLessThanOrEqual(QDRANT_UPSERT_BUDGET_BYTES);
     }
-    for (const b of requestBytes) expect(b).toBeLessThanOrEqual(QDRANT_UPSERT_BUDGET_BYTES * 1.05);
+    // Only the {"points":[...]} wrapper sits above the per-part budget.
+    for (const b of requestBytes) expect(b).toBeLessThanOrEqual(QDRANT_UPSERT_BUDGET_BYTES + 1024);
 
     // Part 0 sits on the shard's ORIGINAL id and declares the count.
     const primary = points.find((p) => (p.payload.part ?? 0) === 0 && p.payload.parts !== undefined);
     expect(primary).toBeDefined();
+    // On the ORIGINAL id specifically: the legacy-compat guarantee and the
+    // downgrade caveat both hang on part 0 not moving.
+    const { _internal } = await import("../../src/services/symbol-graph-store.js");
+    expect(primary?.id).toBe(_internal.nameShardPointId(PROJ, "g"));
     expect(primary?.payload.parts).toBe(points.length);
 
     // The reader reassembles the exact record, no entry lost or duplicated.
@@ -239,7 +244,10 @@ describe("multi-part symbol shards (#99)", () => {
     // One symbol name with an absurd number of references — the only shape
     // entry-level splitting cannot place. Must fail loudly by name.
     const record = { megaSymbol: refsFor("megaSymbol", 160_000) };
-    await expect(saveNameShard(PROJ, "z", record)).rejects.toThrow(SymbolGraphPointTooLargeError);
-    await expect(saveNameShard(PROJ, "z", record)).rejects.toThrow(/megaSymbol/);
+    // One invocation, both assertions: rebuilding and reserializing a ~29 MB
+    // record twice doubles the test's cost for no extra coverage.
+    const err = await saveNameShard(PROJ, "z", record).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SymbolGraphPointTooLargeError);
+    expect((err as Error).message).toMatch(/megaSymbol/);
   });
 });

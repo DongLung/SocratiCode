@@ -76,11 +76,23 @@ function metaPointId(projectId: string): string {
 function filePointId(projectId: string, relativePath: string): string {
   return uuidFromString(`${projectId}::file::${relativePath}`);
 }
+/**
+ * Seed strings for shard point ids. Single-sourced on purpose: part 0's id and
+ * every continuation id are hashed from the SAME seed, so a seed edited in one
+ * place but not the other would strand every split shard's continuation parts
+ * at unreachable ids without any type error.
+ */
+function nameShardSeed(projectId: string, shardKey: string): string {
+  return `${projectId}::nameidx::${shardKey}`;
+}
+function revShardSeed(projectId: string, bucketHex: string): string {
+  return `${projectId}::revidx::${bucketHex}`;
+}
 function nameShardPointId(projectId: string, shardKey: string): string {
-  return uuidFromString(`${projectId}::nameidx::${shardKey}`);
+  return uuidFromString(nameShardSeed(projectId, shardKey));
 }
 function revShardPointId(projectId: string, bucketHex: string): string {
-  return uuidFromString(`${projectId}::revidx::${bucketHex}`);
+  return uuidFromString(revShardSeed(projectId, bucketHex));
 }
 /**
  * Id of continuation part `i` (i >= 1) of a shard whose part 0 lives at the
@@ -336,7 +348,14 @@ async function loadShardPoints<V>(
 
   const restIds: string[] = [];
   for (let i = 1; i < parts; i++) restIds.push(shardPartPointId(primaryKey, i));
-  const rest = await qdrant.retrieve(collName, { ids: restIds, with_payload: true });
+  // Each part can be ~24 MiB, so fetch a couple at a time: one retrieve for all
+  // of them would buffer the entire shard's response, its parsed payloads and
+  // the merged copy simultaneously. Two per request bounds the transient.
+  const RETRIEVE_PART_CHUNK = 2;
+  const rest: Awaited<ReturnType<typeof qdrant.retrieve>> = [];
+  for (let i = 0; i < restIds.length; i += RETRIEVE_PART_CHUNK) {
+    rest.push(...(await qdrant.retrieve(collName, { ids: restIds.slice(i, i + RETRIEVE_PART_CHUNK), with_payload: true })));
+  }
   if (rest.length !== restIds.length) {
     logger.warn("Shard is missing continuation parts (returning null)", {
       ...logContext,
@@ -538,7 +557,7 @@ export async function saveNameShard(
   await ensureCollection(collName);
   await saveShardPoints(
     collName,
-    `${projectId}::nameidx::${shardKey}`,
+    nameShardSeed(projectId, shardKey),
     nameShardPointId(projectId, shardKey),
     nameToSymbols,
     `name index shard '${shardKey}'`,
@@ -558,7 +577,7 @@ export async function loadNameShard(
     await ensureCollection(collName);
     return await loadShardPoints<SymbolRef[]>(
       collName,
-      `${projectId}::nameidx::${shardKey}`,
+      nameShardSeed(projectId, shardKey),
       nameShardPointId(projectId, shardKey),
       (payload) => (payload?.nameToSymbols as Record<string, SymbolRef[]>) ?? null,
       { projectId, shardKey },
@@ -585,7 +604,7 @@ export async function saveReverseShard(
   const bucketHex = reverseShardHex(bucket);
   await saveShardPoints(
     collName,
-    `${projectId}::revidx::${bucketHex}`,
+    revShardSeed(projectId, bucketHex),
     revShardPointId(projectId, bucketHex),
     reverseEdges,
     `reverse-call index shard ${bucketHex}`,
@@ -606,7 +625,7 @@ export async function loadReverseShard(
     const bucketHex = reverseShardHex(bucket);
     return await loadShardPoints<string[]>(
       collName,
-      `${projectId}::revidx::${bucketHex}`,
+      revShardSeed(projectId, bucketHex),
       revShardPointId(projectId, bucketHex),
       (payload) => (payload?.reverseEdges as Record<string, string[]>) ?? null,
       { projectId, bucket },
