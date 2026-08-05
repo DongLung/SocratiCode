@@ -27,6 +27,10 @@ interface StoredPoint {
 }
 const store = new Map<string, Map<string, StoredPoint>>(); // collection -> id -> point
 const requestBytes: number[] = []; // serialized size of every upsert request
+const retrieveOpts: Array<Record<string, unknown>> = []; // opts of every retrieve
+/** When > 0, the Nth upsert request from now throws (1 = the next one). */
+let failUpsertAt = 0;
+let upsertCount = 0;
 
 vi.mock("../../src/services/qdrant.js", () => ({
   getClient: () => ({
@@ -35,12 +39,17 @@ vi.mock("../../src/services/qdrant.js", () => ({
       if (!store.has(name)) store.set(name, new Map());
     },
     upsert: async (name: string, body: { points: StoredPoint[] }) => {
+      upsertCount++;
+      if (failUpsertAt > 0 && upsertCount === failUpsertAt) {
+        throw Object.assign(new Error("Bad Request"), { status: 400 });
+      }
       requestBytes.push(Buffer.byteLength(JSON.stringify(body), "utf-8"));
       const coll = store.get(name) ?? new Map<string, StoredPoint>();
       for (const p of body.points) coll.set(String(p.id), p);
       store.set(name, coll);
     },
     retrieve: async (name: string, opts: { ids: Array<string | number> }) => {
+      retrieveOpts.push(opts as Record<string, unknown>);
       const coll = store.get(name) ?? new Map<string, StoredPoint>();
       return opts.ids.map((id) => coll.get(String(id))).filter((p): p is StoredPoint => p !== undefined);
     },
@@ -94,6 +103,9 @@ describe("multi-part symbol shards (#99)", () => {
   beforeEach(() => {
     store.clear();
     requestBytes.length = 0;
+    retrieveOpts.length = 0;
+    failUpsertAt = 0;
+    upsertCount = 0;
     resetSymbolGraphCollectionCache();
     vi.mocked(logger.warn).mockClear();
   });
@@ -186,6 +198,41 @@ describe("multi-part symbol shards (#99)", () => {
       expect.stringContaining("missing continuation parts"),
       expect.objectContaining({ shardKey: "m" }),
     );
+  });
+
+  it("refuses to serve a mixture when a rewrite died between parts", async () => {
+    // Two split writes with DIFFERENT keys land at the same deterministic part
+    // ids. If the second write dies after its part 0 is stored, the old
+    // continuation parts are still there and the declared count can match, so a
+    // count-only reader would quietly merge two writes into a record equal to
+    // neither. The write identity must catch this and refuse.
+    const oldRecord: Record<string, SymbolRef[]> = {};
+    for (let n = 0; n < 200; n++) oldRecord[`kold${n}`] = refsFor(`kold${n}`, 1000);
+    await saveNameShard(PROJ, "w", oldRecord);
+    expect(pointsInIndex().length).toBeGreaterThan(1);
+
+    const newRecord: Record<string, SymbolRef[]> = {};
+    for (let n = 0; n < 200; n++) newRecord[`jnew${n}`] = refsFor(`jnew${n}`, 1000);
+    // Parts are near the budget, so each part travels in its own request; fail
+    // the SECOND request of this write (the first carries the new part 0).
+    failUpsertAt = upsertCount + 2;
+    await expect(saveNameShard(PROJ, "w", newRecord)).rejects.toThrow();
+
+    const loaded = await loadNameShard(PROJ, "w");
+    expect(loaded).toBeNull(); // never a silent old/new key mixture
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("different write"),
+      expect.objectContaining({ shardKey: "w" }),
+    );
+  });
+
+  it("probes the previous part count with a payload selector, not the full payload", async () => {
+    await saveNameShard(PROJ, "p", { tiny: refsFor("tiny", 1) });
+    // The pre-write probe must not re-download a payload that can be ~24 MiB
+    // just to read one integer.
+    const probe = retrieveOpts.find((o) => Array.isArray(o.with_payload));
+    expect(probe).toBeDefined();
+    expect(probe?.with_payload).toEqual(["parts"]);
   });
 
   it("throws a named error when one ENTRY alone exceeds a part budget", async () => {

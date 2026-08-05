@@ -14,7 +14,7 @@
  * All points use the dummy-vector-`[0]` pattern (Qdrant requires a vector).
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   symgraphFileCollectionName,
   symgraphIndexCollectionName,
@@ -268,20 +268,29 @@ async function saveShardPoints<V>(
       ? [record]
       : splitRecordByBudget(record, what);
 
+  // Every part of one split write carries the same random write identity. The
+  // part COUNT alone cannot prove the parts belong together: continuation ids
+  // are deterministic, so a rewrite that dies after part 0 leaves the previous
+  // write's continuations at exactly the ids the new part 0 declares, and a
+  // count-only reader would quietly merge two different writes into a record
+  // equal to neither. Matching identities is what makes that detectable.
+  const writeId = randomUUID();
   const points: SymgraphPoint[] =
     parts.length === 1
       ? [single] // the common case: exactly the payload every graph has today
       : parts.map((entries, i) => ({
           id: i === 0 ? primaryId : shardPartPointId(primaryKey, i),
           vector: [0],
-          payload: payloadFor(entries, i, parts.length),
+          payload: { ...payloadFor(entries, i, parts.length), write: writeId },
         }));
 
   // How many continuation parts did the previous write leave? Read the old
   // part 0 before overwriting it; absent point or absent field both mean one.
   let oldParts = 1;
   try {
-    const existing = await qdrant.retrieve(collName, { ids: [primaryId], with_payload: true });
+    // Only `parts` is consumed — a payload selector keeps this probe at a few
+    // bytes instead of re-downloading a payload that can be ~24 MiB.
+    const existing = await qdrant.retrieve(collName, { ids: [primaryId], with_payload: ["parts"] });
     const declared = existing[0]?.payload?.parts;
     if (typeof declared === "number" && declared > 1) oldParts = declared;
   } catch {
@@ -337,9 +346,22 @@ async function loadShardPoints<V>(
     return null;
   }
 
+  const writeId = payload?.write;
   const merged: Record<string, V> = { ...first };
   for (const point of rest) {
-    const entries = entriesOf(point.payload as Record<string, unknown> | null | undefined);
+    const partPayload = point.payload as Record<string, unknown> | null | undefined;
+    // A continuation part from a DIFFERENT write than part 0 means a rewrite
+    // died partway: the ids line up (they are deterministic) but the contents
+    // are two writes interleaved. Serving the merge would return a record
+    // equal to neither write, silently — treat it exactly like a missing part.
+    if (partPayload?.write !== writeId) {
+      logger.warn("Shard continuation part belongs to a different write (returning null)", {
+        ...logContext,
+        declaredParts: parts,
+      });
+      return null;
+    }
+    const entries = entriesOf(partPayload);
     if (entries === null) {
       logger.warn("Shard continuation part has no entries (returning null)", { ...logContext });
       return null;
