@@ -1220,7 +1220,17 @@ function extractFromRuby(
 
   const rawCalls: ExtractedSymbols["rawCalls"] = [];
   for (const node of safeFindAll(root, "call")) {
-    const calleeName = extractCalleeNameJs(node.text());
+    // Ask the grammar, not the text. tree-sitter-ruby's `call` node carries the
+    // callee in its `method` field for every call shape — parenthesised or not,
+    // command style (`has_many :posts`), safe navigation (`a&.b`), block calls,
+    // and each link of a fluent chain as its own node. The previous
+    // extractCalleeNameJs(text) parse required a `(` before the name, so every
+    // parenthesis-less call — the dominant Ruby idiom — was silently dropped
+    // and Ruby files contributed almost no call edges. (A bare receiverless,
+    // argumentless `helper` parses as a plain identifier, indistinguishable
+    // from a variable read, so it is not a `call` node and stays out.)
+    const methodNode = node.field("method");
+    const calleeName = methodNode ? methodNode.text() : extractCalleeNameJs(node.text());
     if (!calleeName) continue;
     const r = node.range();
     const callLine = r.start.line + 1;
