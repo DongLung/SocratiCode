@@ -44,6 +44,26 @@ function safeFindAll(node: any, kind: string): any[] {
   }
 }
 
+/**
+ * Single-node counterpart of {@link safeFindAll}. ast-grep REJECTS a kind the
+ * grammar does not define — it throws rather than returning null — so a direct
+ * `node.find({rule:{kind}})` written with a `?? find(otherKind)` fallback never
+ * reaches its fallback on the grammars that need it. The concrete casualty:
+ * `.js`/`.jsx`/`.mjs`/`.cjs` all parse with the JavaScript grammar, which has
+ * no `type_identifier`, so one `class` in a plain-JS file aborted the whole
+ * extraction and the file contributed a bare module symbol and zero calls.
+ * Returning null keeps every existing fallback chain meaningful.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+function safeFind(node: any, kind: string): any | null {
+  if (!node) return null;
+  try {
+    return node.find({ rule: { kind } }) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 interface ScopeFrame {
   name: string;
   /** Line at which this scope begins (used to limit call-site attribution). */
@@ -574,8 +594,15 @@ function extractFromTsLike(
 
   // Class declarations
   for (const node of safeFindAll(root, "class_declaration")) {
-    const nameNode = node.find({ rule: { kind: "type_identifier" } })
-      ?? node.find({ rule: { kind: "identifier" } });
+    // The name FIELD, not a subtree search: safeFind's recursive DFS reaches a
+    // decorator's identifier before the class's own name, so `@sealed class X`
+    // would extract as a class named `sealed` and collide with the real
+    // decorator function at resolution time. The field is grammar-precise on
+    // JS (identifier) and TS/TSX (type_identifier) alike; the searches remain
+    // only as a belt for grammars without the field.
+    const nameNode = node.field("name")
+      ?? safeFind(node, "type_identifier")
+      ?? safeFind(node, "identifier");
     if (!nameNode) continue;
     const name = nameNode.text();
     const range = node.range();
@@ -588,9 +615,26 @@ function extractFromTsLike(
     symbols.push(sym);
     scopes.push({ name, startLine, endLine, symbolId: sym.id });
 
-    // Methods inside the class
-    for (const m of safeFindAll(node, "method_definition")) {
-      const mName = m.find({ rule: { kind: "property_identifier" } })?.text();
+    // Methods inside the class — DIRECT children of the class body only. A
+    // recursive scan fabricates phantom methods: an object-literal shorthand
+    // handler inside a field initializer or a call argument, or a nested
+    // class's methods, would all be stamped onto THIS class and persisted into
+    // the name index, corrupting name-based resolution and impact seeds.
+    const body = node.field("body");
+    // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+    let members: any[] = [];
+    try {
+      // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+      members = body ? body.children().filter((c: any) => c.kind() === "method_definition") : [];
+    } catch {
+      members = [];
+    }
+    for (const m of members) {
+      // Name from the field, accepting only a literal property name: a
+      // computed name like `[Symbol.iterator]` has no static identity, and
+      // searching inside it used to persist a method that does not exist.
+      const mNameNode = m.field("name");
+      const mName = mNameNode?.kind() === "property_identifier" ? mNameNode.text() : null;
       if (!mName) continue;
       const mr = m.range();
       const mStart = mr.start.line + 1;
@@ -609,7 +653,7 @@ function extractFromTsLike(
 
   // Top-level function declarations
   for (const node of safeFindAll(root, "function_declaration")) {
-    const nameNode = node.find({ rule: { kind: "identifier" } });
+    const nameNode = safeFind(node, "identifier");
     if (!nameNode) continue;
     const name = nameNode.text();
     const r = node.range();
@@ -625,7 +669,7 @@ function extractFromTsLike(
 
   // Generator function declarations
   for (const node of safeFindAll(root, "generator_function_declaration")) {
-    const nameNode = node.find({ rule: { kind: "identifier" } });
+    const nameNode = safeFind(node, "identifier");
     if (!nameNode) continue;
     const name = nameNode.text();
     const r = node.range();
@@ -642,11 +686,11 @@ function extractFromTsLike(
   // Named arrow functions: `const foo = (...) => {...}` or `const foo = function(...) {...}`
   for (const node of safeFindAll(root, "lexical_declaration")) {
     for (const decl of safeFindAll(node, "variable_declarator")) {
-      const idNode = decl.find({ rule: { kind: "identifier" } });
+      const idNode = safeFind(decl, "identifier");
       if (!idNode) continue;
       const name = idNode.text();
-      const arrow = decl.find({ rule: { kind: "arrow_function" } });
-      const fnExpr = decl.find({ rule: { kind: "function_expression" } });
+      const arrow = safeFind(decl, "arrow_function");
+      const fnExpr = safeFind(decl, "function_expression");
       const fn = arrow ?? fnExpr;
       if (!fn) continue;
       const r = fn.range();
@@ -759,7 +803,7 @@ function extractFromPython(
 
   // Classes
   for (const cls of safeFindAll(root, "class_definition")) {
-    const nameNode = cls.find({ rule: { kind: "identifier" } });
+    const nameNode = safeFind(cls, "identifier");
     if (!nameNode) continue;
     const className = nameNode.text();
     const r = cls.range();
@@ -774,7 +818,7 @@ function extractFromPython(
 
     // Methods
     for (const fn of safeFindAll(cls, "function_definition")) {
-      const fnName = fn.find({ rule: { kind: "identifier" } })?.text();
+      const fnName = safeFind(fn, "identifier")?.text();
       if (!fnName) continue;
       const fr = fn.range();
       const fStart = fr.start.line + 1;
@@ -793,7 +837,7 @@ function extractFromPython(
 
   // Top-level functions (those not nested inside classes)
   for (const fn of safeFindAll(root, "function_definition")) {
-    const fnName = fn.find({ rule: { kind: "identifier" } })?.text();
+    const fnName = safeFind(fn, "identifier")?.text();
     if (!fnName) continue;
     const r = fn.range();
     const startLine = r.start.line + 1;
@@ -837,7 +881,7 @@ function extractFromGo(
   const scopes: ScopeFrame[] = [];
 
   for (const fn of safeFindAll(root, "function_declaration")) {
-    const nameNode = fn.find({ rule: { kind: "identifier" } });
+    const nameNode = safeFind(fn, "identifier");
     if (!nameNode) continue;
     const name = nameNode.text();
     const r = fn.range();
@@ -851,7 +895,7 @@ function extractFromGo(
     scopes.push({ name, startLine, endLine, symbolId: sym.id });
   }
   for (const fn of safeFindAll(root, "method_declaration")) {
-    const nameNode = fn.find({ rule: { kind: "field_identifier" } });
+    const nameNode = safeFind(fn, "field_identifier");
     if (!nameNode) continue;
     const name = nameNode.text();
     const r = fn.range();
@@ -892,7 +936,7 @@ function extractFromRust(
   const scopes: ScopeFrame[] = [];
 
   for (const fn of safeFindAll(root, "function_item")) {
-    const nameNode = fn.find({ rule: { kind: "identifier" } });
+    const nameNode = safeFind(fn, "identifier");
     if (!nameNode) continue;
     const name = nameNode.text();
     const r = fn.range();
@@ -918,7 +962,7 @@ function extractFromRust(
     });
   }
   for (const node of safeFindAll(root, "macro_invocation")) {
-    const nameNode = node.find({ rule: { kind: "identifier" } });
+    const nameNode = safeFind(node, "identifier");
     if (!nameNode) continue;
     const r = node.range();
     const callLine = r.start.line + 1;
@@ -1053,7 +1097,7 @@ function extractFromCSharp(
 
   for (const k of ["class_declaration", "interface_declaration", "record_declaration", "struct_declaration"]) {
     for (const cls of safeFindAll(root, k)) {
-      const nameNode = cls.find({ rule: { kind: "identifier" } });
+      const nameNode = safeFind(cls, "identifier");
       if (!nameNode) continue;
       const name = nameNode.text();
       const r = cls.range();
@@ -1072,7 +1116,7 @@ function extractFromCSharp(
   }
   for (const k of ["method_declaration", "constructor_declaration"]) {
     for (const m of safeFindAll(root, k)) {
-      const nameNode = m.find({ rule: { kind: "identifier" } });
+      const nameNode = safeFind(m, "identifier");
       if (!nameNode) continue;
       const name = nameNode.text();
       const r = m.range();
@@ -1119,7 +1163,7 @@ function extractFromCFamily(
   if (langKey === "cpp") {
     for (const k of ["class_specifier", "struct_specifier"]) {
       for (const cls of safeFindAll(root, k)) {
-        const nameNode = cls.find({ rule: { kind: "type_identifier" } });
+        const nameNode = safeFind(cls, "type_identifier");
         if (!nameNode) continue;
         const name = nameNode.text();
         const r = cls.range();
@@ -1138,9 +1182,9 @@ function extractFromCFamily(
   }
 
   for (const fn of safeFindAll(root, "function_definition")) {
-    const declarator = fn.find({ rule: { kind: "function_declarator" } });
-    const nameNode = declarator?.find({ rule: { kind: "identifier" } })
-      ?? declarator?.find({ rule: { kind: "qualified_identifier" } });
+    const declarator = safeFind(fn, "function_declarator");
+    const nameNode = safeFind(declarator, "identifier")
+      ?? safeFind(declarator, "qualified_identifier");
     if (!nameNode) continue;
     const fullName = nameNode.text();
     const name = fullName.split("::").pop() ?? fullName;
@@ -1185,8 +1229,8 @@ function extractFromRuby(
 
   for (const k of ["class", "module"]) {
     for (const cls of safeFindAll(root, k)) {
-      const nameNode = cls.find({ rule: { kind: "constant" } })
-        ?? cls.find({ rule: { kind: "identifier" } });
+      const nameNode = safeFind(cls, "constant")
+        ?? safeFind(cls, "identifier");
       if (!nameNode) continue;
       const name = nameNode.text();
       const r = cls.range();
@@ -1203,7 +1247,7 @@ function extractFromRuby(
     }
   }
   for (const m of safeFindAll(root, "method")) {
-    const nameNode = m.find({ rule: { kind: "identifier" } });
+    const nameNode = safeFind(m, "identifier");
     if (!nameNode) continue;
     const name = nameNode.text();
     const r = m.range();
@@ -1256,7 +1300,7 @@ function extractFromPhp(
 
   for (const k of ["class_declaration", "interface_declaration", "trait_declaration"]) {
     for (const cls of safeFindAll(root, k)) {
-      const nameNode = cls.find({ rule: { kind: "name" } });
+      const nameNode = safeFind(cls, "name");
       if (!nameNode) continue;
       const name = nameNode.text();
       const r = cls.range();
@@ -1274,7 +1318,7 @@ function extractFromPhp(
   }
   for (const k of ["function_definition", "method_declaration"]) {
     for (const m of safeFindAll(root, k)) {
-      const nameNode = m.find({ rule: { kind: "name" } });
+      const nameNode = safeFind(m, "name");
       if (!nameNode) continue;
       const name = nameNode.text();
       const r = m.range();
@@ -1321,8 +1365,8 @@ function extractFromSwift(
 
   for (const k of ["class_declaration", "struct_declaration", "protocol_declaration", "enum_declaration"]) {
     for (const cls of safeFindAll(root, k)) {
-      const nameNode = cls.find({ rule: { kind: "type_identifier" } })
-        ?? cls.find({ rule: { kind: "identifier" } });
+      const nameNode = safeFind(cls, "type_identifier")
+        ?? safeFind(cls, "identifier");
       if (!nameNode) continue;
       const name = nameNode.text();
       const r = cls.range();
@@ -1341,8 +1385,8 @@ function extractFromSwift(
     }
   }
   for (const fn of safeFindAll(root, "function_declaration")) {
-    const nameNode = fn.find({ rule: { kind: "simple_identifier" } })
-      ?? fn.find({ rule: { kind: "identifier" } });
+    const nameNode = safeFind(fn, "simple_identifier")
+      ?? safeFind(fn, "identifier");
     if (!nameNode) continue;
     const name = nameNode.text();
     const r = fn.range();
@@ -1384,7 +1428,7 @@ function extractFromBash(
   const scopes: ScopeFrame[] = [];
 
   for (const fn of safeFindAll(root, "function_definition")) {
-    const nameNode = fn.find({ rule: { kind: "word" } });
+    const nameNode = safeFind(fn, "word");
     if (!nameNode) continue;
     const name = nameNode.text();
     const r = fn.range();
@@ -1401,7 +1445,7 @@ function extractFromBash(
 
   const rawCalls: ExtractedSymbols["rawCalls"] = [];
   for (const node of safeFindAll(root, "command")) {
-    const nameNode = node.find({ rule: { kind: "command_name" } });
+    const nameNode = safeFind(node, "command_name");
     if (!nameNode) continue;
     const name = nameNode.text();
     if (!/^[A-Za-z_][\w]*$/.test(name)) continue;
