@@ -4,6 +4,8 @@
 
 # SocratiCode
 
+[![MCP Toplist](https://mcptoplist.com/badge/io.github.giancarloerra%2Fsocraticode.svg)](https://mcptoplist.com/server/io.github.giancarloerra%2Fsocraticode)
+
 <p align="center">
   <a href="https://github.com/giancarloerra/socraticode/actions/workflows/ci.yml"><img src="https://github.com/giancarloerra/socraticode/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg" alt="License: AGPL-3.0"></a>
