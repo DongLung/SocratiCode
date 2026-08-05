@@ -10,6 +10,7 @@
   <a href="https://www.npmjs.com/package/socraticode"><img src="https://img.shields.io/npm/v/socraticode.svg" alt="npm version"></a>
   <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg" alt="Node.js >= 18"></a>
   <a href="https://github.com/giancarloerra/socraticode"><img src="https://img.shields.io/github/stars/giancarloerra/socraticode?style=social" alt="GitHub stars"></a>
+  <a href="https://mcptoplist.com/server/io.github.giancarloerra%2Fsocraticode"><img src="https://mcptoplist.com/badge/io.github.giancarloerra%2Fsocraticode.svg" alt="MCP Toplist rank"></a>
   <a href="https://discord.gg/dHNMKVY2J2"><img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
@@ -51,16 +52,6 @@
 The first Qdrant‑based MCP/Claude Plugin/Skill that pairs auto‑managed, zero‑config local Docker deployment with **AST‑aware code chunking, hybrid semantic + BM25 (RRF‑fused) code search**, polyglot dependency **graphs** with circular‑dependency visualisation, **symbol‑level Impact Analysis** (blast‑radius & call‑flow tracing across 18 languages), and searchable **infra/API/database artifacts** in a single focused, zero-config and easy to use code intelligence engine.
 
 > **Benchmarked on VS Code (2.45M lines):** SocratiCode uses **61% less context**, **84% fewer tool calls**, and is **37x faster** than grep‑based exploration — tested live with Claude Opus 4.6. [See the full benchmark →](#real-world-benchmark-vs-code-245m-lines-of-code-with-claude-opus-46)
-
-<p align="center">
-<a href="https://www.star-history.com/?repos=giancarloerra%2Fsocraticode&type=date&logscale=&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=giancarloerra/socraticode&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=giancarloerra/socraticode&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=giancarloerra/socraticode&type=date&legend=top-left" />
- </picture>
-</a>
-</p>
 
 ## Contents
 
