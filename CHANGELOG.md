@@ -4,6 +4,33 @@ All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
 
+## [1.11.0](https://github.com/giancarloerra/socraticode/compare/v1.10.0...v1.11.0) (2026-08-05)
+
+### Features
+
+* **indexing:** index Stylus (.styl) files ([b941465](https://github.com/giancarloerra/socraticode/commit/b94146526620d30b0ad87b80f74f7f1ca7ee4bcc))
+
+### Bug Fixes
+
+* **deps:** pin @qdrant/js-client-rest to 1.18.x; restore Node 18 ([55d0721](https://github.com/giancarloerra/socraticode/commit/55d07210719aeb2c920d3ee7b7373678af4f7a71)), closes [qdrant/qdrant-js#134](https://github.com/qdrant/qdrant-js/issues/134)
+* **graph:** fail closed on malformed multipart shard headers ([9147ea0](https://github.com/giancarloerra/socraticode/commit/9147ea0ac2a2fde654817508daea7023715a85b0)), closes [#104](https://github.com/giancarloerra/socraticode/issues/104)
+* **graph:** label .styl files stylus instead of plaintext ([5338c0d](https://github.com/giancarloerra/socraticode/commit/5338c0d202723f34275c7abe2ac8a8c5598caade))
+* **graph:** name Ruby calls from the grammar's method field ([e6891e5](https://github.com/giancarloerra/socraticode/commit/e6891e5bf5911e455fbe49a277a10d799c1f76f1))
+* **graph:** single-source shard id seeds; bound the reader; review polish ([1874038](https://github.com/giancarloerra/socraticode/commit/1874038cfd964babaf1b150e2bb6dfdcf3fd8334))
+* **graph:** split oversized symbol-graph shards across multiple points ([eb58826](https://github.com/giancarloerra/socraticode/commit/eb58826f5cc13baaefff18106651eae7c5ff8aab)), closes [#92](https://github.com/giancarloerra/socraticode/issues/92) [#89](https://github.com/giancarloerra/socraticode/issues/89) [#99](https://github.com/giancarloerra/socraticode/issues/99)
+* **graph:** stamp shard parts with a write identity; probe part counts cheaply ([32f16d6](https://github.com/giancarloerra/socraticode/commit/32f16d6256f601ce9c62db246380d133f554bb0c))
+* **graph:** stop one class from erasing a plain-JS file's symbol graph ([e68d23a](https://github.com/giancarloerra/socraticode/commit/e68d23aa5171269212d16b7e66171c386743d109))
+* name each PHP call by its own callee in a fluent chain ([2bf8502](https://github.com/giancarloerra/socraticode/commit/2bf85027d8ab304556d5b5fb1ed3954fc58f8094))
+* resolve PHP imports and call sites through language-aware rules ([8fd04d4](https://github.com/giancarloerra/socraticode/commit/8fd04d442dc37a0e014282d7f880689f7a0c5271))
+
+### Documentation
+
+* fold the MCP Toplist badge into the badge row and drop the star-history chart ([43b2c36](https://github.com/giancarloerra/socraticode/commit/43b2c36668ff7db604cd402569e56035db67e42d))
+
+### Tests
+
+* assert callee counts, not just the distinct set ([b08ff2a](https://github.com/giancarloerra/socraticode/commit/b08ff2ae0fa1aa4e1820f388da01d138c1f9d7ee))
+
 ## [1.10.0](https://github.com/giancarloerra/socraticode/compare/v1.9.2...v1.10.0) (2026-07-30)
 
 ### Bug Fixes
