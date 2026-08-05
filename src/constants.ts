@@ -220,7 +220,7 @@ export const SUPPORTED_EXTENSIONS = new Set([
   // Shell
   ".sh", ".bash", ".zsh",
   // Web
-  ".html", ".htm", ".css", ".scss", ".sass", ".less", ".vue", ".svelte",
+  ".html", ".htm", ".css", ".scss", ".sass", ".less", ".styl", ".vue", ".svelte",
   // Config/Data
   ".json", ".yaml", ".yml", ".toml", ".xml", ".ini", ".cfg",
   // Docs
@@ -296,7 +296,7 @@ const EXTENSION_TO_LANGUAGE: Record<string, string> = {
   ".swift": "swift",
   ".sh": "shell", ".bash": "shell", ".zsh": "shell",
   ".html": "html", ".htm": "html",
-  ".css": "css", ".scss": "scss", ".sass": "sass", ".less": "less",
+  ".css": "css", ".scss": "scss", ".sass": "sass", ".less": "less", ".styl": "stylus",
   ".vue": "vue", ".svelte": "svelte",
   ".json": "json", ".yaml": "yaml", ".yml": "yaml",
   ".toml": "toml", ".xml": "xml",
@@ -337,7 +337,7 @@ const LANGUAGE_TO_CANONICAL_EXT: Record<string, string> = {
   lua: ".lua",
   shell: ".sh", bash: ".sh", sh: ".sh",
   html: ".html",
-  css: ".css", scss: ".scss", sass: ".sass", less: ".less",
+  css: ".css", scss: ".scss", sass: ".sass", less: ".less", stylus: ".styl",
   vue: ".vue",
   svelte: ".svelte",
 };

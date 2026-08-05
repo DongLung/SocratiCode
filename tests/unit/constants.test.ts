@@ -177,6 +177,7 @@ describe("constants", () => {
       expect(SUPPORTED_EXTENSIONS.has(".html")).toBe(true);
       expect(SUPPORTED_EXTENSIONS.has(".css")).toBe(true);
       expect(SUPPORTED_EXTENSIONS.has(".scss")).toBe(true);
+      expect(SUPPORTED_EXTENSIONS.has(".styl")).toBe(true);
       expect(SUPPORTED_EXTENSIONS.has(".vue")).toBe(true);
       expect(SUPPORTED_EXTENSIONS.has(".svelte")).toBe(true);
     });
@@ -283,6 +284,10 @@ describe("constants", () => {
       expect(getLanguageFromExtension(".sh")).toBe("shell");
     });
 
+    it("maps .styl to stylus", () => {
+      expect(getLanguageFromExtension(".styl")).toBe("stylus");
+    });
+
     it("maps .md to markdown", () => {
       expect(getLanguageFromExtension(".md")).toBe("markdown");
     });
@@ -348,6 +353,14 @@ describe("constants", () => {
       const { map, invalid } = parseExtensionLanguageMap(".inc:php");
       expect(map.get(".inc")).toBe(".php");
       expect(invalid).toEqual([]);
+    });
+
+    it("accepts stylus as a target language, like its CSS siblings", () => {
+      const { map, invalid } = parseExtensionLanguageMap(".styles:stylus,.sheet:less");
+      expect(map.get(".styles")).toBe(".styl");
+      expect(map.get(".sheet")).toBe(".less");
+      expect(invalid).toEqual([]);
+      expect(getLanguageFromExtension(".styles", map)).toBe("stylus");
     });
 
     it("normalizes the extension (lowercases, adds leading dot)", () => {
