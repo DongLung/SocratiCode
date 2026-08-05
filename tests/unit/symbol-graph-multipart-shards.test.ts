@@ -240,6 +240,38 @@ describe("multi-part symbol shards (#99)", () => {
     expect(probe?.with_payload).toEqual(["parts"]);
   });
 
+  it("refuses a multipart shard whose write identities were stripped", async () => {
+    // Only saveShardPoints writes multipart shards and it always stamps an
+    // identity; all-absent identities must not pass as undefined === undefined.
+    await saveNameShard(PROJ, "x", oversizedNameRecord());
+    const coll = store.get(INDEX_COLL);
+    for (const p of pointsInIndex()) {
+      const { write, ...restPayload } = p.payload as Record<string, unknown>;
+      coll?.set(String(p.id), { ...p, payload: restPayload });
+    }
+    await expect(loadNameShard(PROJ, "x")).resolves.toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("malformed header"),
+      expect.objectContaining({ shardKey: "x" }),
+    );
+  });
+
+  it("refuses a continuation part whose part header was altered", async () => {
+    await saveNameShard(PROJ, "y", oversizedNameRecord());
+    const coll = store.get(INDEX_COLL);
+    const continuation = pointsInIndex().find((p) => (p.payload.part as number) >= 1);
+    expect(continuation).toBeDefined();
+    coll?.set(String(continuation?.id), {
+      ...(continuation as StoredPoint),
+      payload: { ...(continuation as StoredPoint).payload, part: 99 },
+    });
+    await expect(loadNameShard(PROJ, "y")).resolves.toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("different write or is malformed"),
+      expect.objectContaining({ shardKey: "y" }),
+    );
+  });
+
   it("throws a named error when one ENTRY alone exceeds a part budget", async () => {
     // One symbol name with an absurd number of references — the only shape
     // entry-level splitting cannot place. Must fail loudly by name.

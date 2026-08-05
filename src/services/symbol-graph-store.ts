@@ -346,8 +346,27 @@ async function loadShardPoints<V>(
   const parts = typeof declared === "number" && declared > 1 ? declared : 1;
   if (parts === 1) return first; // every pre-split graph, and most shards after
 
+  // Fail closed on a malformed multipart header. Only saveShardPoints writes
+  // multipart shards and it always stamps an integer count and a write
+  // identity, so a missing/non-integer/empty header here is corruption, and an
+  // absent identity must not slide through as `undefined === undefined`.
+  const writeId = payload?.write;
+  if (!Number.isInteger(parts) || typeof writeId !== "string" || writeId.length === 0) {
+    logger.warn("Multipart shard has a malformed header (returning null)", {
+      ...logContext,
+      declaredParts: declared,
+      hasWriteId: typeof writeId === "string" && writeId.length > 0,
+    });
+    return null;
+  }
+
   const restIds: string[] = [];
-  for (let i = 1; i < parts; i++) restIds.push(shardPartPointId(primaryKey, i));
+  const expectedPartById = new Map<string, number>();
+  for (let i = 1; i < parts; i++) {
+    const id = shardPartPointId(primaryKey, i);
+    restIds.push(id);
+    expectedPartById.set(id, i);
+  }
   // Each part can be ~24 MiB, so fetch a couple at a time: one retrieve for all
   // of them would buffer the entire shard's response, its parsed payloads and
   // the merged copy simultaneously. Two per request bounds the transient.
@@ -365,7 +384,6 @@ async function loadShardPoints<V>(
     return null;
   }
 
-  const writeId = payload?.write;
   const merged: Record<string, V> = { ...first };
   for (const point of rest) {
     const partPayload = point.payload as Record<string, unknown> | null | undefined;
@@ -373,10 +391,20 @@ async function loadShardPoints<V>(
     // died partway: the ids line up (they are deterministic) but the contents
     // are two writes interleaved. Serving the merge would return a record
     // equal to neither write, silently — treat it exactly like a missing part.
-    if (partPayload?.write !== writeId) {
-      logger.warn("Shard continuation part belongs to a different write (returning null)", {
+    // The part/parts headers are cross-checked by expected id, not response
+    // order, so a point sitting at the right id with the wrong headers is
+    // rejected as corruption too.
+    const expectedPart = expectedPartById.get(String(point.id));
+    if (
+      partPayload?.write !== writeId ||
+      expectedPart === undefined ||
+      partPayload?.part !== expectedPart ||
+      partPayload?.parts !== parts
+    ) {
+      logger.warn("Shard continuation part belongs to a different write or is malformed (returning null)", {
         ...logContext,
         declaredParts: parts,
+        pointId: String(point.id),
       });
       return null;
     }
