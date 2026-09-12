@@ -209,6 +209,7 @@ export async function handleManageTool(
         "  codebase_update       — Incremental re-index (changed files only).",
         "  codebase_stop         — Gracefully stop in-progress indexing.",
         "  codebase_remove       — Delete a project's index.",
+        "  codebase_prune        — Inventory stored identities; delete one only with its confirmation token.",
         "  codebase_watch        — Start/stop/status of live file watcher.",
         "",
         "Search:",

@@ -184,9 +184,14 @@ export async function releaseProjectLock(projectPath: string, operation: string)
  * Check if a lock is currently held (by any process).
  */
 export async function isProjectLocked(projectPath: string, operation: string): Promise<boolean> {
+  return isProjectIdentityLocked(projectIdFromPath(path.resolve(projectPath)), operation);
+}
+
+/** Check a lock by its recorded project identity, without resolving a path. */
+export async function isProjectIdentityLocked(projectId: string, operation: string): Promise<boolean> {
   ensureLockDir();
 
-  const key = lockKey(projectPath, operation);
+  const key = `${projectId}-${operation}`;
   const filePath = lockFilePath(key);
 
   if (!fs.existsSync(filePath)) return false;

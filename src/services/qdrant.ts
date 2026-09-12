@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import { createHash } from "node:crypto";
+import fsp from "node:fs/promises";
+import path from "node:path";
 import { QdrantClient } from "@qdrant/js-client-rest";
 import { QDRANT_API_KEY, QDRANT_COLLECTION_PREFIX, QDRANT_HOST, QDRANT_PORT, QDRANT_URL, resolveQdrantPort, SOCRATICODE_VERSION } from "../constants.js";
 import type { ArtifactIndexState, CodeGraph, FileChunk, SearchResult } from "../types.js";
@@ -255,6 +257,236 @@ export async function deleteCollection(name: string): Promise<void> {
       error: err instanceof Error ? err.message : String(err),
     });
   }
+}
+
+export type ProjectPathState = "present-on-this-host" | "absent-on-this-host" | "unknown/inaccessible";
+
+export interface ProjectReclamationEntry {
+  identity: string;
+  projectPath: string | null;
+  canonicalPath: string | null;
+  pathState: ProjectPathState;
+  lastIndexedAt: string | null;
+  lastBuiltAt: string | null;
+  builtByVersion: string | null;
+  resourceCollections: string[];
+  metadataCollections: string[];
+  possibleSuperseded: boolean;
+  requiresManualInspection: boolean;
+  confirmationToken: string;
+}
+
+export interface ProjectReclamationInventory {
+  entries: ProjectReclamationEntry[];
+  unrecognisedMetadataEntries: number;
+}
+
+export interface ProjectReclamationOutcome {
+  resource: string;
+  kind: "collection" | "metadata";
+  outcome: "deleted" | "failed";
+  error?: string;
+}
+
+interface InventorySeed {
+  identity: string;
+  resourceCollections: Set<string>;
+  metadataCollections: Set<string>;
+  projectPaths: Set<string>;
+  lastIndexedAt: string | null;
+  lastBuiltAt: string | null;
+  builtByVersion: string | null;
+}
+
+function identityFromResourceName(name: string): string | null {
+  const prefix = QDRANT_COLLECTION_PREFIX;
+  const codebase = `${prefix}codebase_`;
+  const graph = `${prefix}codegraph_`;
+  const context = `${prefix}context_`;
+  if (name.startsWith(codebase)) return name.slice(codebase.length) || null;
+  if (name.startsWith(graph)) return name.slice(graph.length) || null;
+  if (name.startsWith(context)) return name.slice(context.length) || null;
+  const symbol = name.slice(prefix.length).match(/^(.+)_symgraph_(?:meta|file|index)$/);
+  return symbol?.[1] || null;
+}
+
+function inventoryToken(entry: Omit<ProjectReclamationEntry, "confirmationToken" | "possibleSuperseded">): string {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      identity: entry.identity,
+      projectPath: entry.projectPath,
+      canonicalPath: entry.canonicalPath,
+      resourceCollections: entry.resourceCollections,
+      metadataCollections: entry.metadataCollections,
+      lastIndexedAt: entry.lastIndexedAt,
+      lastBuiltAt: entry.lastBuiltAt,
+      builtByVersion: entry.builtByVersion,
+    }))
+    .digest("hex");
+}
+
+async function inspectStoredPath(projectPath: string | null): Promise<{
+  pathState: ProjectPathState;
+  canonicalPath: string | null;
+}> {
+  if (!projectPath) return { pathState: "unknown/inaccessible", canonicalPath: null };
+  try {
+    return {
+      pathState: "present-on-this-host",
+      canonicalPath: await fsp.realpath(path.resolve(projectPath)),
+    };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      return { pathState: "absent-on-this-host", canonicalPath: null };
+    }
+    return { pathState: "unknown/inaccessible", canonicalPath: null };
+  }
+}
+
+/**
+ * Read the stored identities without deriving an identity from the local path.
+ * The result is an inventory: an absent path is local observation, never proof
+ * that a shared-store index may be deleted.
+ */
+export async function getProjectReclamationInventory(): Promise<ProjectReclamationInventory> {
+  const qdrant = getClient();
+  const collections = await qdrant.getCollections();
+  const seeds = new Map<string, InventorySeed>();
+  const seedFor = (identity: string) => {
+    let seed = seeds.get(identity);
+    if (!seed) {
+      seed = {
+        identity,
+        resourceCollections: new Set(),
+        metadataCollections: new Set(),
+        projectPaths: new Set(),
+        lastIndexedAt: null,
+        lastBuiltAt: null,
+        builtByVersion: null,
+      };
+      seeds.set(identity, seed);
+    }
+    return seed;
+  };
+
+  for (const { name } of collections.collections) {
+    const identity = identityFromResourceName(name);
+    if (identity) seedFor(identity).resourceCollections.add(name);
+  }
+
+  let unrecognisedMetadataEntries = 0;
+  if (collections.collections.some(({ name }) => name === METADATA_COLLECTION)) {
+    let offset: string | number | Record<string, unknown> | undefined | null;
+    do {
+      const page = await withRetry(
+        () => qdrant.scroll(METADATA_COLLECTION, {
+          limit: 1000,
+          with_payload: {
+            include: ["collectionName", "projectPath", "lastIndexedAt", "lastBuiltAt", "builtByVersion"],
+          },
+          with_vector: false,
+          ...(offset === undefined || offset === null ? {} : { offset }),
+        }),
+        "getProjectReclamationInventory(metadata)",
+      );
+      for (const point of page.points) {
+        const payload = point.payload as Record<string, unknown> | null | undefined;
+        const collectionName = payload?.collectionName;
+        if (typeof collectionName !== "string") {
+          unrecognisedMetadataEntries++;
+          continue;
+        }
+        const identity = identityFromResourceName(collectionName);
+        if (!identity) {
+          unrecognisedMetadataEntries++;
+          continue;
+        }
+        const seed = seedFor(identity);
+        seed.metadataCollections.add(collectionName);
+        if (typeof payload?.projectPath === "string") seed.projectPaths.add(payload.projectPath);
+        if (typeof payload?.lastIndexedAt === "string") seed.lastIndexedAt = payload.lastIndexedAt;
+        if (typeof payload?.lastBuiltAt === "string") seed.lastBuiltAt = payload.lastBuiltAt;
+        if (typeof payload?.builtByVersion === "string") seed.builtByVersion = payload.builtByVersion;
+      }
+      const next = page.next_page_offset;
+      if (next !== undefined && next !== null && JSON.stringify(next) === JSON.stringify(offset)) {
+        throw new Error("Project inventory metadata cursor did not advance");
+      }
+      offset = next;
+    } while (offset !== undefined && offset !== null);
+  }
+
+  const inspected = await Promise.all(Array.from(seeds.values()).map(async (seed) => {
+    const projectPaths = Array.from(seed.projectPaths).sort();
+    const projectPath = projectPaths.length === 1 ? projectPaths[0] : null;
+    const { pathState, canonicalPath } = await inspectStoredPath(projectPath);
+    const base: Omit<ProjectReclamationEntry, "confirmationToken" | "possibleSuperseded"> = {
+      identity: seed.identity,
+      projectPath,
+      canonicalPath,
+      pathState,
+      lastIndexedAt: seed.lastIndexedAt,
+      lastBuiltAt: seed.lastBuiltAt,
+      builtByVersion: seed.builtByVersion,
+      resourceCollections: Array.from(seed.resourceCollections).sort(),
+      metadataCollections: Array.from(seed.metadataCollections).sort(),
+      requiresManualInspection: projectPaths.length > 1,
+    };
+    return { ...base, possibleSuperseded: false, confirmationToken: inventoryToken(base) };
+  }));
+
+  const canonicalCounts = new Map<string, number>();
+  for (const entry of inspected) {
+    if (entry.canonicalPath) canonicalCounts.set(entry.canonicalPath, (canonicalCounts.get(entry.canonicalPath) ?? 0) + 1);
+  }
+  for (const entry of inspected) {
+    entry.possibleSuperseded = entry.canonicalPath !== null && (canonicalCounts.get(entry.canonicalPath) ?? 0) > 1;
+  }
+
+  return {
+    entries: inspected.sort((a, b) => a.identity.localeCompare(b.identity)),
+    unrecognisedMetadataEntries,
+  };
+}
+
+/**
+ * Delete exactly the resources returned by a prior inventory read. Errors are
+ * kept per resource so callers can distinguish a completed cleanup from a
+ * partial one instead of treating a best-effort deletion as success.
+ */
+export async function removeProjectReclamationEntry(
+  entry: ProjectReclamationEntry,
+): Promise<ProjectReclamationOutcome[]> {
+  const qdrant = getClient();
+  const outcomes: ProjectReclamationOutcome[] = [];
+  for (const resource of entry.resourceCollections) {
+    try {
+      await qdrant.deleteCollection(resource);
+      outcomes.push({ resource, kind: "collection", outcome: "deleted" });
+    } catch (error) {
+      outcomes.push({
+        resource,
+        kind: "collection",
+        outcome: "failed",
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  for (const resource of entry.metadataCollections) {
+    try {
+      await qdrant.delete(METADATA_COLLECTION, { points: [metadataPointId(resource)] });
+      outcomes.push({ resource, kind: "metadata", outcome: "deleted" });
+    } catch (error) {
+      outcomes.push({
+        resource,
+        kind: "metadata",
+        outcome: "failed",
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return outcomes;
 }
 
 /**

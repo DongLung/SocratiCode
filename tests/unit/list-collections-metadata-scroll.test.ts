@@ -32,6 +32,11 @@ let failAttempts = new Set<number>();
 /** When true the backend keeps handing back the cursor it was given. */
 let stallCursor = false;
 let attempt = 0;
+let deletedCollections: string[] = [];
+let deletedMetadata: unknown[] = [];
+let collectionDeleteFailures = new Set<string>();
+let metadataDeleteFails = false;
+const mockRealpath = vi.fn(async (value: string) => value);
 
 vi.mock("../../src/services/logger.js", () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -39,6 +44,10 @@ vi.mock("../../src/services/logger.js", () => ({
 
 vi.mock("../../src/services/qdrant-client-compat.js", () => ({
   ensureQdrantClientCompatibility: vi.fn(),
+}));
+
+vi.mock("node:fs/promises", () => ({
+  default: { realpath: (...args: unknown[]) => mockRealpath(...args) },
 }));
 
 /**
@@ -94,6 +103,14 @@ vi.mock("@qdrant/js-client-rest", () => ({
         next_page_offset: next,
       };
     }
+    async deleteCollection(name: string) {
+      if (collectionDeleteFailures.has(name)) throw new Error(`cannot delete ${name}`);
+      deletedCollections.push(name);
+    }
+    async delete(_name: string, request: unknown) {
+      if (metadataDeleteFails) throw new Error("cannot delete metadata");
+      deletedMetadata.push(request);
+    }
   },
 }));
 
@@ -106,6 +123,12 @@ beforeEach(() => {
   failAttempts = new Set();
   stallCursor = false;
   attempt = 0;
+  deletedCollections = [];
+  deletedMetadata = [];
+  collectionDeleteFailures = new Set();
+  metadataDeleteFails = false;
+  mockRealpath.mockReset();
+  mockRealpath.mockImplementation(async (value: string) => value);
   process.env = {
     ...originalEnv,
     QDRANT_MODE: "external",
@@ -226,4 +249,61 @@ describe("listCodebaseCollections metadata scroll", () => {
     expect(scrollCalls).toHaveLength(2); // first page, then the stall is caught
     expect(result).toContain("codegraph_p0");
   }, 20_000);
+});
+
+describe("project reclamation inventory", () => {
+  it("reports absent and inaccessible paths without classifying either as stale", async () => {
+    metadataPoints = [
+      { id: 1, payload: { collectionName: "codebase_path-hash", projectPath: "/gone/project" } },
+      { id: 2, payload: { collectionName: "codebase_pinned", projectPath: "/linked/project" } },
+      { id: 3, payload: { collectionName: "codebase_other", projectPath: "/canonical/project" } },
+      { id: 4, payload: { collectionName: "codebase_remote", projectPath: "/blocked/project" } },
+      { id: 5, payload: { collectionName: 42 } },
+    ];
+    mockRealpath.mockImplementation(async (value: string) => {
+      if (value === "/gone/project") throw Object.assign(new Error("missing"), { code: "ENOENT" });
+      if (value === "/blocked/project") throw Object.assign(new Error("denied"), { code: "EACCES" });
+      if (value === "/linked/project" || value === "/canonical/project") return "/canonical/project";
+      return value;
+    });
+
+    const { getProjectReclamationInventory } = await import("../../src/services/qdrant.js");
+    const inventory = await getProjectReclamationInventory();
+    const byIdentity = new Map(inventory.entries.map((entry) => [entry.identity, entry]));
+
+    expect(byIdentity.get("path-hash")?.pathState).toBe("absent-on-this-host");
+    expect(byIdentity.get("remote")?.pathState).toBe("unknown/inaccessible");
+    expect(byIdentity.get("pinned")?.possibleSuperseded).toBe(true);
+    expect(byIdentity.get("other")?.possibleSuperseded).toBe(true);
+    expect(inventory.unrecognisedMetadataEntries).toBe(1);
+  });
+
+  it("keeps partial cleanup failures in the per-resource outcome", async () => {
+    collectionDeleteFailures.add("context_old-index");
+    metadataDeleteFails = true;
+    const { removeProjectReclamationEntry } = await import("../../src/services/qdrant.js");
+
+    const outcomes = await removeProjectReclamationEntry({
+      identity: "old-index",
+      projectPath: "/gone/project",
+      canonicalPath: null,
+      pathState: "absent-on-this-host",
+      lastIndexedAt: null,
+      lastBuiltAt: null,
+      builtByVersion: null,
+      resourceCollections: ["codebase_old-index", "context_old-index"],
+      metadataCollections: ["codebase_old-index"],
+      possibleSuperseded: false,
+      requiresManualInspection: false,
+      confirmationToken: "token",
+    });
+
+    expect(outcomes).toEqual([
+      { resource: "codebase_old-index", kind: "collection", outcome: "deleted" },
+      expect.objectContaining({ resource: "context_old-index", kind: "collection", outcome: "failed" }),
+      expect.objectContaining({ resource: "codebase_old-index", kind: "metadata", outcome: "failed" }),
+    ]);
+    expect(deletedCollections).toEqual(["codebase_old-index"]);
+    expect(deletedMetadata).toEqual([]);
+  });
 });

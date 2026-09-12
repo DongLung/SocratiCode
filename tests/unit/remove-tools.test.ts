@@ -32,6 +32,8 @@ const mockGetIndexingProgress = vi.fn((_path: string) => null);
 const mockSetIndexingProgress = vi.fn((..._args: unknown[]) => {});
 const mockIndexProject = vi.fn(async (..._args: unknown[]) => ({ filesIndexed: 0, chunksCreated: 0, cancelled: false }));
 const mockUpdateProjectIndex = vi.fn(async (..._args: unknown[]) => ({ added: 0, updated: 0, removed: 0, chunksCreated: 0, cancelled: false }));
+const mockProjectReclamationInventory = vi.fn(async () => ({ entries: [], unrecognisedMetadataEntries: 0 }));
+const mockRemoveProjectReclamationEntry = vi.fn(async () => []);
 
 vi.mock("../../src/services/indexer.js", () => ({
   isIndexingInProgress: (...args: unknown[]) => mockIsIndexingInProgress(...(args as [string])),
@@ -54,6 +56,7 @@ const mockGetOrBuildGraph = vi.fn(async () => ({ nodes: [], edges: [] }));
 vi.mock("../../src/services/code-graph.js", () => ({
   isGraphBuildInProgress: (...args: unknown[]) => mockIsGraphBuildInProgress(...(args as [string])),
   awaitGraphBuild: (...args: unknown[]) => mockAwaitGraphBuild(...(args as [string])),
+  invalidateGraphCache: vi.fn(),
   removeGraph: (...args: unknown[]) => mockRemoveGraph(...(args as [string])),
   // graph-tools imports — provide stubs for unused functions
   findCircularDependencies: vi.fn(() => []),
@@ -117,10 +120,12 @@ vi.mock("../../src/services/index-profile.js", async (importOriginal) => ({
 // ── lock.js mock ────────────────────────────────────────────────────────
 
 const mockIsProjectLocked = vi.fn(async (_path: string, _op: string) => false);
+const mockIsProjectIdentityLocked = vi.fn(async (_identity: string, _op: string) => false);
 const mockTerminateLockHolder = vi.fn(async (_path: string, _op: string) => ({ terminated: false, pid: null as number | null }));
 
 vi.mock("../../src/services/lock.js", () => ({
   isProjectLocked: (...args: unknown[]) => mockIsProjectLocked(...(args as [string, string])),
+  isProjectIdentityLocked: (...args: unknown[]) => mockIsProjectIdentityLocked(...(args as [string, string])),
   terminateLockHolder: (...args: unknown[]) => mockTerminateLockHolder(...(args as [string, string])),
 }));
 
@@ -144,6 +149,12 @@ vi.mock("../../src/services/qdrant.js", () => ({
   loadEffectiveIndexProfileForCollection: vi.fn(async () => ({
     embedding: { provider: "ollama", model: "test", dimensions: 3 },
   })),
+  getProjectReclamationInventory: (...args: unknown[]) => mockProjectReclamationInventory(...args),
+  removeProjectReclamationEntry: (...args: unknown[]) => mockRemoveProjectReclamationEntry(...args),
+}));
+
+vi.mock("../../src/services/symbol-graph-store.js", () => ({
+  resetSymbolGraphCollectionCache: vi.fn(),
 }));
 
 // ── ollama.js mock ──────────────────────────────────────────────────────
@@ -176,6 +187,24 @@ import { handleIndexTool } from "../../src/tools/index-tools.js";
 // ── Tests ────────────────────────────────────────────────────────────────
 
 const TEST_PATH = "/tmp/test-project";
+
+function reclamationEntry(overrides: Record<string, unknown> = {}) {
+  return {
+    identity: "old-index",
+    projectPath: "/missing/project",
+    canonicalPath: null,
+    pathState: "absent-on-this-host",
+    lastIndexedAt: "2026-09-11T00:00:00.000Z",
+    lastBuiltAt: null,
+    builtByVersion: null,
+    resourceCollections: ["codebase_old-index"],
+    metadataCollections: ["codebase_old-index"],
+    possibleSuperseded: false,
+    requiresManualInspection: false,
+    confirmationToken: "fresh-token",
+    ...overrides,
+  };
+}
 
 describe("manual indexing mode", () => {
   beforeEach(() => {
@@ -367,6 +396,104 @@ describe("codebase_remove — stops all in-flight operations before deleting", (
     expect(mockRequestCancellation).toHaveBeenCalledOnce();
     expect(mockAwaitGraphBuild).toHaveBeenCalledOnce();
     expect(mockRemoveProjectIndex).toHaveBeenCalledOnce();
+  });
+});
+
+describe("codebase_prune — explicit identity reclamation", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockIsIndexingInProgress.mockReturnValue(false);
+    mockIsWatching.mockReturnValue(false);
+    mockIsProjectIdentityLocked.mockResolvedValue(false);
+  });
+
+  it("reports missing and inaccessible paths as observations, not deletion candidates", async () => {
+    mockProjectReclamationInventory.mockResolvedValueOnce({
+      entries: [
+        reclamationEntry(),
+        reclamationEntry({
+          identity: "remote-index",
+          projectPath: "/network/project",
+          pathState: "unknown/inaccessible",
+          possibleSuperseded: true,
+          confirmationToken: "remote-token",
+        }),
+      ],
+      unrecognisedMetadataEntries: 1,
+    });
+
+    const result = await handleIndexTool("codebase_prune", {});
+
+    expect(result).toContain("absent-on-this-host");
+    expect(result).toContain("unknown/inaccessible");
+    expect(result).toContain("not proof that an identity is stale");
+    expect(result).toContain("possible-superseded");
+    expect(result).toContain("manual inspection");
+  });
+
+  it("requires a fresh token for the exact inventoried identity", async () => {
+    mockProjectReclamationInventory.mockResolvedValueOnce({
+      entries: [reclamationEntry({ confirmationToken: "new-token" })],
+      unrecognisedMetadataEntries: 0,
+    });
+
+    const result = await handleIndexTool("codebase_prune", {
+      apply: true,
+      identity: "old-index",
+      confirmationToken: "old-token",
+    });
+
+    expect(result).toContain("inventory changed");
+    expect(mockRemoveProjectReclamationEntry).not.toHaveBeenCalled();
+  });
+
+  it("refuses an active identity before starting cleanup", async () => {
+    const entry = reclamationEntry();
+    mockProjectReclamationInventory.mockResolvedValueOnce({ entries: [entry], unrecognisedMetadataEntries: 0 });
+    mockIsProjectIdentityLocked.mockResolvedValueOnce(true);
+
+    const result = await handleIndexTool("codebase_prune", {
+      apply: true,
+      identity: entry.identity,
+      confirmationToken: entry.confirmationToken,
+    });
+
+    expect(result).toContain("currently indexed, watched, or locked");
+    expect(mockRemoveProjectReclamationEntry).not.toHaveBeenCalled();
+  });
+
+  it("reports every resource when cleanup partially fails", async () => {
+    const entry = reclamationEntry();
+    mockProjectReclamationInventory
+      .mockResolvedValueOnce({ entries: [entry], unrecognisedMetadataEntries: 0 })
+      .mockResolvedValueOnce({ entries: [entry], unrecognisedMetadataEntries: 0 });
+    mockRemoveProjectReclamationEntry.mockResolvedValueOnce([
+      { resource: "codebase_old-index", kind: "collection", outcome: "deleted" },
+      { resource: "codebase_old-index", kind: "metadata", outcome: "failed", error: "connection reset" },
+    ]);
+
+    const result = await handleIndexTool("codebase_prune", {
+      apply: true,
+      identity: entry.identity,
+      confirmationToken: entry.confirmationToken,
+    });
+
+    expect(result).toContain("Cleanup for old-index is incomplete");
+    expect(result).toContain("deleted: collection codebase_old-index");
+    expect(result).toContain("failed: metadata codebase_old-index (connection reset)");
+  });
+
+  it("is safe to repeat after all resources have gone", async () => {
+    mockProjectReclamationInventory.mockResolvedValueOnce({ entries: [], unrecognisedMetadataEntries: 0 });
+
+    const result = await handleIndexTool("codebase_prune", {
+      apply: true,
+      identity: "old-index",
+      confirmationToken: "former-token",
+    });
+
+    expect(result).toContain("Nothing to delete");
+    expect(mockRemoveProjectReclamationEntry).not.toHaveBeenCalled();
   });
 });
 

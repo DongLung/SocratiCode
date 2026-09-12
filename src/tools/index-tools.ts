@@ -3,14 +3,19 @@
 import path from "node:path";
 import { collectionName, projectIdFromPath } from "../config.js";
 import { getWatcherMode, mergeExtraExtensions, QDRANT_MODE } from "../constants.js";
-import { awaitGraphBuild, isGraphBuildInProgress } from "../services/code-graph.js";
+import { awaitGraphBuild, invalidateGraphCache, isGraphBuildInProgress } from "../services/code-graph.js";
 import type { InfraProgressCallback } from "../services/docker.js";
 import { ensureQdrantReady, isDockerAvailable } from "../services/docker.js";
 import { ensureEffectiveEmbeddingReady } from "../services/index-profile.js";
 import { getIndexingProgress, indexProject, isIndexingInProgress, removeProjectIndex, requestCancellation, setIndexingProgress, updateProjectIndex } from "../services/indexer.js";
-import { isProjectLocked, terminateLockHolder } from "../services/lock.js";
+import { isProjectIdentityLocked, isProjectLocked, terminateLockHolder } from "../services/lock.js";
 import { logger } from "../services/logger.js";
-import { loadEffectiveIndexProfileForCollection } from "../services/qdrant.js";
+import {
+  getProjectReclamationInventory,
+  loadEffectiveIndexProfileForCollection,
+  removeProjectReclamationEntry,
+} from "../services/qdrant.js";
+import { resetSymbolGraphCollectionCache } from "../services/symbol-graph-store.js";
 import { getWatchedProjects, isWatching, startWatching, startWatchingAutomatically, stopWatching } from "../services/watcher.js";
 
 const DOCKER_NOT_AVAILABLE_MESSAGE = [
@@ -64,6 +69,37 @@ function formatIndexingInProgressMessage(resolvedPath: string, requestedTool: st
 
   lines.push("", "Use codebase_status to check current indexing state.");
   return lines.join("\n");
+}
+
+function formatPruneInventory(): Promise<string> {
+  return getProjectReclamationInventory().then((inventory) => {
+    if (inventory.entries.length === 0 && inventory.unrecognisedMetadataEntries === 0) {
+      return "No stored project identities found.";
+    }
+    const lines = [
+      "Stored project inventory:",
+      "",
+      "Path state is local observation only. An absent path on this host is not proof that an identity is stale.",
+    ];
+    for (const entry of inventory.entries) {
+      lines.push("", `Identity: ${entry.identity}`);
+      lines.push(`  Path: ${entry.projectPath ?? "(unknown)"}`);
+      lines.push(`  Path state: ${entry.pathState}`);
+      if (entry.canonicalPath) lines.push(`  Canonical path: ${entry.canonicalPath}`);
+      if (entry.lastIndexedAt) lines.push(`  Last indexed: ${entry.lastIndexedAt}`);
+      if (entry.lastBuiltAt) lines.push(`  Last graph build: ${entry.lastBuiltAt}`);
+      if (entry.builtByVersion) lines.push(`  Built by: ${entry.builtByVersion}`);
+      lines.push(`  Collections: ${entry.resourceCollections.join(", ") || "(none)"}`);
+      lines.push(`  Metadata: ${entry.metadataCollections.join(", ") || "(none)"}`);
+      if (entry.possibleSuperseded) lines.push("  Advisory: possible-superseded (another identity has this canonical path)");
+      if (entry.requiresManualInspection) lines.push("  Manual inspection required: conflicting or incomplete metadata");
+      lines.push(`  Confirmation token: ${entry.confirmationToken}`);
+    }
+    if (inventory.unrecognisedMetadataEntries > 0) {
+      lines.push("", `${inventory.unrecognisedMetadataEntries} metadata entr${inventory.unrecognisedMetadataEntries === 1 ? "y requires" : "ies require"} manual inspection and cannot be deleted by this tool.`);
+    }
+    return lines.join("\n");
+  });
 }
 
 export async function handleIndexTool(
@@ -294,6 +330,46 @@ export async function handleIndexTool(
 
       await removeProjectIndex(projectPath);
       return `Removed index for: ${projectPath}`;
+    }
+
+    case "codebase_prune": {
+      if (args.apply !== true) return formatPruneInventory();
+      const identity = args.identity;
+      const confirmationToken = args.confirmationToken;
+      if (typeof identity !== "string" || typeof confirmationToken !== "string") {
+        return "Prune apply requires the exact identity and confirmationToken returned by codebase_prune.";
+      }
+
+      const inventory = await getProjectReclamationInventory();
+      const entry = inventory.entries.find((candidate) => candidate.identity === identity);
+      if (!entry) return `No resources remain for identity ${identity}. Nothing to delete.`;
+      if (entry.confirmationToken !== confirmationToken) {
+        return `Refusing to delete ${identity}: the inventory changed. Run codebase_prune again and use its new confirmation token.`;
+      }
+      if (entry.requiresManualInspection) {
+        return `Refusing to delete ${identity}: its identity cannot be established safely from the stored metadata.`;
+      }
+
+      const storedPath = entry.projectPath;
+      const activeInThisProcess = storedPath !== null && (isIndexingInProgress(storedPath) || isWatching(storedPath));
+      const activeLock = (await isProjectIdentityLocked(identity, "index")) || (await isProjectIdentityLocked(identity, "watch"));
+      if (activeInThisProcess || activeLock) {
+        return `Refusing to delete ${identity}: it is currently indexed, watched, or locked.`;
+      }
+
+      const outcomes = await removeProjectReclamationEntry(entry);
+      if (storedPath) invalidateGraphCache(storedPath);
+      resetSymbolGraphCollectionCache();
+      const remaining = (await getProjectReclamationInventory()).entries.find((candidate) => candidate.identity === identity);
+      const lines = outcomes.map((outcome) => `  ${outcome.outcome}: ${outcome.kind} ${outcome.resource}${outcome.error ? ` (${outcome.error})` : ""}`);
+      if (outcomes.some((outcome) => outcome.outcome === "failed") || remaining) {
+        return [
+          `Cleanup for ${identity} is incomplete.`,
+          ...lines,
+          remaining ? "The identity still has stored resources; inspect the inventory before retrying." : "Inspect the failed resources before retrying.",
+        ].join("\n");
+      }
+      return [`Removed all inventoried resources for identity: ${identity}`, ...lines].join("\n");
     }
 
     case "codebase_stop": {

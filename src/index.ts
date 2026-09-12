@@ -88,6 +88,19 @@ server.tool(
 );
 
 server.tool(
+  "codebase_prune",
+  "Inventory stored project identities and their resources. Report-only by default. Applying requires an exact identity and confirmation token from a fresh inventory; path absence on this host is advisory, not proof of abandonment.",
+  {
+    apply: z.boolean().optional().describe("Delete the selected identity only when true. Omit for the report-only inventory."),
+    identity: z.string().optional().describe("Exact identity returned by codebase_prune."),
+    confirmationToken: z.string().optional().describe("Opaque token returned for that identity by codebase_prune."),
+  },
+  async (args) => ({
+    content: [{ type: "text", text: await handleIndexTool("codebase_prune", args) }],
+  }),
+);
+
+server.tool(
   "codebase_stop",
   "Gracefully stop an in-progress indexing operation. The current batch will finish and checkpoint, preserving all progress. Re-run codebase_index to resume from where it left off.",
   {
