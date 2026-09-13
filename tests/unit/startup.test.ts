@@ -27,6 +27,12 @@ vi.mock("../../src/services/indexer.js", () => ({
 }));
 
 vi.mock("../../src/services/lock.js", () => ({
+  holdsProjectLock: vi.fn(() => false),
+  // The reclamation barrier every writer checks reads this; nothing is being reclaimed here.
+  isProjectIdentityLocked: vi.fn(async () => false),
+  acquireIdentityLock: vi.fn(async () => true),
+  releaseIdentityLock: vi.fn(async () => {}),
+  holdsIdentityLock: vi.fn(() => false),
   getLockHolderPid: vi.fn(),
   releaseAllLocks: vi.fn().mockResolvedValue(undefined),
 }));

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import { createHash } from "node:crypto";
+import fsp from "node:fs/promises";
+import path from "node:path";
 import { QdrantClient } from "@qdrant/js-client-rest";
 import { QDRANT_API_KEY, QDRANT_COLLECTION_PREFIX, QDRANT_HOST, QDRANT_PORT, QDRANT_URL, resolveQdrantPort, SOCRATICODE_VERSION } from "../constants.js";
 import type { ArtifactIndexState, CodeGraph, FileChunk, SearchResult } from "../types.js";
@@ -255,6 +257,347 @@ export async function deleteCollection(name: string): Promise<void> {
       error: err instanceof Error ? err.message : String(err),
     });
   }
+}
+
+export type ProjectPathState = "present-on-this-host" | "absent-on-this-host" | "unknown/inaccessible";
+
+/** One metadata point, projected to the fields that decide whether a preview is still current. */
+export interface ProjectMetadataRecord {
+  pointId: string | number;
+  collectionName: string;
+  projectPath: string | null;
+  indexingStatus: string | null;
+  lastIndexedAt: string | null;
+  lastBuiltAt: string | null;
+  builtByVersion: string | null;
+}
+
+export interface ProjectReclamationEntry {
+  identity: string;
+  projectPath: string | null;
+  canonicalPath: string | null;
+  pathState: ProjectPathState;
+  resourceCollections: string[];
+  metadataRecords: ProjectMetadataRecord[];
+  /** Some record says an indexer has this identity mid-write. */
+  inProgress: boolean;
+  possibleSuperseded: boolean;
+  requiresManualInspection: boolean;
+  /** Why a person has to look before this identity can be deleted; empty when nothing holds it back. */
+  manualInspectionReasons: string[];
+  confirmationToken: string;
+}
+
+/** A metadata point the inventory could not attribute to an identity, kept for a person to look at. */
+export interface UnrecognisedMetadataEntry {
+  pointId: string | number;
+  collectionName: string | null;
+  projectPath: string | null;
+  reason: string;
+}
+
+/** A collection under the configured prefix whose name fits two identities and nothing settles which. */
+export interface UnattributedCollection {
+  name: string;
+  reason: string;
+  /** Every identity the name fits; each is held back from deletion while the name stays unsettled. */
+  candidateIdentities: string[];
+}
+
+export interface ProjectReclamationInventory {
+  entries: ProjectReclamationEntry[];
+  unrecognisedMetadata: UnrecognisedMetadataEntry[];
+  unattributedCollections: UnattributedCollection[];
+}
+
+export interface ProjectReclamationOutcome {
+  resource: string;
+  kind: "collection" | "metadata";
+  /** `skipped`: the caller withdrew consent before this write; nothing was attempted. */
+  outcome: "deleted" | "failed" | "skipped";
+  error?: string;
+}
+
+interface InventorySeed {
+  identity: string;
+  resourceCollections: Set<string>;
+  metadataRecords: ProjectMetadataRecord[];
+}
+
+const RESOURCE_FAMILIES = ["codebase_", "codegraph_", "context_"] as const;
+const SYMGRAPH_SUFFIXES = ["_symgraph_meta", "_symgraph_file", "_symgraph_index"] as const;
+
+interface ResourceInterpretation {
+  identity: string;
+  kind: "family" | "symgraph";
+}
+
+/** Every identity a prefixed name could belong to; empty for a name outside the prefix, which is foreign. */
+function interpretationsOf(name: string): ResourceInterpretation[] {
+  const prefix = QDRANT_COLLECTION_PREFIX;
+  if (!name.startsWith(prefix)) return [];
+  const local = name.slice(prefix.length);
+  const found: ResourceInterpretation[] = [];
+  const symbol = local.match(/^(.+)_symgraph_(?:meta|file|index)$/);
+  if (symbol) found.push({ identity: symbol[1], kind: "symgraph" });
+  for (const family of RESOURCE_FAMILIES) {
+    if (local.startsWith(family) && local.length > family.length) {
+      found.push({ identity: local.slice(family.length), kind: "family" });
+      break;
+    }
+  }
+  return found;
+}
+
+/**
+ * Settle a name that fits two identities with what the store shows: a metadata
+ * point names a family collection, a full symbol-graph triple names a symbol
+ * graph. Both, or neither, and the name is left for a person.
+ */
+function attributeCollection(
+  name: string,
+  candidates: ResourceInterpretation[],
+  names: Set<string>,
+  metadataNames: Set<string>,
+): ResourceInterpretation | UnattributedCollection {
+  if (candidates.length === 1) return candidates[0];
+  const family = candidates.find((candidate) => candidate.kind === "family");
+  const symgraph = candidates.find((candidate) => candidate.kind === "symgraph");
+  const hasMetadata = metadataNames.has(name);
+  const hasTriple = symgraph !== undefined && SYMGRAPH_SUFFIXES.every((suffix) => names.has(`${QDRANT_COLLECTION_PREFIX}${symgraph.identity}${suffix}`));
+  if (family && hasMetadata && !hasTriple) return family;
+  if (symgraph && hasTriple && !hasMetadata) return symgraph;
+  const options = candidates.map((candidate) => `${candidate.identity} (${candidate.kind})`).join(" or ");
+  return {
+    name,
+    reason: `name fits ${options} and the store does not settle which`,
+    candidateIdentities: candidates.map((candidate) => candidate.identity),
+  };
+}
+
+function compareRecords(a: ProjectMetadataRecord, b: ProjectMetadataRecord): number {
+  return String(a.pointId).localeCompare(String(b.pointId));
+}
+
+/** Fingerprint of everything a delete would act on, every metadata record included. */
+function inventoryToken(entry: Omit<ProjectReclamationEntry, "confirmationToken" | "possibleSuperseded">): string {
+  const records = [...entry.metadataRecords].sort(compareRecords).map((record) => [
+    String(record.pointId),
+    record.collectionName,
+    record.projectPath,
+    record.indexingStatus,
+    record.lastIndexedAt,
+    record.lastBuiltAt,
+    record.builtByVersion,
+  ]);
+  return createHash("sha256")
+    .update(JSON.stringify({
+      identity: entry.identity,
+      pathState: entry.pathState,
+      resourceCollections: [...entry.resourceCollections].sort(),
+      records,
+      // A hold that lifts on its own is a change the operator has not seen either.
+      manualInspectionReasons: [...entry.manualInspectionReasons].sort(),
+    }))
+    .digest("hex");
+}
+
+async function inspectStoredPath(projectPath: string | null): Promise<{
+  pathState: ProjectPathState;
+  canonicalPath: string | null;
+}> {
+  if (!projectPath) return { pathState: "unknown/inaccessible", canonicalPath: null };
+  try {
+    return {
+      pathState: "present-on-this-host",
+      canonicalPath: await fsp.realpath(path.resolve(projectPath)),
+    };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      return { pathState: "absent-on-this-host", canonicalPath: null };
+    }
+    return { pathState: "unknown/inaccessible", canonicalPath: null };
+  }
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+/**
+ * Read the stored identities without deriving an identity from the local path.
+ * The result is an inventory: an absent path is local observation, never proof
+ * that a shared-store index may be deleted.
+ */
+export async function getProjectReclamationInventory(): Promise<ProjectReclamationInventory> {
+  const qdrant = getClient();
+  const collections = await qdrant.getCollections();
+  const seeds = new Map<string, InventorySeed>();
+  const seedFor = (identity: string) => {
+    let seed = seeds.get(identity);
+    if (!seed) {
+      seed = { identity, resourceCollections: new Set(), metadataRecords: [] };
+      seeds.set(identity, seed);
+    }
+    return seed;
+  };
+
+  const names = new Set(collections.collections.map(({ name }) => name));
+  const metadataNames = new Set<string>();
+  const unrecognisedMetadata: UnrecognisedMetadataEntry[] = [];
+  const pendingRecords: Array<{ collectionName: string; record: ProjectMetadataRecord }> = [];
+  if (names.has(METADATA_COLLECTION)) {
+    let offset: string | number | Record<string, unknown> | undefined | null;
+    do {
+      const page = await withRetry(
+        () => qdrant.scroll(METADATA_COLLECTION, {
+          limit: 1000,
+          with_payload: {
+            include: ["collectionName", "projectPath", "indexingStatus", "lastIndexedAt", "lastBuiltAt", "builtByVersion"],
+          },
+          with_vector: false,
+          ...(offset === undefined || offset === null ? {} : { offset }),
+        }),
+        "getProjectReclamationInventory(metadata)",
+      );
+      for (const point of page.points) {
+        const payload = point.payload as Record<string, unknown> | null | undefined;
+        const collectionName = stringOrNull(payload?.collectionName);
+        const projectPath = stringOrNull(payload?.projectPath);
+        if (collectionName === null) {
+          unrecognisedMetadata.push({ pointId: point.id, collectionName: null, projectPath, reason: "collectionName is missing or not a string" });
+          continue;
+        }
+        // A metadata point exists only for a family collection, so that reading is the certain one.
+        const family = interpretationsOf(collectionName).find((candidate) => candidate.kind === "family");
+        if (!family) {
+          unrecognisedMetadata.push({
+            pointId: point.id,
+            collectionName,
+            projectPath,
+            reason: "collectionName is outside the configured prefix or not a known resource family",
+          });
+          continue;
+        }
+        metadataNames.add(collectionName);
+        pendingRecords.push({
+          collectionName: family.identity,
+          record: {
+            pointId: point.id,
+            collectionName,
+            projectPath,
+            indexingStatus: stringOrNull(payload?.indexingStatus),
+            lastIndexedAt: stringOrNull(payload?.lastIndexedAt),
+            lastBuiltAt: stringOrNull(payload?.lastBuiltAt),
+            builtByVersion: stringOrNull(payload?.builtByVersion),
+          },
+        });
+      }
+      const next = page.next_page_offset;
+      if (next !== undefined && next !== null && JSON.stringify(next) === JSON.stringify(offset)) {
+        throw new Error("Project inventory metadata cursor did not advance");
+      }
+      offset = next;
+    } while (offset !== undefined && offset !== null);
+  }
+  for (const { collectionName: identity, record } of pendingRecords) {
+    seedFor(identity).metadataRecords.push(record);
+  }
+
+  const unattributedCollections: UnattributedCollection[] = [];
+  for (const name of names) {
+    const candidates = interpretationsOf(name);
+    if (candidates.length === 0) continue;
+    const settled = attributeCollection(name, candidates, names, metadataNames);
+    if ("reason" in settled) unattributedCollections.push(settled);
+    else seedFor(settled.identity).resourceCollections.add(name);
+  }
+  // Deleting either candidate would remove the evidence that keeps the name
+  // unsettled, and the next inventory would hand the collection to the other.
+  const heldBack = new Map<string, string[]>();
+  for (const unattributed of unattributedCollections) {
+    for (const identity of unattributed.candidateIdentities) {
+      if (!seeds.has(identity)) continue;
+      const reasons = heldBack.get(identity) ?? [];
+      reasons.push(`collection ${unattributed.name} fits this identity and another; the store does not settle which`);
+      heldBack.set(identity, reasons);
+    }
+  }
+
+  const inspected = await Promise.all(Array.from(seeds.values()).map(async (seed) => {
+    const projectPaths = Array.from(new Set(seed.metadataRecords.map((record) => record.projectPath).filter((value): value is string => value !== null))).sort();
+    const projectPath = projectPaths.length === 1 ? projectPaths[0] : null;
+    const { pathState, canonicalPath } = await inspectStoredPath(projectPath);
+    const manualInspectionReasons = [
+      ...(projectPaths.length > 1 ? [`metadata records disagree about the path: ${projectPaths.join(", ")}`] : []),
+      ...(heldBack.get(seed.identity) ?? []),
+    ];
+    const base: Omit<ProjectReclamationEntry, "confirmationToken" | "possibleSuperseded"> = {
+      identity: seed.identity,
+      projectPath,
+      canonicalPath,
+      pathState,
+      resourceCollections: Array.from(seed.resourceCollections).sort(),
+      metadataRecords: [...seed.metadataRecords].sort(compareRecords),
+      inProgress: seed.metadataRecords.some((record) => record.indexingStatus === "in-progress"),
+      requiresManualInspection: manualInspectionReasons.length > 0,
+      manualInspectionReasons,
+    };
+    return { ...base, possibleSuperseded: false, confirmationToken: inventoryToken(base) };
+  }));
+
+  const canonicalCounts = new Map<string, number>();
+  for (const entry of inspected) {
+    if (entry.canonicalPath) canonicalCounts.set(entry.canonicalPath, (canonicalCounts.get(entry.canonicalPath) ?? 0) + 1);
+  }
+  for (const entry of inspected) {
+    entry.possibleSuperseded = entry.canonicalPath !== null && (canonicalCounts.get(entry.canonicalPath) ?? 0) > 1;
+  }
+
+  return {
+    entries: inspected.sort((a, b) => a.identity.localeCompare(b.identity)),
+    unrecognisedMetadata: unrecognisedMetadata.sort((a, b) => String(a.pointId).localeCompare(String(b.pointId))),
+    unattributedCollections: unattributedCollections.sort((a, b) => a.name.localeCompare(b.name)),
+  };
+}
+
+/** Delete exactly the inventoried resources, one outcome each; a resource already gone counts as deleted. */
+export async function removeProjectReclamationEntry(
+  entry: ProjectReclamationEntry,
+  /** Asked before every write; once it answers false, nothing more is attempted. */
+  mayContinue: () => boolean = () => true,
+): Promise<ProjectReclamationOutcome[]> {
+  const qdrant = getClient();
+  const outcomes: ProjectReclamationOutcome[] = [];
+  let stopped = false;
+  const attempt = async (resource: string, kind: ProjectReclamationOutcome["kind"], remove: () => Promise<unknown>) => {
+    if (stopped || !mayContinue()) {
+      stopped = true;
+      outcomes.push({ resource, kind, outcome: "skipped", error: "the reclamation barrier was lost before this write" });
+      return;
+    }
+    try {
+      await remove();
+      outcomes.push({ resource, kind, outcome: "deleted" });
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        outcomes.push({ resource, kind, outcome: "deleted" });
+        return;
+      }
+      outcomes.push({ resource, kind, outcome: "failed", error: error instanceof Error ? error.message : String(error) });
+    }
+  };
+  for (const resource of entry.resourceCollections) {
+    await attempt(resource, "collection", () => qdrant.deleteCollection(resource));
+  }
+  for (const record of entry.metadataRecords) {
+    // wait: true, so the inventory read that follows sees the point gone.
+    await attempt(`${record.collectionName} [point ${record.pointId}]`, "metadata", () =>
+      qdrant.delete(METADATA_COLLECTION, { points: [record.pointId], wait: true }),
+    );
+  }
+  return outcomes;
 }
 
 /**

@@ -72,6 +72,12 @@ const mockAcquireProjectLock = vi.fn(async (_path: string, _type: string) => tru
 const mockReleaseProjectLock = vi.fn(async (_path: string, _type: string) => {});
 const mockIsProjectLocked = vi.fn(async (_path: string, _type: string) => false);
 vi.mock("../../src/services/lock.js", () => ({
+  holdsProjectLock: vi.fn(() => false),
+  // The reclamation barrier every writer checks reads this; nothing is being reclaimed here.
+  isProjectIdentityLocked: vi.fn(async () => false),
+  acquireIdentityLock: vi.fn(async () => true),
+  releaseIdentityLock: vi.fn(async () => {}),
+  holdsIdentityLock: vi.fn(() => false),
   acquireProjectLock: (...args: unknown[]) => mockAcquireProjectLock(...(args as [string, string])),
   releaseProjectLock: (...args: unknown[]) => mockReleaseProjectLock(...(args as [string, string])),
   isProjectLocked: (...args: unknown[]) => mockIsProjectLocked(...(args as [string, string])),
@@ -157,7 +163,7 @@ describe("watcher (unit)", () => {
 
     it("acquires a cross-process lock", async () => {
       await startWatching(TEST_PROJECT);
-      expect(mockAcquireProjectLock).toHaveBeenCalledWith(RESOLVED_PROJECT, "watch");
+      expect(mockAcquireProjectLock).toHaveBeenCalledWith(RESOLVED_PROJECT, "watch", undefined, { reentrant: false });
     });
 
     it("skips if already watching (idempotent)", async () => {

@@ -34,6 +34,7 @@ import {
   getProjectMetadata,
   loadProjectEffectiveProfile,
 } from "./qdrant.js";
+import { assertNoReclamationBarrier } from "./reclamation-barrier.js";
 
 /** Active subscriptions per project path */
 const subscriptions = new Map<string, AsyncSubscription>();
@@ -245,8 +246,18 @@ export async function startWatching(
     return true;
   }
 
-  // Acquire cross-process lock for watching
-  const lockAcquired = await acquireProjectLock(resolvedPath, "watch");
+  try {
+    await assertNoReclamationBarrier(projectIdFromPath(resolvedPath));
+  } catch (err) {
+    const message = `Refusing to watch: ${err instanceof Error ? err.message : String(err)}`;
+    logger.info(message, { projectPath: resolvedPath });
+    onProgress?.(message);
+    return false;
+  }
+
+  // Acquire cross-process lock for watching, non-reentrantly: a watch lock
+  // this process already holds is another watcher's or reclamation's.
+  const lockAcquired = await acquireProjectLock(resolvedPath, "watch", undefined, { reentrant: false });
   if (!lockAcquired) {
     logger.info("Another process is already watching this project, skipping", { projectPath: resolvedPath });
     onProgress?.(`Another process is already watching ${resolvedPath}, skipping`);

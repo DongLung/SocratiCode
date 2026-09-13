@@ -59,6 +59,7 @@ import {
   saveProjectMetadata,
   upsertPreEmbeddedChunks,
 } from "./qdrant.js";
+import { assertNoReclamationBarrier } from "./reclamation-barrier.js";
 
 export const FILE_SCAN_BATCH = 50; // Number of files to scan/chunk in parallel (I/O only, no network)
 
@@ -1017,6 +1018,18 @@ export async function getIndexableFiles(
   return kept;
 }
 
+/** Why an index must not start, or null; an uninspectable barrier is a reason too. */
+async function reclamationRefusal(resolvedPath: string): Promise<string | null> {
+  try {
+    await assertNoReclamationBarrier(projectIdFromPath(resolvedPath));
+    return null;
+  } catch (err) {
+    const msg = `Refusing to index: ${err instanceof Error ? err.message : String(err)}`;
+    logger.info(msg, { projectPath: resolvedPath });
+    return msg;
+  }
+}
+
 /** Full index of a project directory */
 export async function indexProject(
   projectPath: string,
@@ -1028,9 +1041,19 @@ export async function indexProject(
 
   const resolvedPath = path.resolve(projectPath);
 
-  // Cross-process lock: prevent two MCP instances from indexing the same project
-  const lockAcquired = await acquireProjectLock(resolvedPath, "index", () =>
-    cancelBecauseLockWasLost(resolvedPath),
+  const reclaimed = await reclamationRefusal(resolvedPath);
+  if (reclaimed) {
+    onProgress?.(reclaimed);
+    return { filesIndexed: 0, chunksCreated: 0, cancelled: false };
+  }
+
+  // Cross-process lock, taken non-reentrantly: a lock this process already
+  // holds belongs to another run or to reclamation, never to this call.
+  const lockAcquired = await acquireProjectLock(
+    resolvedPath,
+    "index",
+    () => cancelBecauseLockWasLost(resolvedPath),
+    { reentrant: false },
   );
   if (!lockAcquired) {
     const msg = "Another process is already indexing this project, skipping";
@@ -1038,7 +1061,20 @@ export async function indexProject(
     onProgress?.(msg);
     return { filesIndexed: 0, chunksCreated: 0, cancelled: false };
   }
+  try {
+    return await indexProjectLocked(resolvedPath, onProgress, extraExtensions);
+  } finally {
+    await releaseProjectLock(resolvedPath, "index");
+  }
+}
 
+/** The full index, under an index lock the caller holds and releases. */
+async function indexProjectLocked(
+  projectPath: string,
+  onProgress?: (message: string) => void,
+  extraExtensions?: Set<string>,
+): Promise<{ filesIndexed: number; chunksCreated: number; cancelled: boolean }> {
+  const resolvedPath = path.resolve(projectPath);
   const progress: IndexingProgress = {
     type: "full-index",
     startedAt: Date.now(),
@@ -1509,7 +1545,6 @@ export async function indexProject(
   } finally {
     indexingInProgress.delete(resolvedPath);
     cancellationRequested.delete(resolvedPath);
-    await releaseProjectLock(resolvedPath, "index");
   }
 }
 
@@ -1523,9 +1558,19 @@ export async function updateProjectIndex(
 
   const resolvedPath = path.resolve(projectPath);
 
-  // Cross-process lock: prevent two MCP instances from updating the same project
-  const lockAcquired = await acquireProjectLock(resolvedPath, "index", () =>
-    cancelBecauseLockWasLost(resolvedPath),
+  const reclaimed = await reclamationRefusal(resolvedPath);
+  if (reclaimed) {
+    onProgress?.(reclaimed);
+    return { added: 0, updated: 0, removed: 0, chunksCreated: 0, cancelled: false };
+  }
+
+  // Cross-process lock, taken non-reentrantly; the full-index fallback below
+  // runs under this same lock through the private locked path.
+  const lockAcquired = await acquireProjectLock(
+    resolvedPath,
+    "index",
+    () => cancelBecauseLockWasLost(resolvedPath),
+    { reentrant: false },
   );
   if (!lockAcquired) {
     const msg = "Another process is already indexing this project, skipping";
@@ -1565,7 +1610,7 @@ export async function updateProjectIndex(
   if (!info || info.pointsCount === 0) {
     // Collection truly doesn't exist or is empty — safe to do a full index
     onProgress?.("No existing index found, performing full index...");
-    const result = await indexProject(projectPath, onProgress, extraExtensions);
+    const result = await indexProjectLocked(resolvedPath, onProgress, extraExtensions);
     return { added: result.filesIndexed, updated: 0, removed: 0, chunksCreated: result.chunksCreated, cancelled: result.cancelled };
   }
 
@@ -1590,7 +1635,7 @@ export async function updateProjectIndex(
       collection,
       pointsCount: info.pointsCount,
     });
-    const result = await indexProject(projectPath, onProgress, extraExtensions);
+    const result = await indexProjectLocked(resolvedPath, onProgress, extraExtensions);
     return { added: result.filesIndexed, updated: 0, removed: 0, chunksCreated: result.chunksCreated, cancelled: result.cancelled };
   }
 
@@ -2054,6 +2099,11 @@ export async function removeProjectIndex(projectPath: string): Promise<void> {
   await removeGraph(resolvedPath);
   // Also remove context artifacts (if any)
   await removeAllArtifacts(resolvedPath);
+  invalidateProjectHashesForIdentity(projectId);
+}
+
+/** Forget the loaded file hashes of an identity whose collection is gone. */
+export function invalidateProjectHashesForIdentity(projectId: string): void {
   projectHashes.delete(projectId);
   projectHashesLoaded.delete(projectId);
 }

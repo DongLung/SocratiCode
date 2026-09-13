@@ -582,6 +582,7 @@ On VS Code's 2.45M‑line codebase, SocratiCode answers architectural questions 
 - **Cross-process safety** — File-based locking (`proper-lockfile`) prevents multiple MCP instances from simultaneously indexing or watching the same project. Stale locks from crashed processes are automatically reclaimed. When another MCP process is already watching a project, `codebase_status` reports "active (watched by another process)" instead of incorrectly showing "inactive."
 - **Concurrency guards** — Duplicate indexing and graph-build operations are prevented. If you call `codebase_index` while indexing is already running, it returns the current progress instead of starting a second operation.
 - **Graceful stop** — Long-running indexing operations can be stopped safely with `codebase_stop`. The current batch finishes and checkpoints, preserving all progress. Re-run `codebase_index` to resume from where it left off.
+- **Explicit reclamation** — `codebase_prune` lists what the store holds and deletes one identity at a time, only on an explicit, confirmed apply. See [Reclaiming stored identities](#reclaiming-stored-identities).
 - **Graceful shutdown** — On server shutdown, active indexing operations are given up to 60 seconds to complete, all file watchers are stopped cleanly, and the everything closes gracefully.
 - **Structured logging** — All operations are logged with structured context for observability. Log level configurable via `SOCRATICODE_LOG_LEVEL`.
 - **Graceful degradation** — If infrastructure goes down during watch, the watcher backs off and retries instead of crashing.
@@ -1144,9 +1145,29 @@ With this enabled, collection names include the branch name (e.g. `codebase_abc1
 
 > **How it works:** `projectIdFromPath()` detects the current git branch via `git rev-parse --abbrev-ref HEAD` and appends a sanitized branch suffix (e.g. `feat/my-feature` → `feat_my-feature`) to the hash-based project ID. Detached HEAD states fall back to the branchless ID.
 
+### Reclaiming stored identities
+
+An index outlives its directory when a worktree is removed, a clone deleted or a folder renamed: `codebase_remove` addresses a project by its path, so a directory that is gone can no longer be named. `codebase_prune` works from what the store already records.
+
+**Report.** `codebase_prune` with no arguments is a neutral inventory. For every stored identity it lists the collections that carry its name (code, graph, symbol graph, context) and every metadata record, and it reports the recorded path as one of:
+
+| Path state | Meaning |
+|------------|---------|
+| `present-on-this-host` | The recorded directory resolves on this machine. |
+| `absent-on-this-host` | The check conclusively returned `ENOENT`/`ENOTDIR` here. This is an observation, not proof of abandonment: in a shared Qdrant the path exists only on the host that wrote the index. |
+| `unknown/inaccessible` | Permission denied, an unavailable mount, or no recorded path. Never a reason to delete. |
+
+Two identities recording the same canonical path — a path-hash identity and a later pinned `projectId` for the same checkout — are marked `possible-superseded` as an advisory only. An identity whose records disagree about its path is marked for manual inspection and cannot be deleted by this tool. Metadata points that cannot be attributed to an identity are listed with their point id and the reason, and are likewise left alone. So is a collection whose name fits two identities: a pinned `projectId` that itself begins with `codebase_`, `codegraph_` or `context_`, or ends with `_symgraph_meta`/`_file`/`_index`, produces names that another identity could also own; the inventory settles them with what the store shows (a metadata point names a family collection, a full symbol-graph triple names a symbol graph) and lists the rest for manual inspection; every identity such a name could belong to is held back from deletion as well, since deleting one would remove the evidence and hand the collection to the other on the next read.
+
+**Apply.** Deletion takes the exact `identity` from the report, the `confirmationToken` printed beside it, and `acknowledgeNoRemoteWriters: true`. The token fingerprints every collection and every metadata record of that identity, so any change since the report — a new record, a changed status, a resource added or gone — makes the apply refuse and ask for a fresh report. Deletion is refused while the identity is being indexed, watched, graph-built or context-indexed in this process, while another process on this host holds any of its writer locks (`index`, `watch`, `graph`, `context`), or whenever a lock cannot be inspected. From the final validation through the last delete the tool holds an identity-scoped barrier: the `prune` lock plus every writer lock. Every writer checks the barrier before starting and takes its own lock non-reentrantly while it runs (a lock this process already holds is never adopted), so a graph build or context indexing in another local process is excluded the same way an indexer or watcher is; a second process asking to build the same identity's graph while one is running is refused rather than run alongside it.
+
+**Shared-store limitation.** Lock files live on this host. They cannot show that another machine sharing the same Qdrant is idle, which is what `acknowledgeNoRemoteWriters` states on the operator's behalf; nothing in the tool infers it.
+
+**Outcome.** Every resource is reported with its own result. Barrier ownership is checked before each write; if a barrier lock is reported lost mid-cleanup, deletion stops at the next write, the remaining resources are reported as skipped, and the cleanup is reported incomplete. A resource already gone counts as deleted, so repeating an apply after a partial failure is safe and does nothing where nothing remains. Success is reported only when the inventory re-read after deletion shows none of the identity's resources; otherwise the leftovers are listed. Caches keyed by the identity — the graph, the loaded file hashes and the symbol graph — are dropped in this process. Existing indexes need no migration or re-index to be reported.
+
 ### Available tools
 
-Once connected, 21 tools are available to your AI assistant:
+Once connected, the following tools are available to your AI assistant:
 
 #### Indexing
 
@@ -1156,6 +1177,7 @@ Once connected, 21 tools are available to your AI assistant:
 | `codebase_stop` | Gracefully stop an in-progress indexing operation (current batch finishes and checkpoints; resume with `codebase_index`) |
 | `codebase_update` | Incremental update — only re-indexes changed files |
 | `codebase_remove` | Remove a project's index (safely stops watcher, cancels in-flight indexing/update, waits for graph build) |
+| `codebase_prune` | Inventory every stored project identity with its collections and metadata; delete one only by exact identity, fresh confirmation token and shared-store acknowledgement (see [Reclaiming stored identities](#reclaiming-stored-identities)) |
 | `codebase_watch` | Start/stop file watching — on start, catches up missed changes then watches for future ones |
 
 #### Search
