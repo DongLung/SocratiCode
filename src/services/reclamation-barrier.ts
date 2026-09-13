@@ -60,12 +60,13 @@ export async function acquireReclamationBarrier(projectId: string): Promise<Recl
   if (heldBarriers.has(projectId)) return null;
 
   const operations = [BARRIER_OPERATION, ...WRITER_OPERATIONS];
-  // A lock this process already holds belongs to a live writer here; the barrier must not release it.
-  if (operations.some((operation) => holdsIdentityLock(projectId, operation))) return null;
+  // Flagged before any lock is taken, so a writer in this process is refused throughout the acquisition.
+  heldBarriers.add(projectId);
 
   let compromised = false;
   const acquired: string[] = [];
   const undo = async () => {
+    heldBarriers.delete(projectId);
     for (const operation of [...acquired].reverse()) {
       await releaseIdentityLock(projectId, operation);
     }
@@ -74,10 +75,17 @@ export async function acquireReclamationBarrier(projectId: string): Promise<Recl
   for (const operation of operations) {
     let ok = false;
     try {
-      ok = await acquireIdentityLock(projectId, operation, (err) => {
-        compromised = true;
-        logger.warn("Reclamation barrier lock compromised", { projectId, operation, error: err.message });
-      });
+      // Non-reentrant: a lock this process already holds belongs to a live writer, never to the barrier.
+      ok = await acquireIdentityLock(
+        projectId,
+        operation,
+        (err) => {
+          compromised = true;
+          logger.warn("Reclamation barrier lock compromised", { projectId, operation, error: err.message });
+        },
+        projectId,
+        false,
+      );
     } catch (err) {
       logger.warn("Reclamation barrier lock acquisition threw", {
         projectId,
@@ -92,13 +100,9 @@ export async function acquireReclamationBarrier(projectId: string): Promise<Recl
     acquired.push(operation);
   }
 
-  heldBarriers.add(projectId);
   return {
     isCompromised: () => compromised,
-    release: async () => {
-      heldBarriers.delete(projectId);
-      await undo();
-    },
+    release: undo,
   };
 }
 

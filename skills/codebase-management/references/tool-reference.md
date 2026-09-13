@@ -71,7 +71,7 @@ Inventory every stored project identity, and delete one only on an explicit, con
 | `confirmationToken` | string | with `apply` | — | Token printed beside that identity in a fresh report |
 | `acknowledgeNoRemoteWriters` | boolean | with `apply` | — | States that no other host sharing this Qdrant is writing to the identity |
 
-**Returns:** The report lists, per identity, the recorded path and its state (`present-on-this-host`, `absent-on-this-host`, `unknown/inaccessible`), the collections carrying its name, every metadata record with point id, status, timestamps and builder version, advisories (`possible-superseded`, manual inspection), and the confirmation token. Metadata points that cannot be attributed to an identity are listed with the reason. An apply returns one line per resource (`deleted` or `failed` with the error) and, when anything is still stored afterwards, what remains.
+**Returns:** The report lists, per identity, the recorded path and its state (`present-on-this-host`, `absent-on-this-host`, `unknown/inaccessible`), the collections carrying its name, every metadata record with point id, status, timestamps and builder version, advisories (`possible-superseded`, manual inspection), and the confirmation token. Metadata points that cannot be attributed to an identity are listed with the reason, and so are collections whose name fits two identities and nothing in the store settles which. An apply returns one line per resource (`deleted` or `failed` with the error) and, when anything is still stored afterwards, what remains.
 
 **Key behaviours:**
 - **Report-only by default**; no candidate set is derived from path state, and there is no blanket apply

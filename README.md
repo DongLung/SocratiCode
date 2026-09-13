@@ -1157,7 +1157,7 @@ An index outlives its directory when a worktree is removed, a clone deleted or a
 | `absent-on-this-host` | The check conclusively returned `ENOENT`/`ENOTDIR` here. This is an observation, not proof of abandonment: in a shared Qdrant the path exists only on the host that wrote the index. |
 | `unknown/inaccessible` | Permission denied, an unavailable mount, or no recorded path. Never a reason to delete. |
 
-Two identities recording the same canonical path — a path-hash identity and a later pinned `projectId` for the same checkout — are marked `possible-superseded` as an advisory only. An identity whose records disagree about its path is marked for manual inspection and cannot be deleted by this tool. Metadata points that cannot be attributed to an identity are listed with their point id and the reason, and are likewise left alone.
+Two identities recording the same canonical path — a path-hash identity and a later pinned `projectId` for the same checkout — are marked `possible-superseded` as an advisory only. An identity whose records disagree about its path is marked for manual inspection and cannot be deleted by this tool. Metadata points that cannot be attributed to an identity are listed with their point id and the reason, and are likewise left alone. So is a collection whose name fits two identities: a pinned `projectId` that itself begins with `codebase_`, `codegraph_` or `context_`, or ends with `_symgraph_meta`/`_file`/`_index`, produces names that another identity could also own; the inventory settles them with what the store shows (a metadata point names a family collection, a full symbol-graph triple names a symbol graph) and lists the rest for manual inspection.
 
 **Apply.** Deletion takes the exact `identity` from the report, the `confirmationToken` printed beside it, and `acknowledgeNoRemoteWriters: true`. The token fingerprints every collection and every metadata record of that identity, so any change since the report — a new record, a changed status, a resource added or gone — makes the apply refuse and ask for a fresh report. Deletion is refused while the identity is being indexed, watched, graph-built or context-indexed in this process, while another process on this host holds any of its writer locks (`index`, `watch`, `graph`, `context`), or whenever a lock cannot be inspected. From the final validation through the last delete the tool holds an identity-scoped barrier: the `prune` lock plus every writer lock. Every writer checks the barrier before starting and holds its own lock while it runs, so a graph build or context indexing in another local process is excluded the same way an indexer or watcher is; a second process asking to build the same identity's graph while one is running is refused rather than run alongside it.
 
@@ -1167,7 +1167,7 @@ Two identities recording the same canonical path — a path-hash identity and a 
 
 ### Available tools
 
-Once connected, 21 tools are available to your AI assistant:
+Once connected, the following tools are available to your AI assistant:
 
 #### Indexing
 

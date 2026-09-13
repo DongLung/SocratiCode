@@ -81,6 +81,7 @@ export async function acquireIdentityLock(
   operation: string,
   onCompromised?: (err: Error) => void | Promise<void>,
   projectPath: string = projectId,
+  reentrant = true,
 ): Promise<boolean> {
   ensureLockDir();
 
@@ -92,9 +93,9 @@ export async function acquireIdentityLock(
     fs.writeFileSync(filePath, `${process.pid}\n`, "utf-8");
   }
 
-  // If we already hold this lock (same process), return true
+  // A lock this process holds belongs to whoever took it; a non-reentrant caller must not adopt it.
   if (heldLocks.has(key)) {
-    return true;
+    return reentrant;
   }
 
   try {

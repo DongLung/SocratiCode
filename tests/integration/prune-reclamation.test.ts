@@ -73,6 +73,9 @@ describe.skipIf(!reachable)("codebase_prune against a real store", () => {
   /** A live identity under the same prefix that must survive untouched. */
   let liveProject: string;
   let liveId: string;
+  /** A pinned identity that begins with a family name; its symbol-graph names also read as another identity's. */
+  let oddProject: string;
+  const oddId = "context_docs";
   let ownedBefore: string[];
   const foreignCollections = [`${FOREIGN_PREFIX}codebase_alpha`, `${FOREIGN_PREFIX}socraticode_metadata`];
   const lookalike = "codebase_prunelookalike";
@@ -83,8 +86,11 @@ describe.skipIf(!reachable)("codebase_prune against a real store", () => {
 
     goneProject = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-prune-gone-"));
     liveProject = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-prune-live-"));
+    oddProject = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-prune-odd-"));
+    fs.writeFileSync(path.join(oddProject, ".socraticode.json"), JSON.stringify({ projectId: oddId }));
     goneId = projectIdFromPath(goneProject);
     liveId = projectIdFromPath(liveProject);
+    expect(projectIdFromPath(oddProject)).toBe(oddId);
 
     const profile = requestedIndexProfile("code");
     const record = {
@@ -100,7 +106,7 @@ describe.skipIf(!reachable)("codebase_prune against a real store", () => {
       settings: "00112233445566ff",
     };
 
-    for (const [project, id] of [[goneProject, goneId], [liveProject, liveId]] as const) {
+    for (const [project, id] of [[goneProject, goneId], [liveProject, liveId], [oddProject, oddId]] as const) {
       await createRawCollection(collectionName(id));
       await createRawCollection(graphCollectionName(id));
       await createRawCollection(contextCollectionName(id));
@@ -139,6 +145,7 @@ describe.skipIf(!reachable)("codebase_prune against a real store", () => {
       }
     }
     fs.rmSync(liveProject, { recursive: true, force: true });
+    fs.rmSync(oddProject, { recursive: true, force: true });
   }, 60_000);
 
   it("reports both identities with their resources, and nothing foreign", async () => {
@@ -158,6 +165,10 @@ describe.skipIf(!reachable)("codebase_prune against a real store", () => {
     expect(report).not.toContain(FOREIGN_PREFIX);
     expect(report).not.toContain(lookalike);
     expect(report).not.toContain("candidate");
+    // The pinned identity's symbol-graph triple reads as `docs_symgraph_*` under `context_` too; the triple settles it.
+    expect(report).toContain(`Identity: ${oddId}`);
+    expect(report).not.toContain("Identity: docs_symgraph");
+    expect(report).not.toContain("could not be attributed to one identity");
 
     expect(await listNames()).toEqual(expect.arrayContaining(ownedBefore));
   });
@@ -196,6 +207,7 @@ describe.skipIf(!reachable)("codebase_prune against a real store", () => {
     const remaining = metadataPoints.points.map((point) => String(point.payload?.collectionName));
     expect(remaining.some((name) => name.includes(goneId))).toBe(false);
     expect(remaining.filter((name) => name.includes(liveId)).length).toBe(3);
+    expect(remaining.filter((name) => name.includes(oddId)).length).toBe(3);
 
     const report = await handleIndexTool("codebase_prune", {});
     expect(report).not.toContain(`Identity: ${goneId}`);

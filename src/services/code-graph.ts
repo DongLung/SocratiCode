@@ -153,7 +153,12 @@ export function getGraphBuildInProgressProjects(): string[] {
 // ── Graph cache (service-level, shared by tools and watcher) ─────────────
 
 /** In-memory graph cache keyed by resolved project path */
-const graphCache = new Map<string, CodeGraph>();
+/** Keyed by resolved path; the identity is kept from load time, since a checkout can change what it resolves to. */
+const graphCache = new Map<string, { graph: CodeGraph; projectId: string }>();
+
+function cacheGraph(resolvedPath: string, graph: CodeGraph): void {
+  graphCache.set(resolvedPath, { graph, projectId: identityOfCachedPath(resolvedPath) ?? "" });
+}
 
 /** Invalidate graph cache for a project (called by watcher on file changes) */
 export function invalidateGraphCache(projectPath: string): void {
@@ -162,8 +167,8 @@ export function invalidateGraphCache(projectPath: string): void {
 
 /** A pinned identity can be cached under more than one checkout path; drop them all. */
 export function invalidateGraphCacheForIdentity(projectId: string): void {
-  for (const cachedPath of Array.from(graphCache.keys())) {
-    if (identityOfCachedPath(cachedPath) === projectId) graphCache.delete(cachedPath);
+  for (const [cachedPath, entry] of Array.from(graphCache.entries())) {
+    if (entry.projectId === projectId || identityOfCachedPath(cachedPath) === projectId) graphCache.delete(cachedPath);
   }
 }
 
@@ -187,7 +192,7 @@ export async function getOrBuildGraph(
   const graph = await buildCodeGraph(resolved, extraExtensions);
   // Strip symbol fields when serving as a plain CodeGraph
   const plain: CodeGraph = { nodes: graph.nodes, edges: graph.edges };
-  graphCache.set(resolved, plain);
+  cacheGraph(resolved, plain);
   return plain;
 }
 
@@ -195,14 +200,14 @@ export async function getOrBuildGraph(
 export async function getExistingGraph(projectPath: string): Promise<CodeGraph | null> {
   const resolved = path.resolve(projectPath);
   const cached = graphCache.get(resolved);
-  if (cached) return cached;
+  if (cached) return cached.graph;
 
   const projectId = projectIdFromPath(resolved);
   const graphCollName = graphCollectionName(projectId);
   const persisted = await loadGraphData(graphCollName);
   if (!persisted) return null;
 
-  graphCache.set(resolved, persisted);
+  cacheGraph(resolved, persisted);
   return persisted;
 }
 
@@ -324,14 +329,16 @@ export async function rebuildGraph(
   const projectId = projectIdFromPath(resolved);
   await assertNoReclamationBarrier(projectId);
 
-  // Start tracked build
-  const promise = withWriterLock(projectId, "graph", () => doRebuildGraph(resolved, opts));
-  graphBuildPromises.set(resolved, promise as Promise<CodeGraph>);
-
-  try {
-    const graph = await promise;
+  // Start tracked build. A refused lock rejects here, so a caller joining the
+  // promise later sees the rejection and never a null.
+  const promise = withWriterLock(projectId, "graph", () => doRebuildGraph(resolved, opts)).then((graph) => {
     if (graph === null) throw new Error(`Another process holds the graph lock for ${resolved}, or it could not be taken`);
     return graph;
+  });
+  graphBuildPromises.set(resolved, promise);
+
+  try {
+    return await promise;
   } finally {
     graphBuildPromises.delete(resolved);
   }
@@ -407,7 +414,7 @@ async function doRebuildGraph(
     // clearing it up front would defeat.
     const built = await buildConsistentCodeGraph(resolvedPath, opts, progress);
     const graph: CodeGraph = { nodes: built.nodes, edges: built.edges };
-    graphCache.set(resolvedPath, graph);
+    cacheGraph(resolvedPath, graph);
 
     // Persist file-import graph to Qdrant
     progress.phase = "persisting";

@@ -33,7 +33,11 @@ const mockSetIndexingProgress = vi.fn((..._args: unknown[]) => {});
 const mockIndexProject = vi.fn(async (..._args: unknown[]) => ({ filesIndexed: 0, chunksCreated: 0, cancelled: false }));
 const mockUpdateProjectIndex = vi.fn(async (..._args: unknown[]) => ({ added: 0, updated: 0, removed: 0, chunksCreated: 0, cancelled: false }));
 const mockProjectReclamationInventory = vi.fn(
-  async (): Promise<{ entries: unknown[]; unrecognisedMetadata: unknown[] }> => ({ entries: [], unrecognisedMetadata: [] }),
+  async (): Promise<{ entries: unknown[]; unrecognisedMetadata: unknown[]; unattributedCollections: unknown[] }> => ({
+    entries: [],
+    unrecognisedMetadata: [],
+    unattributedCollections: [],
+  }),
 );
 const mockRemoveProjectReclamationEntry = vi.fn(async (..._args: unknown[]): Promise<unknown[]> => []);
 const mockGetIndexingInProgressProjects = vi.fn((): string[] => []);
@@ -246,7 +250,7 @@ function reclamationEntry(overrides: Record<string, unknown> = {}) {
 }
 
 function inventoryOf(...entries: unknown[]) {
-  return { entries, unrecognisedMetadata: [] as unknown[] };
+  return { entries, unrecognisedMetadata: [] as unknown[], unattributedCollections: [] as unknown[] };
 }
 
 describe("manual indexing mode", () => {
@@ -483,6 +487,7 @@ describe("codebase_prune — explicit identity reclamation", () => {
       unrecognisedMetadata: [
         { pointId: "point-9", collectionName: "weird_thing", projectPath: null, reason: "collectionName is outside the configured prefix or not a known resource family" },
       ],
+      unattributedCollections: [{ name: "context_docs_symgraph_file", reason: "name fits context_docs (symgraph) or docs_symgraph_file (family) and the store does not settle which" }],
     });
 
     const result = await handleIndexTool("codebase_prune", {});
@@ -494,6 +499,7 @@ describe("codebase_prune — explicit identity reclamation", () => {
     expect(result).toContain("Indexing in progress");
     expect(result).toContain("Metadata: codebase_old-index [point point-1] status=completed");
     expect(result).toContain("point point-9: collectionName=weird_thing projectPath=(none) — collectionName is outside the configured prefix");
+    expect(result).toContain("context_docs_symgraph_file — name fits context_docs (symgraph) or docs_symgraph_file (family)");
     expect(result).not.toContain("candidate");
   });
 

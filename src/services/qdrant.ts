@@ -294,9 +294,16 @@ export interface UnrecognisedMetadataEntry {
   reason: string;
 }
 
+/** A collection under the configured prefix whose name fits two identities and nothing settles which. */
+export interface UnattributedCollection {
+  name: string;
+  reason: string;
+}
+
 export interface ProjectReclamationInventory {
   entries: ProjectReclamationEntry[];
   unrecognisedMetadata: UnrecognisedMetadataEntry[];
+  unattributedCollections: UnattributedCollection[];
 }
 
 export interface ProjectReclamationOutcome {
@@ -313,19 +320,50 @@ interface InventorySeed {
 }
 
 const RESOURCE_FAMILIES = ["codebase_", "codegraph_", "context_"] as const;
+const SYMGRAPH_SUFFIXES = ["_symgraph_meta", "_symgraph_file", "_symgraph_index"] as const;
 
-/** The identity a collection name belongs to; null for anything outside the configured prefix, which is foreign. */
-function identityFromResourceName(name: string): string | null {
+interface ResourceInterpretation {
+  identity: string;
+  kind: "family" | "symgraph";
+}
+
+/** Every identity a prefixed name could belong to; empty for a name outside the prefix, which is foreign. */
+function interpretationsOf(name: string): ResourceInterpretation[] {
   const prefix = QDRANT_COLLECTION_PREFIX;
-  if (!name.startsWith(prefix)) return null;
+  if (!name.startsWith(prefix)) return [];
   const local = name.slice(prefix.length);
-  // Suffix first: a pinned id may itself begin with a family name (`context_docs_symgraph_meta`).
+  const found: ResourceInterpretation[] = [];
   const symbol = local.match(/^(.+)_symgraph_(?:meta|file|index)$/);
-  if (symbol) return symbol[1];
+  if (symbol) found.push({ identity: symbol[1], kind: "symgraph" });
   for (const family of RESOURCE_FAMILIES) {
-    if (local.startsWith(family)) return local.slice(family.length) || null;
+    if (local.startsWith(family) && local.length > family.length) {
+      found.push({ identity: local.slice(family.length), kind: "family" });
+      break;
+    }
   }
-  return null;
+  return found;
+}
+
+/**
+ * Settle a name that fits two identities with what the store shows: a metadata
+ * point names a family collection, a full symbol-graph triple names a symbol
+ * graph. Both, or neither, and the name is left for a person.
+ */
+function attributeCollection(
+  name: string,
+  candidates: ResourceInterpretation[],
+  names: Set<string>,
+  metadataNames: Set<string>,
+): ResourceInterpretation | UnattributedCollection {
+  if (candidates.length === 1) return candidates[0];
+  const family = candidates.find((candidate) => candidate.kind === "family");
+  const symgraph = candidates.find((candidate) => candidate.kind === "symgraph");
+  const hasMetadata = metadataNames.has(name);
+  const hasTriple = symgraph !== undefined && SYMGRAPH_SUFFIXES.every((suffix) => names.has(`${QDRANT_COLLECTION_PREFIX}${symgraph.identity}${suffix}`));
+  if (family && hasMetadata && !hasTriple) return family;
+  if (symgraph && hasTriple && !hasMetadata) return symgraph;
+  const options = candidates.map((candidate) => `${candidate.identity} (${candidate.kind})`).join(" or ");
+  return { name, reason: `name fits ${options} and the store does not settle which` };
 }
 
 function compareRecords(a: ProjectMetadataRecord, b: ProjectMetadataRecord): number {
@@ -394,13 +432,11 @@ export async function getProjectReclamationInventory(): Promise<ProjectReclamati
     return seed;
   };
 
-  for (const { name } of collections.collections) {
-    const identity = identityFromResourceName(name);
-    if (identity) seedFor(identity).resourceCollections.add(name);
-  }
-
+  const names = new Set(collections.collections.map(({ name }) => name));
+  const metadataNames = new Set<string>();
   const unrecognisedMetadata: UnrecognisedMetadataEntry[] = [];
-  if (collections.collections.some(({ name }) => name === METADATA_COLLECTION)) {
+  const pendingRecords: Array<{ collectionName: string; record: ProjectMetadataRecord }> = [];
+  if (names.has(METADATA_COLLECTION)) {
     let offset: string | number | Record<string, unknown> | undefined | null;
     do {
       const page = await withRetry(
@@ -422,8 +458,9 @@ export async function getProjectReclamationInventory(): Promise<ProjectReclamati
           unrecognisedMetadata.push({ pointId: point.id, collectionName: null, projectPath, reason: "collectionName is missing or not a string" });
           continue;
         }
-        const identity = identityFromResourceName(collectionName);
-        if (!identity) {
+        // A metadata point exists only for a family collection, so that reading is the certain one.
+        const family = interpretationsOf(collectionName).find((candidate) => candidate.kind === "family");
+        if (!family) {
           unrecognisedMetadata.push({
             pointId: point.id,
             collectionName,
@@ -432,14 +469,18 @@ export async function getProjectReclamationInventory(): Promise<ProjectReclamati
           });
           continue;
         }
-        seedFor(identity).metadataRecords.push({
-          pointId: point.id,
-          collectionName,
-          projectPath,
-          indexingStatus: stringOrNull(payload?.indexingStatus),
-          lastIndexedAt: stringOrNull(payload?.lastIndexedAt),
-          lastBuiltAt: stringOrNull(payload?.lastBuiltAt),
-          builtByVersion: stringOrNull(payload?.builtByVersion),
+        metadataNames.add(collectionName);
+        pendingRecords.push({
+          collectionName: family.identity,
+          record: {
+            pointId: point.id,
+            collectionName,
+            projectPath,
+            indexingStatus: stringOrNull(payload?.indexingStatus),
+            lastIndexedAt: stringOrNull(payload?.lastIndexedAt),
+            lastBuiltAt: stringOrNull(payload?.lastBuiltAt),
+            builtByVersion: stringOrNull(payload?.builtByVersion),
+          },
         });
       }
       const next = page.next_page_offset;
@@ -448,6 +489,18 @@ export async function getProjectReclamationInventory(): Promise<ProjectReclamati
       }
       offset = next;
     } while (offset !== undefined && offset !== null);
+  }
+  for (const { collectionName: identity, record } of pendingRecords) {
+    seedFor(identity).metadataRecords.push(record);
+  }
+
+  const unattributedCollections: UnattributedCollection[] = [];
+  for (const name of names) {
+    const candidates = interpretationsOf(name);
+    if (candidates.length === 0) continue;
+    const settled = attributeCollection(name, candidates, names, metadataNames);
+    if ("reason" in settled) unattributedCollections.push(settled);
+    else seedFor(settled.identity).resourceCollections.add(name);
   }
 
   const inspected = await Promise.all(Array.from(seeds.values()).map(async (seed) => {
@@ -478,6 +531,7 @@ export async function getProjectReclamationInventory(): Promise<ProjectReclamati
   return {
     entries: inspected.sort((a, b) => a.identity.localeCompare(b.identity)),
     unrecognisedMetadata: unrecognisedMetadata.sort((a, b) => String(a.pointId).localeCompare(String(b.pointId))),
+    unattributedCollections: unattributedCollections.sort((a, b) => a.name.localeCompare(b.name)),
   };
 }
 

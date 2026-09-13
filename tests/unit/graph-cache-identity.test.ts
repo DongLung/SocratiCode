@@ -71,4 +71,17 @@ describe("invalidateGraphCacheForIdentity", () => {
     await getExistingGraph(unrelatedCheckout);
     expect(mockLoadGraphData).toHaveBeenCalledTimes(4);
   });
+
+  it("drops a graph cached under an identity the checkout no longer resolves to", async () => {
+    await getExistingGraph(otherCheckout);
+    expect(mockLoadGraphData).toHaveBeenCalledTimes(1);
+    // The pin is gone: the path now resolves to its own hash, but the cached graph is still the pinned identity's.
+    fs.rmSync(path.join(otherCheckout, ".socraticode.json"));
+    expect(projectIdFromPath(otherCheckout)).not.toBe(PINNED_ID);
+
+    invalidateGraphCacheForIdentity(PINNED_ID);
+
+    await getExistingGraph(otherCheckout);
+    expect(mockLoadGraphData).toHaveBeenCalledTimes(2);
+  });
 });

@@ -77,7 +77,7 @@ function formatIndexingInProgressMessage(resolvedPath: string, requestedTool: st
 
 function formatPruneInventory(): Promise<string> {
   return getProjectReclamationInventory().then((inventory) => {
-    if (inventory.entries.length === 0 && inventory.unrecognisedMetadata.length === 0) {
+    if (inventory.entries.length === 0 && inventory.unrecognisedMetadata.length === 0 && inventory.unattributedCollections.length === 0) {
       return "No stored project identities found.";
     }
     const lines = [
@@ -111,6 +111,12 @@ function formatPruneInventory(): Promise<string> {
       lines.push("", `${inventory.unrecognisedMetadata.length} metadata point${inventory.unrecognisedMetadata.length === 1 ? "" : "s"} could not be attributed to an identity and cannot be deleted by this tool:`);
       for (const unrecognised of inventory.unrecognisedMetadata) {
         lines.push(`  point ${unrecognised.pointId}: collectionName=${unrecognised.collectionName ?? "(none)"} projectPath=${unrecognised.projectPath ?? "(none)"} — ${unrecognised.reason}`);
+      }
+    }
+    if (inventory.unattributedCollections.length > 0) {
+      lines.push("", `${inventory.unattributedCollections.length} collection${inventory.unattributedCollections.length === 1 ? "" : "s"} could not be attributed to one identity and cannot be deleted by this tool:`);
+      for (const unattributed of inventory.unattributedCollections) {
+        lines.push(`  ${unattributed.name} — ${unattributed.reason}`);
       }
     }
     return lines.join("\n");

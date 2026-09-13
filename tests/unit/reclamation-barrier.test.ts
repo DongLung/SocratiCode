@@ -15,10 +15,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const locks = new Map<string, boolean>();
 let checkFailure: Error | null = null;
+/** Runs once, inside the next lock acquisition, before it is granted: the interleaving a race needs. */
+let duringNextLock: ((filePath: string) => Promise<void>) | null = null;
 
 vi.mock("proper-lockfile", () => ({
   default: {
     lock: vi.fn(async (filePath: string) => {
+      if (duringNextLock) {
+        const interleave = duringNextLock;
+        duringNextLock = null;
+        await interleave(filePath);
+      }
       if (locks.get(filePath)) {
         const err = new Error("Lock file is already being held") as NodeJS.ErrnoException;
         err.code = "ELOCKED";
@@ -40,7 +47,7 @@ vi.mock("../../src/services/logger.js", () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
-import { acquireIdentityLock, LockInspectionError, releaseAllLocks } from "../../src/services/lock.js";
+import { acquireIdentityLock, holdsIdentityLock, LockInspectionError, releaseAllLocks } from "../../src/services/lock.js";
 import {
   acquireReclamationBarrier,
   assertNoReclamationBarrier,
@@ -74,6 +81,7 @@ function lockHeldElsewhere(operation: string): void {
 beforeEach(() => {
   locks.clear();
   checkFailure = null;
+  duringNextLock = null;
   resetReclamationBarriers();
 });
 
@@ -112,6 +120,29 @@ describe("acquireReclamationBarrier", () => {
     expect(await acquireReclamationBarrier(IDENTITY)).toBeNull();
     // The writer's lock is untouched: the barrier never took it, so it never released it.
     expect(heldKeys()).toEqual([`${IDENTITY}-index`]);
+  });
+
+  it("does not adopt a writer lock taken while the barrier was still being acquired", async () => {
+    // The writer passed its check before the barrier existed and takes its lock
+    // while the barrier is still waiting on the prune lock.
+    duringNextLock = async () => {
+      expect(await acquireIdentityLock(IDENTITY, "index")).toBe(true);
+    };
+
+    expect(await acquireReclamationBarrier(IDENTITY)).toBeNull();
+    expect(isReclamationBarrierHeld(IDENTITY)).toBe(false);
+    // The writer still holds its lock: the barrier neither took it nor released it.
+    expect(holdsIdentityLock(IDENTITY, "index")).toBe(true);
+    expect(heldKeys()).toEqual([`${IDENTITY}-index`]);
+  });
+
+  it("refuses writers of this process from the first lock it takes, not the last", async () => {
+    duringNextLock = async () => {
+      await expect(assertNoReclamationBarrier(IDENTITY)).rejects.toBeInstanceOf(ReclamationBarrierError);
+    };
+    const barrier = await acquireReclamationBarrier(IDENTITY);
+    expect(barrier).not.toBeNull();
+    await barrier?.release();
   });
 
   it("is exclusive with itself", async () => {

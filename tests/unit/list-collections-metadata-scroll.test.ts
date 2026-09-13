@@ -339,15 +339,84 @@ describe("project reclamation inventory", () => {
     expect(deletedMetadata).toEqual([{ points: [1], wait: true }]);
   });
 
-  it("keeps a pinned identity that begins with a family name in one piece", async () => {
-    collectionNames = ["codebase_context_docs", "context_docs_symgraph_meta", "context_context_docs", "socraticode_metadata"];
+  it("keeps a pinned identity that begins with a family name in one piece when its symbol-graph triple is stored", async () => {
+    collectionNames = [
+      "codebase_context_docs",
+      "context_context_docs",
+      "context_docs_symgraph_meta",
+      "context_docs_symgraph_file",
+      "context_docs_symgraph_index",
+      "socraticode_metadata",
+    ];
     metadataPoints = [{ id: 1, payload: { collectionName: "codebase_context_docs", projectPath: "/docs" } }];
 
     const { getProjectReclamationInventory } = await import("../../src/services/qdrant.js");
     const inventory = await getProjectReclamationInventory();
 
     expect(inventory.entries.map((entry) => entry.identity)).toEqual(["context_docs"]);
-    expect(inventory.entries[0].resourceCollections).toEqual(["codebase_context_docs", "context_context_docs", "context_docs_symgraph_meta"]);
+    expect(inventory.entries[0].resourceCollections).toEqual([
+      "codebase_context_docs",
+      "context_context_docs",
+      "context_docs_symgraph_file",
+      "context_docs_symgraph_index",
+      "context_docs_symgraph_meta",
+    ]);
+    expect(inventory.unattributedCollections).toEqual([]);
+  });
+
+  it.each(["_symgraph_meta", "_symgraph_file", "_symgraph_index"])(
+    "attributes a family collection of an identity ending in %s by its metadata point",
+    async (suffix) => {
+      const identity = `context_docs${suffix}`;
+      collectionNames = [`codebase_${identity}`, "socraticode_metadata"];
+      metadataPoints = [{ id: 1, payload: { collectionName: `codebase_${identity}`, projectPath: "/odd" } }];
+
+      const { getProjectReclamationInventory } = await import("../../src/services/qdrant.js");
+      const inventory = await getProjectReclamationInventory();
+
+      // The name also reads as the symbol graph of `codebase_context_docs`; the metadata point settles it.
+      expect(inventory.entries.map((entry) => entry.identity)).toEqual([identity]);
+      expect(inventory.entries[0].resourceCollections).toEqual([`codebase_${identity}`]);
+      expect(inventory.entries[0].metadataRecords.map((record) => record.collectionName)).toEqual([`codebase_${identity}`]);
+      expect(inventory.unattributedCollections).toEqual([]);
+    },
+  );
+
+  it.each(["_symgraph_meta", "_symgraph_file", "_symgraph_index"])(
+    "leaves a lone %s name that fits two identities for a person, and never deletes it",
+    async (suffix) => {
+      const name = `context_docs${suffix}`;
+      collectionNames = [name, "socraticode_metadata"];
+      metadataPoints = [];
+
+      const { getProjectReclamationInventory } = await import("../../src/services/qdrant.js");
+      const inventory = await getProjectReclamationInventory();
+
+      expect(inventory.entries).toEqual([]);
+      expect(inventory.unattributedCollections).toEqual([
+        { name, reason: expect.stringContaining("context_docs (symgraph) or docs" ) },
+      ]);
+    },
+  );
+
+  it("leaves a name for a person when a metadata point and a symbol-graph triple both claim it", async () => {
+    collectionNames = [
+      "context_docs_symgraph_meta",
+      "context_docs_symgraph_file",
+      "context_docs_symgraph_index",
+      "socraticode_metadata",
+    ];
+    metadataPoints = [{ id: 1, payload: { collectionName: "context_docs_symgraph_meta", projectPath: "/both" } }];
+
+    const { getProjectReclamationInventory } = await import("../../src/services/qdrant.js");
+    const inventory = await getProjectReclamationInventory();
+
+    expect(inventory.unattributedCollections.map((item) => item.name)).toEqual(["context_docs_symgraph_meta"]);
+    expect(inventory.entries.map((entry) => entry.identity)).toEqual(["context_docs", "docs_symgraph_meta"]);
+    expect(inventory.entries.find((entry) => entry.identity === "context_docs")?.resourceCollections).toEqual([
+      "context_docs_symgraph_file",
+      "context_docs_symgraph_index",
+    ]);
   });
 
   it("changes the confirmation token when any record of the identity changes", async () => {
