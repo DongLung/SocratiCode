@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DETECT_HEAD_BYTES, detectExtensionlessExtension } from "../../src/constants.js";
 import {
   detectExtensionFromSource,
+  detectionHeadWindow,
   readFileHead,
   resolveExtensionlessExtension,
   resolveExtensionlessExtensionStrict,
@@ -42,6 +43,43 @@ describe("extensionless I/O helpers", () => {
       const head = await readFileHead(p, 8192);
       expect(head.length).toBe(8192);
     });
+    it("returns the same window as the one taken from whole-file content", async () => {
+      // The two are compared against each other when a build head-reads a file
+      // and later reads it whole, so they have to be one representation. They
+      // are not, unless the disk side is normalised: an invalid UTF-8 byte
+      // decodes to U+FFFD, which re-encodes to three bytes, so the window taken
+      // from decoded content ends two bytes earlier than the raw-byte window.
+      // Unnormalised, this file reads as changed every time it is asked, and a
+      // graph build would exhaust its retries on a file nobody touched.
+      const p = path.join(root, "invalid-utf8");
+      fs.writeFileSync(
+        p,
+        Buffer.concat([
+          Buffer.from("#!/bin/sh\necho "),
+          Buffer.from([0xff]),
+          Buffer.from("x".repeat(DETECT_HEAD_BYTES)),
+        ]),
+      );
+
+      const fromDisk = await readFileHead(p);
+      const fromWholeFile = detectionHeadWindow(fs.readFileSync(p, "utf-8"));
+
+      expect(fromDisk).toBe(fromWholeFile);
+    });
+
+    it("still scores the language it scored before being normalised", async () => {
+      // The normalisation must not move detection's answer, which it cannot:
+      // the window it produces is already within budget, so applying it again
+      // is a no-op. Asserted on content whose shebang decides the answer.
+      const p = path.join(root, "invalid-utf8-shebang");
+      fs.writeFileSync(p, Buffer.concat([Buffer.from("#!/bin/sh\n"), Buffer.from([0xff]), Buffer.from("echo hi\n")]));
+
+      const head = await readFileHead(p);
+
+      expect(detectionHeadWindow(head)).toBe(head);
+      expect(detectExtensionFromSource(head)).toBe(".sh");
+    });
+
     it("throws for a missing file", async () => {
       await expect(readFileHead(path.join(root, "nope"))).rejects.toThrow();
     });
@@ -208,12 +246,17 @@ describe("extensionless I/O helpers", () => {
       expect(latin1.length).toBeLessThan(DETECT_HEAD_BYTES);
       const p = write("latin1", latin1);
 
-      // Scoring the raw decoded head reaches the markers, so the two windows
+      // Scoring the raw byte window reaches the markers, so the two windows
       // genuinely diverge here and the assertions below are not a dead fixture.
-      expect(detectExtensionlessExtension(await readFileHead(p))).toBe(".sh");
+      // Taken off the buffer rather than from `readFileHead`, which normalises
+      // its own output: there is no unnormalised window in production to borrow
+      // for this, which is the point of the normalisation.
+      const rawWindow = fs.readFileSync(p).subarray(0, DETECT_HEAD_BYTES).toString("utf-8");
+      expect(detectExtensionlessExtension(rawWindow)).toBe(".sh");
 
-      // The helper's window stops short of them, and the disk-side resolver routes
-      // through the helper, so both sides answer "not code" rather than disagreeing.
+      // The canonical window stops short of them, and every path — the disk
+      // reader included — answers from that, so none of them disagree.
+      expect(detectExtensionlessExtension(await readFileHead(p))).toBeNull();
       expect(detectExtensionFromSource(await readFileHead(p))).toBeNull();
       expect(await resolveExtensionlessExtensionStrict(p)).toBeNull();
       expect(detectExtensionFromSource(fs.readFileSync(p, "utf-8"))).toBeNull();
