@@ -27,14 +27,14 @@ import {
   resolveEffectiveIndexProfile,
 } from "./index-profile.js";
 import { FILE_SCAN_BATCH, isIndexingInProgress, updateProjectIndex } from "./indexer.js";
-import { acquireProjectLock, holdsProjectLock, isProjectLocked, releaseProjectLock } from "./lock.js";
+import { acquireProjectLock, isProjectLocked, releaseProjectLock } from "./lock.js";
 import { logger } from "./logger.js";
 import {
   getCollectionInfo,
   getProjectMetadata,
   loadProjectEffectiveProfile,
 } from "./qdrant.js";
-import { assertNoReclamationBarrier, isReclamationBarrierHeld } from "./reclamation-barrier.js";
+import { assertNoReclamationBarrier } from "./reclamation-barrier.js";
 
 /** Active subscriptions per project path */
 const subscriptions = new Map<string, AsyncSubscription>();
@@ -255,19 +255,12 @@ export async function startWatching(
     return false;
   }
 
-  // Acquire cross-process lock for watching
-  const heldBefore = holdsProjectLock(resolvedPath, "watch");
-  const lockAcquired = await acquireProjectLock(resolvedPath, "watch");
+  // Acquire cross-process lock for watching, non-reentrantly: a watch lock
+  // this process already holds is another watcher's or reclamation's.
+  const lockAcquired = await acquireProjectLock(resolvedPath, "watch", undefined, { reentrant: false });
   if (!lockAcquired) {
     logger.info("Another process is already watching this project, skipping", { projectPath: resolvedPath });
     onProgress?.(`Another process is already watching ${resolvedPath}, skipping`);
-    return false;
-  }
-  // Reclamation may have taken the lock between the check above and this re-entrant acquire; it is not ours then.
-  if (!heldBefore && isReclamationBarrierHeld(projectIdFromPath(resolvedPath))) {
-    const message = "Refusing to watch: reclamation took the project lock first";
-    logger.info(message, { projectPath: resolvedPath });
-    onProgress?.(message);
     return false;
   }
 

@@ -163,7 +163,7 @@ describe("watcher (unit)", () => {
 
     it("acquires a cross-process lock", async () => {
       await startWatching(TEST_PROJECT);
-      expect(mockAcquireProjectLock).toHaveBeenCalledWith(RESOLVED_PROJECT, "watch");
+      expect(mockAcquireProjectLock).toHaveBeenCalledWith(RESOLVED_PROJECT, "watch", undefined, { reentrant: false });
     });
 
     it("skips if already watching (idempotent)", async () => {

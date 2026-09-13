@@ -71,8 +71,15 @@ export async function acquireProjectLock(
   projectPath: string,
   operation: string,
   onCompromised?: (err: Error) => void | Promise<void>,
+  options: { reentrant?: boolean } = {},
 ): Promise<boolean> {
-  return acquireIdentityLock(projectIdFromPath(path.resolve(projectPath)), operation, onCompromised, projectPath);
+  return acquireIdentityLock(
+    projectIdFromPath(path.resolve(projectPath)),
+    operation,
+    onCompromised,
+    projectPath,
+    options.reentrant ?? true,
+  );
 }
 
 /** Reclamation addresses an identity whose directory may be gone, so it locks by identity, not path. */
