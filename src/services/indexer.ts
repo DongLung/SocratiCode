@@ -59,7 +59,7 @@ import {
   saveProjectMetadata,
   upsertPreEmbeddedChunks,
 } from "./qdrant.js";
-import { assertNoReclamationBarrier } from "./reclamation-barrier.js";
+import { assertNoReclamationBarrier, isReclamationBarrierHeld } from "./reclamation-barrier.js";
 
 export const FILE_SCAN_BATCH = 50; // Number of files to scan/chunk in parallel (I/O only, no network)
 
@@ -1030,6 +1030,18 @@ async function reclamationRefusal(resolvedPath: string): Promise<string | null> 
   }
 }
 
+/**
+ * The lock just acquired may be the barrier's: reclamation can take it between
+ * the refusal check and the re-entrant acquire. Then it is not ours to use or
+ * to release.
+ */
+async function barrierTookTheLock(resolvedPath: string, heldBefore: boolean): Promise<string | null> {
+  if (heldBefore || !isReclamationBarrierHeld(projectIdFromPath(resolvedPath))) return null;
+  const msg = "Refusing to index: reclamation took the project lock first";
+  logger.info(msg, { projectPath: resolvedPath });
+  return msg;
+}
+
 /** Full index of a project directory */
 export async function indexProject(
   projectPath: string,
@@ -1048,6 +1060,7 @@ export async function indexProject(
   }
 
   // Cross-process lock: prevent two MCP instances from indexing the same project
+  const heldBefore = holdsProjectLock(resolvedPath, "index");
   const lockAcquired = await acquireProjectLock(resolvedPath, "index", () =>
     cancelBecauseLockWasLost(resolvedPath),
   );
@@ -1055,6 +1068,11 @@ export async function indexProject(
     const msg = "Another process is already indexing this project, skipping";
     logger.info(msg, { projectPath: resolvedPath });
     onProgress?.(msg);
+    return { filesIndexed: 0, chunksCreated: 0, cancelled: false };
+  }
+  const adopted = await barrierTookTheLock(resolvedPath, heldBefore);
+  if (adopted) {
+    onProgress?.(adopted);
     return { filesIndexed: 0, chunksCreated: 0, cancelled: false };
   }
 
@@ -1549,6 +1567,7 @@ export async function updateProjectIndex(
   }
 
   // Cross-process lock: prevent two MCP instances from updating the same project
+  const heldBefore = holdsProjectLock(resolvedPath, "index");
   const lockAcquired = await acquireProjectLock(resolvedPath, "index", () =>
     cancelBecauseLockWasLost(resolvedPath),
   );
@@ -1556,6 +1575,11 @@ export async function updateProjectIndex(
     const msg = "Another process is already indexing this project, skipping";
     logger.info(msg, { projectPath: resolvedPath });
     onProgress?.(msg);
+    return { added: 0, updated: 0, removed: 0, chunksCreated: 0, cancelled: false };
+  }
+  const adopted = await barrierTookTheLock(resolvedPath, heldBefore);
+  if (adopted) {
+    onProgress?.(adopted);
     return { added: 0, updated: 0, removed: 0, chunksCreated: 0, cancelled: false };
   }
 

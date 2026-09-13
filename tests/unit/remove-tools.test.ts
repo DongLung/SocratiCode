@@ -139,6 +139,7 @@ const mockIsProjectIdentityLocked = vi.fn(async (_identity: string, _op: string)
 const mockTerminateLockHolder = vi.fn(async (_path: string, _op: string) => ({ terminated: false, pid: null as number | null }));
 
 vi.mock("../../src/services/lock.js", () => ({
+  holdsProjectLock: vi.fn(() => false),
   isProjectLocked: (...args: unknown[]) => mockIsProjectLocked(...(args as [string, string])),
   isProjectIdentityLocked: (...args: unknown[]) => mockIsProjectIdentityLocked(...(args as [string, string])),
   terminateLockHolder: (...args: unknown[]) => mockTerminateLockHolder(...(args as [string, string])),

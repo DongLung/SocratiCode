@@ -19,8 +19,10 @@ const mockAssertNoReclamationBarrier = vi.fn(async (_projectId: string) => {
   if (barrierAnswer) throw barrierAnswer;
 });
 
+let barrierHeldAfterCheck = false;
 vi.mock("../../src/services/reclamation-barrier.js", () => ({
   assertNoReclamationBarrier: (...args: unknown[]) => mockAssertNoReclamationBarrier(...(args as [string])),
+  isReclamationBarrierHeld: () => barrierHeldAfterCheck,
   withWriterLock: async (_id: string, _op: string, write: () => Promise<unknown>) => write(),
   WRITER_OPERATIONS: ["index", "watch", "graph", "context"],
 }));
@@ -30,10 +32,11 @@ vi.mock("../../src/services/logger.js", () => ({
 }));
 
 const mockAcquireProjectLock = vi.fn(async (..._args: unknown[]) => true);
+const mockReleaseProjectLock = vi.fn(async (..._args: unknown[]) => {});
 vi.mock("../../src/services/lock.js", () => ({
   acquireProjectLock: (...args: unknown[]) => mockAcquireProjectLock(...args),
-  releaseProjectLock: vi.fn(async () => {}),
-  holdsProjectLock: vi.fn(() => true),
+  releaseProjectLock: (...args: unknown[]) => mockReleaseProjectLock(...args),
+  holdsProjectLock: vi.fn(() => false),
   isProjectLocked: vi.fn(async () => false),
   isProjectIdentityLocked: vi.fn(async () => false),
   acquireIdentityLock: vi.fn(async () => true),
@@ -63,8 +66,10 @@ let identity: string;
 
 beforeEach(() => {
   barrierAnswer = null;
+  barrierHeldAfterCheck = false;
   mockAssertNoReclamationBarrier.mockClear();
   mockAcquireProjectLock.mockClear();
+  mockReleaseProjectLock.mockClear();
   project = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-writers-"));
   fs.writeFileSync(path.join(project, ".socraticode.json"), JSON.stringify({ projectId: "reclaimed-identity" }));
   identity = projectIdFromPath(project);
@@ -123,5 +128,38 @@ describe.each(refusals)("writers stop on %s", (_what, makeAnswer) => {
     await expect(ensureArtifactsIndexed(project)).rejects.toThrow(barrierAnswer?.message ?? "");
     expect(mockAssertNoReclamationBarrier).toHaveBeenCalledWith(identity);
     expect(isContextIndexingInProgress(project)).toBe(false);
+  });
+});
+
+describe("a writer whose lock turns out to be the barrier's", () => {
+  // The check passed, then reclamation took the locks, then the re-entrant
+  // acquire handed the writer the barrier's own lock.
+  beforeEach(() => {
+    barrierHeldAfterCheck = true;
+  });
+
+  it("indexProject stands down without releasing the lock it did not own", async () => {
+    const progress: string[] = [];
+    const result = await indexProject(project, (message) => progress.push(message));
+
+    expect(result).toEqual({ filesIndexed: 0, chunksCreated: 0, cancelled: false });
+    expect(progress.join("\n")).toContain("reclamation took the project lock first");
+    expect(mockAcquireProjectLock).toHaveBeenCalledTimes(1);
+    expect(mockReleaseProjectLock).not.toHaveBeenCalled();
+  });
+
+  it("updateProjectIndex stands down without releasing the lock it did not own", async () => {
+    const result = await updateProjectIndex(project);
+
+    expect(result).toEqual({ added: 0, updated: 0, removed: 0, chunksCreated: 0, cancelled: false });
+    expect(mockReleaseProjectLock).not.toHaveBeenCalled();
+  });
+
+  it("startWatching stands down without releasing the lock it did not own", async () => {
+    const progress: string[] = [];
+    expect(await startWatching(project, (message) => progress.push(message))).toBe(false);
+
+    expect(progress.join("\n")).toContain("reclamation took the project lock first");
+    expect(mockReleaseProjectLock).not.toHaveBeenCalled();
   });
 });
