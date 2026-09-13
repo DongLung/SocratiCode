@@ -430,6 +430,29 @@ describe("project reclamation inventory", () => {
     expect(again.entries.every((entry) => entry.requiresManualInspection)).toBe(true);
   });
 
+  it("changes the confirmation token when a hold appears or lifts while records and resources stay the same", async () => {
+    const { getProjectReclamationInventory } = await import("../../src/services/qdrant.js");
+    metadataPoints = [{ id: 1, payload: { collectionName: "codebase_context_docs", projectPath: "/docs" } }];
+    const tokenFor = async (names: string[]) => {
+      collectionNames = names;
+      const entry = (await getProjectReclamationInventory()).entries.find((candidate) => candidate.identity === "context_docs");
+      if (!entry) throw new Error("context_docs missing from inventory");
+      return { token: entry.confirmationToken, held: entry.requiresManualInspection, resources: entry.resourceCollections };
+    };
+
+    const free = await tokenFor(["codebase_context_docs", "socraticode_metadata"]);
+    // A lone `context_docs_symgraph_file` fits two identities and holds context_docs back, without joining its resources.
+    const held = await tokenFor(["codebase_context_docs", "context_docs_symgraph_file", "socraticode_metadata"]);
+    const lifted = await tokenFor(["codebase_context_docs", "socraticode_metadata"]);
+
+    expect(free.held).toBe(false);
+    expect(held.held).toBe(true);
+    expect(held.resources).toEqual(free.resources);
+    expect(held.token).not.toBe(free.token);
+    expect(lifted.held).toBe(false);
+    expect(lifted.token).toBe(free.token);
+  });
+
   it("stops at the first write after the barrier is lost, and attempts nothing more", async () => {
     const { removeProjectReclamationEntry } = await import("../../src/services/qdrant.js");
     let mayContinue = true;

@@ -396,6 +396,8 @@ function inventoryToken(entry: Omit<ProjectReclamationEntry, "confirmationToken"
       pathState: entry.pathState,
       resourceCollections: [...entry.resourceCollections].sort(),
       records,
+      // A hold that lifts on its own is a change the operator has not seen either.
+      manualInspectionReasons: [...entry.manualInspectionReasons].sort(),
     }))
     .digest("hex");
 }
