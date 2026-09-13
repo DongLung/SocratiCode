@@ -222,4 +222,25 @@ describe.skipIf(!reachable)("codebase_prune against a real store", () => {
     expect(repeat).toContain("Nothing to delete");
     expect(await listNames()).toEqual(after);
   }, 60_000);
+
+  it("holds back both candidates of a name two identities claim, and stays ambiguous across reads", async () => {
+    // A family metadata point now also claims the pinned identity's symbol-graph meta collection.
+    const contested = `${PREFIX}${oddId}_symgraph_meta`;
+    await saveProjectMetadata(contested, "/elsewhere/docs_symgraph_meta", 1, 1, new Map(), "completed", requestedIndexProfile("code"));
+    const before = await listNames();
+
+    const report = await handleIndexTool("codebase_prune", {});
+    expect(report).toContain(`${contested} — name fits ${oddId} (symgraph) or docs_symgraph_meta (family)`);
+    for (const identity of [oddId, "docs_symgraph_meta"]) {
+      expect(report).toContain(`Identity: ${identity}`);
+      const token = tokenOf(report, identity);
+      const result = await handleIndexTool("codebase_prune", { apply: true, identity, confirmationToken: token, acknowledgeNoRemoteWriters: true });
+      expect(result).toContain(`Refusing to delete ${identity}: its identity cannot be established safely`);
+    }
+
+    expect(await listNames()).toEqual(before);
+    const points = await client.scroll(`${PREFIX}socraticode_metadata`, { limit: 100, with_payload: { include: ["collectionName"] }, with_vector: false });
+    expect(points.points.some((point) => point.payload?.collectionName === contested)).toBe(true);
+    expect(await handleIndexTool("codebase_prune", {})).toContain(`${contested} — name fits`);
+  }, 60_000);
 });

@@ -80,6 +80,8 @@ Inventory every stored project identity, and delete one only on an explicit, con
 - Refused while the identity is indexed, watched, graph-built or context-indexed here, while another local process holds any of its `index`/`watch`/`graph`/`context` locks, when a lock cannot be inspected, when a record reports indexing in progress, or when a barrier lock is lost before the delete
 - Holds an identity-scoped barrier (`prune` plus every writer lock) from final validation through deletion; every writer checks it before starting and holds its own lock while it runs, so graph builds and context indexing of one identity no longer run in two processes at once
 - Targets the inventoried identity directly, so a stranded pinned id is reachable
+- Every identity an unsettled name could belong to is held back from deletion until a person settles it
+- Barrier ownership is re-checked before every write; a barrier lost mid-cleanup stops deletion and reports incomplete
 - Already-gone resources count as deleted: repeating an apply is safe
 - Success only when a re-read inventory shows nothing left for the identity
 

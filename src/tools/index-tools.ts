@@ -104,7 +104,7 @@ function formatPruneInventory(): Promise<string> {
       }
       if (entry.inProgress) lines.push("  Indexing in progress: a metadata record is mid-write; deletion is refused until it completes");
       if (entry.possibleSuperseded) lines.push("  Advisory: possible-superseded (another identity has this canonical path)");
-      if (entry.requiresManualInspection) lines.push("  Manual inspection required: conflicting or incomplete metadata");
+      for (const reason of entry.manualInspectionReasons) lines.push(`  Manual inspection required: ${reason}`);
       lines.push(`  Confirmation token: ${entry.confirmationToken}`);
     }
     if (inventory.unrecognisedMetadata.length > 0) {
@@ -130,7 +130,7 @@ function pruneRefusal(entry: ProjectReclamationEntry | undefined, identity: stri
     return `Refusing to delete ${identity}: the inventory changed. Run codebase_prune again and use its new confirmation token.`;
   }
   if (entry.requiresManualInspection) {
-    return `Refusing to delete ${identity}: its identity cannot be established safely from the stored metadata.`;
+    return `Refusing to delete ${identity}: its identity cannot be established safely (${entry.manualInspectionReasons.join("; ")}).`;
   }
   if (entry.inProgress) {
     return `Refusing to delete ${identity}: a metadata record reports indexing in progress.`;
@@ -441,7 +441,8 @@ export async function handleIndexTool(
         if (lateActivity) return `Refusing to delete ${identity}: ${lateActivity}.`;
         if (barrier.isCompromised()) return `Refusing to delete ${identity}: its reclamation barrier was lost to another process.`;
 
-        const outcomes = await removeProjectReclamationEntry(entry);
+        const outcomes = await removeProjectReclamationEntry(entry, () => !barrier.isCompromised());
+        const lostBarrier = barrier.isCompromised();
         invalidateGraphCacheForIdentity(identity);
         if (entry.projectPath) invalidateGraphCache(entry.projectPath);
         invalidateProjectHashesForIdentity(identity);
@@ -456,9 +457,10 @@ export async function handleIndexTool(
             ]
           : [];
         const lines = outcomes.map((outcome) => `  ${outcome.outcome}: ${outcome.kind} ${outcome.resource}${outcome.error ? ` (${outcome.error})` : ""}`);
-        if (outcomes.some((outcome) => outcome.outcome === "failed") || leftover.length > 0) {
+        if (lostBarrier || outcomes.some((outcome) => outcome.outcome !== "deleted") || leftover.length > 0) {
           return [
             `Cleanup for ${identity} is incomplete.`,
+            ...(lostBarrier ? ["The reclamation barrier was lost during cleanup; deletion stopped at the first write after the loss."] : []),
             ...lines,
             ...(leftover.length > 0 ? ["Still stored after deletion:", ...leftover.map((item) => `  ${item}`)] : []),
             "Inspect the inventory before retrying; a repeated apply with a fresh token is safe.",

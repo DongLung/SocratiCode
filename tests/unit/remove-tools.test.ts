@@ -244,6 +244,7 @@ function reclamationEntry(overrides: Record<string, unknown> = {}) {
     inProgress: false,
     possibleSuperseded: false,
     requiresManualInspection: false,
+    manualInspectionReasons: [],
     confirmationToken: "fresh-token",
     ...overrides,
   };
@@ -481,13 +482,17 @@ describe("codebase_prune — explicit identity reclamation", () => {
           pathState: "unknown/inaccessible",
           possibleSuperseded: true,
           inProgress: true,
+          requiresManualInspection: true,
+          manualInspectionReasons: ["metadata records disagree about the path: /network/project, /other"],
           confirmationToken: "remote-token",
         }),
       ],
       unrecognisedMetadata: [
         { pointId: "point-9", collectionName: "weird_thing", projectPath: null, reason: "collectionName is outside the configured prefix or not a known resource family" },
       ],
-      unattributedCollections: [{ name: "context_docs_symgraph_file", reason: "name fits context_docs (symgraph) or docs_symgraph_file (family) and the store does not settle which" }],
+      unattributedCollections: [
+        { name: "context_docs_symgraph_file", reason: "name fits context_docs (symgraph) or docs_symgraph_file (family) and the store does not settle which", candidateIdentities: ["context_docs", "docs_symgraph_file"] },
+      ],
     });
 
     const result = await handleIndexTool("codebase_prune", {});
@@ -500,6 +505,7 @@ describe("codebase_prune — explicit identity reclamation", () => {
     expect(result).toContain("Metadata: codebase_old-index [point point-1] status=completed");
     expect(result).toContain("point point-9: collectionName=weird_thing projectPath=(none) — collectionName is outside the configured prefix");
     expect(result).toContain("context_docs_symgraph_file — name fits context_docs (symgraph) or docs_symgraph_file (family)");
+    expect(result).toContain("Manual inspection required: metadata records disagree");
     expect(result).not.toContain("candidate");
   });
 
@@ -534,13 +540,62 @@ describe("codebase_prune — explicit identity reclamation", () => {
   });
 
   it("refuses an identity that cannot be established safely", async () => {
-    const entry = reclamationEntry({ requiresManualInspection: true });
+    const entry = reclamationEntry({
+      requiresManualInspection: true,
+      manualInspectionReasons: ["metadata records disagree about the path: /a, /b"],
+    });
     mockProjectReclamationInventory.mockResolvedValueOnce(inventoryOf(entry));
 
     const result = await handleIndexTool("codebase_prune", applyFor(entry));
 
-    expect(result).toContain("cannot be established safely");
+    expect(result).toContain("cannot be established safely (metadata records disagree about the path: /a, /b)");
     expect(mockRemoveProjectReclamationEntry).not.toHaveBeenCalled();
+  });
+
+  it("refuses every candidate of an unattributed collection, before any delete", async () => {
+    const reason = "collection context_docs_symgraph_meta fits this identity and another; the store does not settle which";
+    const candidates = [
+      reclamationEntry({ identity: "context_docs", requiresManualInspection: true, manualInspectionReasons: [reason], confirmationToken: "t1" }),
+      reclamationEntry({ identity: "docs_symgraph_meta", requiresManualInspection: true, manualInspectionReasons: [reason], confirmationToken: "t2" }),
+    ];
+    mockProjectReclamationInventory.mockResolvedValue({
+      entries: candidates,
+      unrecognisedMetadata: [],
+      unattributedCollections: [{ name: "context_docs_symgraph_meta", reason, candidateIdentities: ["context_docs", "docs_symgraph_meta"] }],
+    });
+
+    for (const entry of candidates) {
+      const result = await handleIndexTool("codebase_prune", applyFor(entry));
+      expect(result).toContain(`Refusing to delete ${entry.identity}: its identity cannot be established safely`);
+      expect(result).toContain("context_docs_symgraph_meta fits this identity and another");
+    }
+    expect(mockAcquireReclamationBarrier).not.toHaveBeenCalled();
+    expect(mockRemoveProjectReclamationEntry).not.toHaveBeenCalled();
+  });
+
+  it("stops deleting when the barrier is lost mid-cleanup, and never reports success", async () => {
+    const entry = reclamationEntry({ resourceCollections: ["codebase_old-index", "codegraph_old-index"] });
+    mockProjectReclamationInventory.mockResolvedValue(inventoryOf(entry));
+    mockRemoveProjectReclamationEntry.mockImplementationOnce(async (_entry: unknown, mayContinue?: unknown) => {
+      const ask = mayContinue as () => boolean;
+      expect(ask()).toBe(true);
+      // The barrier is lost while the first delete is in flight.
+      mockBarrierCompromised.mockReturnValue(true);
+      expect(ask()).toBe(false);
+      return [
+        { resource: "codebase_old-index", kind: "collection", outcome: "deleted" },
+        { resource: "codegraph_old-index", kind: "collection", outcome: "skipped", error: "the reclamation barrier was lost before this write" },
+        { resource: "codebase_old-index [point point-1]", kind: "metadata", outcome: "skipped", error: "the reclamation barrier was lost before this write" },
+      ];
+    });
+
+    const result = await handleIndexTool("codebase_prune", applyFor(entry));
+
+    expect(result).toContain("Cleanup for old-index is incomplete");
+    expect(result).toContain("barrier was lost during cleanup");
+    expect(result).toContain("skipped: collection codegraph_old-index");
+    expect(result).not.toContain("Removed all");
+    expect(mockBarrierRelease).toHaveBeenCalledTimes(1);
   });
 
   it("treats a lock that cannot be inspected as held", async () => {
@@ -692,7 +747,7 @@ describe("codebase_prune — explicit identity reclamation", () => {
     const result = await handleIndexTool("codebase_prune", applyFor(entry));
 
     expect(result).toContain("Removed all inventoried resources for identity: old-index");
-    expect(mockRemoveProjectReclamationEntry).toHaveBeenCalledWith(entry);
+    expect(mockRemoveProjectReclamationEntry).toHaveBeenCalledWith(entry, expect.any(Function));
     expect(mockInvalidateGraphCacheForIdentity).toHaveBeenCalledWith("old-index");
     expect(mockInvalidateProjectHashesForIdentity).toHaveBeenCalledWith("old-index");
     expect(mockDropSymbolGraphCache).toHaveBeenCalledWith("old-index");

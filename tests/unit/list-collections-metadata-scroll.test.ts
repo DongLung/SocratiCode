@@ -394,12 +394,12 @@ describe("project reclamation inventory", () => {
 
       expect(inventory.entries).toEqual([]);
       expect(inventory.unattributedCollections).toEqual([
-        { name, reason: expect.stringContaining("context_docs (symgraph) or docs" ) },
+        { name, reason: expect.stringContaining("context_docs (symgraph) or docs"), candidateIdentities: ["context_docs", `docs${suffix}`] },
       ]);
     },
   );
 
-  it("leaves a name for a person when a metadata point and a symbol-graph triple both claim it", async () => {
+  it("holds back both candidates of a name that a metadata point and a symbol-graph triple both claim", async () => {
     collectionNames = [
       "context_docs_symgraph_meta",
       "context_docs_symgraph_file",
@@ -411,12 +411,60 @@ describe("project reclamation inventory", () => {
     const { getProjectReclamationInventory } = await import("../../src/services/qdrant.js");
     const inventory = await getProjectReclamationInventory();
 
-    expect(inventory.unattributedCollections.map((item) => item.name)).toEqual(["context_docs_symgraph_meta"]);
+    expect(inventory.unattributedCollections).toEqual([
+      expect.objectContaining({ name: "context_docs_symgraph_meta", candidateIdentities: ["context_docs", "docs_symgraph_meta"] }),
+    ]);
     expect(inventory.entries.map((entry) => entry.identity)).toEqual(["context_docs", "docs_symgraph_meta"]);
+    // Deleting either candidate would remove the evidence and hand the name to the other on the next read.
+    for (const entry of inventory.entries) {
+      expect(entry.requiresManualInspection).toBe(true);
+      expect(entry.manualInspectionReasons).toEqual([expect.stringContaining("context_docs_symgraph_meta fits this identity and another")]);
+    }
     expect(inventory.entries.find((entry) => entry.identity === "context_docs")?.resourceCollections).toEqual([
       "context_docs_symgraph_file",
       "context_docs_symgraph_index",
     ]);
+
+    const again = await getProjectReclamationInventory();
+    expect(again.unattributedCollections.map((item) => item.name)).toEqual(["context_docs_symgraph_meta"]);
+    expect(again.entries.every((entry) => entry.requiresManualInspection)).toBe(true);
+  });
+
+  it("stops at the first write after the barrier is lost, and attempts nothing more", async () => {
+    const { removeProjectReclamationEntry } = await import("../../src/services/qdrant.js");
+    let mayContinue = true;
+
+    const outcomes = await removeProjectReclamationEntry(
+      {
+        identity: "old-index",
+        projectPath: null,
+        canonicalPath: null,
+        pathState: "unknown/inaccessible",
+        resourceCollections: ["codebase_old-index", "codegraph_old-index"],
+        metadataRecords: [
+          { pointId: "point-1", collectionName: "codebase_old-index", projectPath: null, indexingStatus: null, lastIndexedAt: null, lastBuiltAt: null, builtByVersion: null },
+        ],
+        inProgress: false,
+        possibleSuperseded: false,
+        requiresManualInspection: false,
+        manualInspectionReasons: [],
+        confirmationToken: "token",
+      },
+      () => {
+        // Lost while the first deletion was in flight: consent holds for it and for nothing after.
+        const answer = mayContinue;
+        mayContinue = false;
+        return answer;
+      },
+    );
+
+    expect(outcomes).toEqual([
+      { resource: "codebase_old-index", kind: "collection", outcome: "deleted" },
+      expect.objectContaining({ resource: "codegraph_old-index", kind: "collection", outcome: "skipped" }),
+      expect.objectContaining({ resource: "codebase_old-index [point point-1]", kind: "metadata", outcome: "skipped" }),
+    ]);
+    expect(deletedCollections).toEqual(["codebase_old-index"]);
+    expect(deletedMetadata).toEqual([]);
   });
 
   it("changes the confirmation token when any record of the identity changes", async () => {
@@ -466,6 +514,7 @@ describe("project reclamation inventory", () => {
       inProgress: false,
       possibleSuperseded: false,
       requiresManualInspection: false,
+      manualInspectionReasons: [],
       confirmationToken: "token",
     });
 
@@ -495,6 +544,7 @@ describe("project reclamation inventory", () => {
       inProgress: false,
       possibleSuperseded: false,
       requiresManualInspection: false,
+      manualInspectionReasons: [],
       confirmationToken: "token",
     });
 
@@ -517,6 +567,7 @@ describe("project reclamation inventory", () => {
       inProgress: false,
       possibleSuperseded: false,
       requiresManualInspection: false,
+      manualInspectionReasons: [],
       confirmationToken: "token",
     });
     expect(deletedMetadata).toEqual([{ points: ["point-1"], wait: true }]);

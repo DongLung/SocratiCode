@@ -283,6 +283,8 @@ export interface ProjectReclamationEntry {
   inProgress: boolean;
   possibleSuperseded: boolean;
   requiresManualInspection: boolean;
+  /** Why a person has to look before this identity can be deleted; empty when nothing holds it back. */
+  manualInspectionReasons: string[];
   confirmationToken: string;
 }
 
@@ -298,6 +300,8 @@ export interface UnrecognisedMetadataEntry {
 export interface UnattributedCollection {
   name: string;
   reason: string;
+  /** Every identity the name fits; each is held back from deletion while the name stays unsettled. */
+  candidateIdentities: string[];
 }
 
 export interface ProjectReclamationInventory {
@@ -309,7 +313,8 @@ export interface ProjectReclamationInventory {
 export interface ProjectReclamationOutcome {
   resource: string;
   kind: "collection" | "metadata";
-  outcome: "deleted" | "failed";
+  /** `skipped`: the caller withdrew consent before this write; nothing was attempted. */
+  outcome: "deleted" | "failed" | "skipped";
   error?: string;
 }
 
@@ -363,7 +368,11 @@ function attributeCollection(
   if (family && hasMetadata && !hasTriple) return family;
   if (symgraph && hasTriple && !hasMetadata) return symgraph;
   const options = candidates.map((candidate) => `${candidate.identity} (${candidate.kind})`).join(" or ");
-  return { name, reason: `name fits ${options} and the store does not settle which` };
+  return {
+    name,
+    reason: `name fits ${options} and the store does not settle which`,
+    candidateIdentities: candidates.map((candidate) => candidate.identity),
+  };
 }
 
 function compareRecords(a: ProjectMetadataRecord, b: ProjectMetadataRecord): number {
@@ -502,11 +511,26 @@ export async function getProjectReclamationInventory(): Promise<ProjectReclamati
     if ("reason" in settled) unattributedCollections.push(settled);
     else seedFor(settled.identity).resourceCollections.add(name);
   }
+  // Deleting either candidate would remove the evidence that keeps the name
+  // unsettled, and the next inventory would hand the collection to the other.
+  const heldBack = new Map<string, string[]>();
+  for (const unattributed of unattributedCollections) {
+    for (const identity of unattributed.candidateIdentities) {
+      if (!seeds.has(identity)) continue;
+      const reasons = heldBack.get(identity) ?? [];
+      reasons.push(`collection ${unattributed.name} fits this identity and another; the store does not settle which`);
+      heldBack.set(identity, reasons);
+    }
+  }
 
   const inspected = await Promise.all(Array.from(seeds.values()).map(async (seed) => {
     const projectPaths = Array.from(new Set(seed.metadataRecords.map((record) => record.projectPath).filter((value): value is string => value !== null))).sort();
     const projectPath = projectPaths.length === 1 ? projectPaths[0] : null;
     const { pathState, canonicalPath } = await inspectStoredPath(projectPath);
+    const manualInspectionReasons = [
+      ...(projectPaths.length > 1 ? [`metadata records disagree about the path: ${projectPaths.join(", ")}`] : []),
+      ...(heldBack.get(seed.identity) ?? []),
+    ];
     const base: Omit<ProjectReclamationEntry, "confirmationToken" | "possibleSuperseded"> = {
       identity: seed.identity,
       projectPath,
@@ -515,7 +539,8 @@ export async function getProjectReclamationInventory(): Promise<ProjectReclamati
       resourceCollections: Array.from(seed.resourceCollections).sort(),
       metadataRecords: [...seed.metadataRecords].sort(compareRecords),
       inProgress: seed.metadataRecords.some((record) => record.indexingStatus === "in-progress"),
-      requiresManualInspection: projectPaths.length > 1,
+      requiresManualInspection: manualInspectionReasons.length > 0,
+      manualInspectionReasons,
     };
     return { ...base, possibleSuperseded: false, confirmationToken: inventoryToken(base) };
   }));
@@ -538,10 +563,18 @@ export async function getProjectReclamationInventory(): Promise<ProjectReclamati
 /** Delete exactly the inventoried resources, one outcome each; a resource already gone counts as deleted. */
 export async function removeProjectReclamationEntry(
   entry: ProjectReclamationEntry,
+  /** Asked before every write; once it answers false, nothing more is attempted. */
+  mayContinue: () => boolean = () => true,
 ): Promise<ProjectReclamationOutcome[]> {
   const qdrant = getClient();
   const outcomes: ProjectReclamationOutcome[] = [];
+  let stopped = false;
   const attempt = async (resource: string, kind: ProjectReclamationOutcome["kind"], remove: () => Promise<unknown>) => {
+    if (stopped || !mayContinue()) {
+      stopped = true;
+      outcomes.push({ resource, kind, outcome: "skipped", error: "the reclamation barrier was lost before this write" });
+      return;
+    }
     try {
       await remove();
       outcomes.push({ resource, kind, outcome: "deleted" });
