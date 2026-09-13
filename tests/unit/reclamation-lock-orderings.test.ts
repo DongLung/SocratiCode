@@ -80,6 +80,8 @@ function lockFilesHeld(): string[] {
 }
 
 beforeEach(() => {
+  // An ambient explicit id would replace the pinned one and the lock keys with it.
+  vi.stubEnv("SOCRATICODE_PROJECT_ID", undefined);
   onStoreTouch = null;
   storeWrites.mockClear();
   collectionInfo.mockClear();
@@ -95,6 +97,7 @@ afterEach(async () => {
   await stopWatching(project).catch(() => {});
   await releaseAllLocks();
   resetReclamationBarriers();
+  vi.unstubAllEnvs();
   fs.rmSync(project, { recursive: true, force: true });
   for (const operation of ["prune", "index", "watch", "graph", "context"]) {
     fs.rmSync(path.join(LOCK_DIR, `${identity}-${operation}`), { force: true });

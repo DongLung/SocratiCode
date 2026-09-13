@@ -18,7 +18,7 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 const PREFIX = `prunetest${randomBytes(3).toString("hex")}_`;
 const FOREIGN_PREFIX = `foreign${randomBytes(3).toString("hex")}_`;
@@ -81,6 +81,8 @@ describe.skipIf(!reachable)("codebase_prune against a real store", () => {
   const lookalike = "codebase_prunelookalike";
 
   beforeAll(async () => {
+    // An ambient explicit id would give the three projects one identity.
+    vi.stubEnv("SOCRATICODE_PROJECT_ID", undefined);
     expect(QDRANT_COLLECTION_PREFIX).toBe(PREFIX);
     resetMetadataCollectionCache();
 
@@ -146,6 +148,7 @@ describe.skipIf(!reachable)("codebase_prune against a real store", () => {
     }
     fs.rmSync(liveProject, { recursive: true, force: true });
     fs.rmSync(oddProject, { recursive: true, force: true });
+    vi.unstubAllEnvs();
   }, 60_000);
 
   it("reports both identities with their resources, and nothing foreign", async () => {

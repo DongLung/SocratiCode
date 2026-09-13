@@ -38,6 +38,8 @@ function checkoutPinnedTo(projectId: string | null): string {
 }
 
 beforeEach(() => {
+  // An ambient explicit id would give every checkout the same identity.
+  vi.stubEnv("SOCRATICODE_PROJECT_ID", undefined);
   mockLoadGraphData.mockClear();
   recordedCheckout = checkoutPinnedTo(PINNED_ID);
   otherCheckout = checkoutPinnedTo(PINNED_ID);
@@ -49,6 +51,7 @@ afterEach(() => {
     invalidateGraphCache(dir);
     fs.rmSync(dir, { recursive: true, force: true });
   }
+  vi.unstubAllEnvs();
 });
 
 describe("invalidateGraphCacheForIdentity", () => {
