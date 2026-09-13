@@ -59,6 +59,7 @@ import {
   saveProjectMetadata,
   upsertPreEmbeddedChunks,
 } from "./qdrant.js";
+import { assertNoReclamationBarrier } from "./reclamation-barrier.js";
 
 export const FILE_SCAN_BATCH = 50; // Number of files to scan/chunk in parallel (I/O only, no network)
 
@@ -1017,6 +1018,18 @@ export async function getIndexableFiles(
   return kept;
 }
 
+/** Why an index must not start, or null; an uninspectable barrier is a reason too. */
+async function reclamationRefusal(resolvedPath: string): Promise<string | null> {
+  try {
+    await assertNoReclamationBarrier(projectIdFromPath(resolvedPath));
+    return null;
+  } catch (err) {
+    const msg = `Refusing to index: ${err instanceof Error ? err.message : String(err)}`;
+    logger.info(msg, { projectPath: resolvedPath });
+    return msg;
+  }
+}
+
 /** Full index of a project directory */
 export async function indexProject(
   projectPath: string,
@@ -1027,6 +1040,12 @@ export async function indexProject(
   ensureDynamicLanguages();
 
   const resolvedPath = path.resolve(projectPath);
+
+  const reclaimed = await reclamationRefusal(resolvedPath);
+  if (reclaimed) {
+    onProgress?.(reclaimed);
+    return { filesIndexed: 0, chunksCreated: 0, cancelled: false };
+  }
 
   // Cross-process lock: prevent two MCP instances from indexing the same project
   const lockAcquired = await acquireProjectLock(resolvedPath, "index", () =>
@@ -1522,6 +1541,12 @@ export async function updateProjectIndex(
   ensureDynamicLanguages();
 
   const resolvedPath = path.resolve(projectPath);
+
+  const reclaimed = await reclamationRefusal(resolvedPath);
+  if (reclaimed) {
+    onProgress?.(reclaimed);
+    return { added: 0, updated: 0, removed: 0, chunksCreated: 0, cancelled: false };
+  }
 
   // Cross-process lock: prevent two MCP instances from updating the same project
   const lockAcquired = await acquireProjectLock(resolvedPath, "index", () =>
@@ -2054,6 +2079,11 @@ export async function removeProjectIndex(projectPath: string): Promise<void> {
   await removeGraph(resolvedPath);
   // Also remove context artifacts (if any)
   await removeAllArtifacts(resolvedPath);
+  invalidateProjectHashesForIdentity(projectId);
+}
+
+/** Forget the loaded file hashes of an identity whose collection is gone. */
+export function invalidateProjectHashesForIdentity(projectId: string): void {
   projectHashes.delete(projectId);
   projectHashesLoaded.delete(projectId);
 }

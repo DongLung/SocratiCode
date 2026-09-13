@@ -47,6 +47,8 @@ vi.mock("../../src/services/logger.js", () => ({
 
 vi.mock("proper-lockfile", () => ({
   default: {
+    // The reclamation barrier inspects the prune lock before an index starts.
+    check: vi.fn(async () => false),
     lock: vi.fn(async (_file: string, opts?: { onCompromised?: (err: Error) => void }) => {
       compromise = opts?.onCompromised ?? null;
       return async () => {};

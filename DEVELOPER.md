@@ -215,7 +215,7 @@ src/
 │   └── context-artifacts.ts # Context artifact loading, chunking, indexing, search
 │
 ├── tools/
-│   ├── index-tools.ts       # Handlers: codebase_index, codebase_update, codebase_remove, codebase_stop, codebase_watch
+│   ├── index-tools.ts       # Handlers: codebase_index, codebase_update, codebase_remove, codebase_prune, codebase_stop, codebase_watch
 │   ├── query-tools.ts       # Handlers: codebase_search, codebase_status
 │   ├── graph-tools.ts       # Handlers: codebase_graph_*, codebase_impact, codebase_flow, codebase_symbol(s)
 │   ├── context-tools.ts     # Handlers: codebase_context, codebase_context_search/index/remove

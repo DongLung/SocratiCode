@@ -54,6 +54,7 @@ import {
   searchChunksWithFilter,
   upsertPreEmbeddedChunks,
 } from "./qdrant.js";
+import { assertNoReclamationBarrier, withWriterLock } from "./reclamation-barrier.js";
 
 /**
  * Context tools historically provisioned Ollama but did not preflight external
@@ -644,11 +645,49 @@ export async function indexArtifact(
   };
 }
 
+const contextIndexingInProgress = new Map<string, number>();
+
+/** Whether this process is writing context artifacts for the project. */
+export function isContextIndexingInProgress(projectPath: string): boolean {
+  return (contextIndexingInProgress.get(path.resolve(projectPath)) ?? 0) > 0;
+}
+
+export function getContextIndexingInProgressProjects(): string[] {
+  return Array.from(contextIndexingInProgress.keys());
+}
+
+/** A context write reclamation can see: refused under the barrier, registered here and locked by identity while it runs. */
+async function withContextWrite<T>(projectPath: string, write: () => Promise<T>): Promise<T> {
+  const resolvedProject = path.resolve(projectPath);
+  const projectId = projectIdFromPath(resolvedProject);
+  await assertNoReclamationBarrier(projectId);
+  contextIndexingInProgress.set(resolvedProject, (contextIndexingInProgress.get(resolvedProject) ?? 0) + 1);
+  try {
+    const result = await withWriterLock(projectId, "context", write);
+    if (result === null) throw new Error(`Another process holds the context lock for ${resolvedProject}, or it could not be taken`);
+    return result;
+  } finally {
+    const remaining = (contextIndexingInProgress.get(resolvedProject) ?? 1) - 1;
+    if (remaining <= 0) contextIndexingInProgress.delete(resolvedProject);
+    else contextIndexingInProgress.set(resolvedProject, remaining);
+  }
+}
+
+/** Index all artifacts defined in .socraticodecontextartifacts.json. */
+export function indexAllArtifacts(projectPath: string): ReturnType<typeof indexAllArtifactsUnguarded> {
+  return withContextWrite(projectPath, () => indexAllArtifactsUnguarded(projectPath));
+}
+
+/** Re-index only the artifacts whose content or configuration changed. */
+export function ensureArtifactsIndexed(projectPath: string): ReturnType<typeof ensureArtifactsIndexedUnguarded> {
+  return withContextWrite(projectPath, () => ensureArtifactsIndexedUnguarded(projectPath));
+}
+
 /**
  * Index all artifacts defined in .socraticodecontextartifacts.json.
  * Returns the list of indexed artifact states.
  */
-export async function indexAllArtifacts(projectPath: string): Promise<{
+async function indexAllArtifactsUnguarded(projectPath: string): Promise<{
   indexed: ArtifactIndexState[];
   errors: Array<{ name: string; error: string }>;
 }> {
@@ -762,7 +801,7 @@ export async function indexAllArtifacts(projectPath: string): Promise<{
  * Compares content hashes to detect staleness and only re-indexes changed artifacts.
  * Returns true if any re-indexing occurred.
  */
-export async function ensureArtifactsIndexed(projectPath: string): Promise<{
+async function ensureArtifactsIndexedUnguarded(projectPath: string): Promise<{
   reindexed: string[];
   upToDate: string[];
   errors: Array<{ name: string; error: string }>;

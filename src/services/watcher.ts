@@ -34,6 +34,7 @@ import {
   getProjectMetadata,
   loadProjectEffectiveProfile,
 } from "./qdrant.js";
+import { assertNoReclamationBarrier } from "./reclamation-barrier.js";
 
 /** Active subscriptions per project path */
 const subscriptions = new Map<string, AsyncSubscription>();
@@ -243,6 +244,15 @@ export async function startWatching(
   if (subscriptions.has(resolvedPath)) {
     onProgress?.(`Already watching ${resolvedPath}`);
     return true;
+  }
+
+  try {
+    await assertNoReclamationBarrier(projectIdFromPath(resolvedPath));
+  } catch (err) {
+    const message = `Refusing to watch: ${err instanceof Error ? err.message : String(err)}`;
+    logger.info(message, { projectPath: resolvedPath });
+    onProgress?.(message);
+    return false;
   }
 
   // Acquire cross-process lock for watching

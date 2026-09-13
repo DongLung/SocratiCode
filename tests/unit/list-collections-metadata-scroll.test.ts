@@ -35,7 +35,11 @@ let attempt = 0;
 let deletedCollections: string[] = [];
 let deletedMetadata: unknown[] = [];
 let collectionDeleteFailures = new Set<string>();
-let metadataDeleteFails = false;
+/** Collections whose deletion answers not-found, as Qdrant does for one already gone. */
+let collectionsAlreadyGone = new Set<string>();
+let metadataDeleteError: Error | null = null;
+/** Collection names the fake backend lists. */
+let collectionNames: string[] = [];
 const mockRealpath = vi.fn(async (value: string) => value);
 
 vi.mock("../../src/services/logger.js", () => ({
@@ -67,9 +71,7 @@ function indexFromCursor(offset: unknown): number {
 vi.mock("@qdrant/js-client-rest", () => ({
   QdrantClient: class {
     async getCollections() {
-      return {
-        collections: [{ name: "codebase_realone" }, { name: "socraticode_metadata" }],
-      };
+      return { collections: collectionNames.map((name) => ({ name })) };
     }
     async scroll(_name: string, opts: ScrollOptions) {
       scrollCalls.push(opts);
@@ -105,10 +107,11 @@ vi.mock("@qdrant/js-client-rest", () => ({
     }
     async deleteCollection(name: string) {
       if (collectionDeleteFailures.has(name)) throw new Error(`cannot delete ${name}`);
+      if (collectionsAlreadyGone.has(name)) throw Object.assign(new Error(`Collection ${name} doesn't exist!`), { status: 404 });
       deletedCollections.push(name);
     }
     async delete(_name: string, request: unknown) {
-      if (metadataDeleteFails) throw new Error("cannot delete metadata");
+      if (metadataDeleteError) throw metadataDeleteError;
       deletedMetadata.push(request);
     }
   },
@@ -126,7 +129,9 @@ beforeEach(() => {
   deletedCollections = [];
   deletedMetadata = [];
   collectionDeleteFailures = new Set();
-  metadataDeleteFails = false;
+  collectionsAlreadyGone = new Set();
+  metadataDeleteError = null;
+  collectionNames = ["codebase_realone", "socraticode_metadata"];
   mockRealpath.mockReset();
   mockRealpath.mockImplementation(async (value: string) => value);
   process.env = {
@@ -258,7 +263,8 @@ describe("project reclamation inventory", () => {
       { id: 2, payload: { collectionName: "codebase_pinned", projectPath: "/linked/project" } },
       { id: 3, payload: { collectionName: "codebase_other", projectPath: "/canonical/project" } },
       { id: 4, payload: { collectionName: "codebase_remote", projectPath: "/blocked/project" } },
-      { id: 5, payload: { collectionName: 42 } },
+      { id: 5, payload: { collectionName: 42, projectPath: "/typed/wrong" } },
+      { id: 6, payload: { collectionName: "something_else_entirely", projectPath: "/foreign/project" } },
     ];
     mockRealpath.mockImplementation(async (value: string) => {
       if (value === "/gone/project") throw Object.assign(new Error("missing"), { code: "ENOENT" });
@@ -275,12 +281,108 @@ describe("project reclamation inventory", () => {
     expect(byIdentity.get("remote")?.pathState).toBe("unknown/inaccessible");
     expect(byIdentity.get("pinned")?.possibleSuperseded).toBe(true);
     expect(byIdentity.get("other")?.possibleSuperseded).toBe(true);
-    expect(inventory.unrecognisedMetadataEntries).toBe(1);
+    expect(byIdentity.get("path-hash")?.metadataRecords).toEqual([
+      expect.objectContaining({ pointId: 1, collectionName: "codebase_path-hash", projectPath: "/gone/project" }),
+    ]);
+    // Each unattributable point is returned with what a person needs to find it, never inferred into an identity.
+    expect(inventory.unrecognisedMetadata).toEqual([
+      { pointId: 5, collectionName: null, projectPath: "/typed/wrong", reason: "collectionName is missing or not a string" },
+      { pointId: 6, collectionName: "something_else_entirely", projectPath: "/foreign/project", reason: expect.stringContaining("not a known resource family") },
+    ]);
+  });
+
+  it("marks an identity for manual inspection when its records disagree about the path", async () => {
+    metadataPoints = [
+      { id: 1, payload: { collectionName: "codebase_split", projectPath: "/one/project" } },
+      { id: 2, payload: { collectionName: "codegraph_split", projectPath: "/two/project" } },
+    ];
+
+    const { getProjectReclamationInventory } = await import("../../src/services/qdrant.js");
+    const entry = (await getProjectReclamationInventory()).entries.find((candidate) => candidate.identity === "split");
+
+    expect(entry).toBeDefined();
+    if (!entry) return;
+    expect(entry.requiresManualInspection).toBe(true);
+    expect(entry.projectPath).toBeNull();
+    expect(entry.metadataRecords.map((record) => record.projectPath)).toEqual(["/one/project", "/two/project"]);
+  });
+
+  it("neither inventories nor deletes a lookalike outside the configured prefix", async () => {
+    process.env.QDRANT_COLLECTION_PREFIX = "team_";
+    collectionNames = [
+      "team_codebase_alpha",
+      "team_alpha_symgraph_meta",
+      "team_context_alpha",
+      "codebase_alpha",
+      "alpha_symgraph_meta",
+      "other_codebase_alpha",
+      "team_socraticode_metadata",
+    ];
+    metadataPoints = [
+      { id: 1, payload: { collectionName: "team_codebase_alpha", projectPath: "/team/alpha" } },
+      { id: 2, payload: { collectionName: "codebase_alpha", projectPath: "/someone/else" } },
+    ];
+
+    const { getProjectReclamationInventory, removeProjectReclamationEntry } = await import("../../src/services/qdrant.js");
+    const inventory = await getProjectReclamationInventory();
+
+    expect(inventory.entries.map((entry) => entry.identity)).toEqual(["alpha"]);
+    const [alpha] = inventory.entries;
+    expect(alpha.resourceCollections).toEqual(["team_alpha_symgraph_meta", "team_codebase_alpha", "team_context_alpha"]);
+    expect(alpha.metadataRecords.map((record) => record.collectionName)).toEqual(["team_codebase_alpha"]);
+    expect(inventory.unrecognisedMetadata).toEqual([
+      expect.objectContaining({ pointId: 2, collectionName: "codebase_alpha" }),
+    ]);
+
+    await removeProjectReclamationEntry(alpha);
+    expect(deletedCollections.sort()).toEqual(["team_alpha_symgraph_meta", "team_codebase_alpha", "team_context_alpha"]);
+    expect(deletedMetadata).toEqual([{ points: [1], wait: true }]);
+  });
+
+  it("keeps a pinned identity that begins with a family name in one piece", async () => {
+    collectionNames = ["codebase_context_docs", "context_docs_symgraph_meta", "context_context_docs", "socraticode_metadata"];
+    metadataPoints = [{ id: 1, payload: { collectionName: "codebase_context_docs", projectPath: "/docs" } }];
+
+    const { getProjectReclamationInventory } = await import("../../src/services/qdrant.js");
+    const inventory = await getProjectReclamationInventory();
+
+    expect(inventory.entries.map((entry) => entry.identity)).toEqual(["context_docs"]);
+    expect(inventory.entries[0].resourceCollections).toEqual(["codebase_context_docs", "context_context_docs", "context_docs_symgraph_meta"]);
+  });
+
+  it("changes the confirmation token when any record of the identity changes", async () => {
+    const code = { id: 1, payload: { collectionName: "codebase_dual", projectPath: "/dual", indexingStatus: "completed", lastIndexedAt: "2026-09-01T00:00:00.000Z" } };
+    const context = { id: 2, payload: { collectionName: "context_dual", projectPath: "/dual", lastIndexedAt: "2026-09-02T00:00:00.000Z" } };
+    const { getProjectReclamationInventory } = await import("../../src/services/qdrant.js");
+    const tokenFor = async (points: typeof metadataPoints) => {
+      metadataPoints = points;
+      const [entry] = (await getProjectReclamationInventory()).entries;
+      return entry.confirmationToken;
+    };
+
+    const baseline = await tokenFor([code, context]);
+    expect(await tokenFor([code, context])).toBe(baseline);
+    // The last scrolled record is unchanged in both cases; only the other one moves.
+    expect(await tokenFor([{ ...code, payload: { ...code.payload, indexingStatus: "in-progress" } }, context])).not.toBe(baseline);
+    expect(await tokenFor([code, { ...context, payload: { ...context.payload, lastIndexedAt: "2026-09-03T00:00:00.000Z" } }])).not.toBe(baseline);
+    expect(await tokenFor([code])).not.toBe(baseline);
+  });
+
+  it("flags an identity as in progress when any of its records says so", async () => {
+    metadataPoints = [
+      { id: 1, payload: { collectionName: "codebase_busy", projectPath: "/busy", indexingStatus: "completed" } },
+      { id: 2, payload: { collectionName: "context_busy", projectPath: "/busy", indexingStatus: "in-progress" } },
+    ];
+
+    const { getProjectReclamationInventory } = await import("../../src/services/qdrant.js");
+    const [entry] = (await getProjectReclamationInventory()).entries;
+
+    expect(entry.inProgress).toBe(true);
   });
 
   it("keeps partial cleanup failures in the per-resource outcome", async () => {
     collectionDeleteFailures.add("context_old-index");
-    metadataDeleteFails = true;
+    metadataDeleteError = new Error("cannot delete metadata");
     const { removeProjectReclamationEntry } = await import("../../src/services/qdrant.js");
 
     const outcomes = await removeProjectReclamationEntry({
@@ -288,11 +390,11 @@ describe("project reclamation inventory", () => {
       projectPath: "/gone/project",
       canonicalPath: null,
       pathState: "absent-on-this-host",
-      lastIndexedAt: null,
-      lastBuiltAt: null,
-      builtByVersion: null,
       resourceCollections: ["codebase_old-index", "context_old-index"],
-      metadataCollections: ["codebase_old-index"],
+      metadataRecords: [
+        { pointId: "point-1", collectionName: "codebase_old-index", projectPath: "/gone/project", indexingStatus: null, lastIndexedAt: null, lastBuiltAt: null, builtByVersion: null },
+      ],
+      inProgress: false,
       possibleSuperseded: false,
       requiresManualInspection: false,
       confirmationToken: "token",
@@ -301,9 +403,53 @@ describe("project reclamation inventory", () => {
     expect(outcomes).toEqual([
       { resource: "codebase_old-index", kind: "collection", outcome: "deleted" },
       expect.objectContaining({ resource: "context_old-index", kind: "collection", outcome: "failed" }),
-      expect.objectContaining({ resource: "codebase_old-index", kind: "metadata", outcome: "failed" }),
+      expect.objectContaining({ resource: "codebase_old-index [point point-1]", kind: "metadata", outcome: "failed" }),
     ]);
     expect(deletedCollections).toEqual(["codebase_old-index"]);
     expect(deletedMetadata).toEqual([]);
+  });
+
+  it("counts a resource that is already gone as deleted, and waits for the metadata delete", async () => {
+    collectionsAlreadyGone.add("codebase_old-index");
+    metadataDeleteError = Object.assign(new Error("Not found: No point with id point-1"), { status: 404 });
+    const { removeProjectReclamationEntry } = await import("../../src/services/qdrant.js");
+
+    const outcomes = await removeProjectReclamationEntry({
+      identity: "old-index",
+      projectPath: null,
+      canonicalPath: null,
+      pathState: "unknown/inaccessible",
+      resourceCollections: ["codebase_old-index", "codegraph_old-index"],
+      metadataRecords: [
+        { pointId: "point-1", collectionName: "codebase_old-index", projectPath: null, indexingStatus: null, lastIndexedAt: null, lastBuiltAt: null, builtByVersion: null },
+      ],
+      inProgress: false,
+      possibleSuperseded: false,
+      requiresManualInspection: false,
+      confirmationToken: "token",
+    });
+
+    expect(outcomes).toEqual([
+      { resource: "codebase_old-index", kind: "collection", outcome: "deleted" },
+      { resource: "codegraph_old-index", kind: "collection", outcome: "deleted" },
+      { resource: "codebase_old-index [point point-1]", kind: "metadata", outcome: "deleted" },
+    ]);
+
+    metadataDeleteError = null;
+    await removeProjectReclamationEntry({
+      identity: "old-index",
+      projectPath: null,
+      canonicalPath: null,
+      pathState: "unknown/inaccessible",
+      resourceCollections: [],
+      metadataRecords: [
+        { pointId: "point-1", collectionName: "codebase_old-index", projectPath: null, indexingStatus: null, lastIndexedAt: null, lastBuiltAt: null, builtByVersion: null },
+      ],
+      inProgress: false,
+      possibleSuperseded: false,
+      requiresManualInspection: false,
+      confirmationToken: "token",
+    });
+    expect(deletedMetadata).toEqual([{ points: ["point-1"], wait: true }]);
   });
 });

@@ -133,7 +133,8 @@ jobs:
             npx vitest run \
               tests/integration/partial-upsert-skip.test.ts \
               tests/integration/interrupted-resume-recovery.test.ts \
-              tests/integration/char-cap-split-retrieval.test.ts
+              tests/integration/char-cap-split-retrieval.test.ts \
+              tests/integration/prune-reclamation.test.ts
 
       - name: Verify the unmodified package against Qdrant on Node 26
         shell: bash

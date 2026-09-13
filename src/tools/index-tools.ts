@@ -3,18 +3,22 @@
 import path from "node:path";
 import { collectionName, projectIdFromPath } from "../config.js";
 import { getWatcherMode, mergeExtraExtensions, QDRANT_MODE } from "../constants.js";
-import { awaitGraphBuild, invalidateGraphCache, isGraphBuildInProgress } from "../services/code-graph.js";
+import { awaitGraphBuild, getGraphBuildInProgressProjects, invalidateGraphCache, invalidateGraphCacheForIdentity, isGraphBuildInProgress } from "../services/code-graph.js";
+import { getContextIndexingInProgressProjects } from "../services/context-artifacts.js";
 import type { InfraProgressCallback } from "../services/docker.js";
 import { ensureQdrantReady, isDockerAvailable } from "../services/docker.js";
 import { ensureEffectiveEmbeddingReady } from "../services/index-profile.js";
-import { getIndexingProgress, indexProject, isIndexingInProgress, removeProjectIndex, requestCancellation, setIndexingProgress, updateProjectIndex } from "../services/indexer.js";
+import { getIndexingInProgressProjects, getIndexingProgress, indexProject, invalidateProjectHashesForIdentity, isIndexingInProgress, removeProjectIndex, requestCancellation, setIndexingProgress, updateProjectIndex } from "../services/indexer.js";
 import { isProjectIdentityLocked, isProjectLocked, terminateLockHolder } from "../services/lock.js";
 import { logger } from "../services/logger.js";
 import {
   getProjectReclamationInventory,
   loadEffectiveIndexProfileForCollection,
+  type ProjectReclamationEntry,
   removeProjectReclamationEntry,
 } from "../services/qdrant.js";
+import { acquireReclamationBarrier, WRITER_OPERATIONS } from "../services/reclamation-barrier.js";
+import { dropSymbolGraphCache } from "../services/symbol-graph-cache.js";
 import { resetSymbolGraphCollectionCache } from "../services/symbol-graph-store.js";
 import { getWatchedProjects, isWatching, startWatching, startWatchingAutomatically, stopWatching } from "../services/watcher.js";
 
@@ -73,33 +77,91 @@ function formatIndexingInProgressMessage(resolvedPath: string, requestedTool: st
 
 function formatPruneInventory(): Promise<string> {
   return getProjectReclamationInventory().then((inventory) => {
-    if (inventory.entries.length === 0 && inventory.unrecognisedMetadataEntries === 0) {
+    if (inventory.entries.length === 0 && inventory.unrecognisedMetadata.length === 0) {
       return "No stored project identities found.";
     }
     const lines = [
       "Stored project inventory:",
       "",
-      "Path state is local observation only. An absent path on this host is not proof that an identity is stale.",
+      "Path state is local observation only. An absent path on this host is not proof that an identity is stale: in a shared store the path may exist only where the index was written.",
+      "Apply requires the exact identity, its confirmation token, and acknowledgeNoRemoteWriters: true.",
     ];
     for (const entry of inventory.entries) {
       lines.push("", `Identity: ${entry.identity}`);
       lines.push(`  Path: ${entry.projectPath ?? "(unknown)"}`);
       lines.push(`  Path state: ${entry.pathState}`);
       if (entry.canonicalPath) lines.push(`  Canonical path: ${entry.canonicalPath}`);
-      if (entry.lastIndexedAt) lines.push(`  Last indexed: ${entry.lastIndexedAt}`);
-      if (entry.lastBuiltAt) lines.push(`  Last graph build: ${entry.lastBuiltAt}`);
-      if (entry.builtByVersion) lines.push(`  Built by: ${entry.builtByVersion}`);
       lines.push(`  Collections: ${entry.resourceCollections.join(", ") || "(none)"}`);
-      lines.push(`  Metadata: ${entry.metadataCollections.join(", ") || "(none)"}`);
+      for (const record of entry.metadataRecords) {
+        const facts = [
+          record.indexingStatus ? `status=${record.indexingStatus}` : null,
+          record.lastIndexedAt ? `indexed=${record.lastIndexedAt}` : null,
+          record.lastBuiltAt ? `built=${record.lastBuiltAt}` : null,
+          record.builtByVersion ? `by=${record.builtByVersion}` : null,
+          record.projectPath && record.projectPath !== entry.projectPath ? `path=${record.projectPath}` : null,
+        ].filter((fact) => fact !== null);
+        lines.push(`  Metadata: ${record.collectionName} [point ${record.pointId}]${facts.length ? ` ${facts.join(" ")}` : ""}`);
+      }
+      if (entry.inProgress) lines.push("  Indexing in progress: a metadata record is mid-write; deletion is refused until it completes");
       if (entry.possibleSuperseded) lines.push("  Advisory: possible-superseded (another identity has this canonical path)");
       if (entry.requiresManualInspection) lines.push("  Manual inspection required: conflicting or incomplete metadata");
       lines.push(`  Confirmation token: ${entry.confirmationToken}`);
     }
-    if (inventory.unrecognisedMetadataEntries > 0) {
-      lines.push("", `${inventory.unrecognisedMetadataEntries} metadata entr${inventory.unrecognisedMetadataEntries === 1 ? "y requires" : "ies require"} manual inspection and cannot be deleted by this tool.`);
+    if (inventory.unrecognisedMetadata.length > 0) {
+      lines.push("", `${inventory.unrecognisedMetadata.length} metadata point${inventory.unrecognisedMetadata.length === 1 ? "" : "s"} could not be attributed to an identity and cannot be deleted by this tool:`);
+      for (const unrecognised of inventory.unrecognisedMetadata) {
+        lines.push(`  point ${unrecognised.pointId}: collectionName=${unrecognised.collectionName ?? "(none)"} projectPath=${unrecognised.projectPath ?? "(none)"} — ${unrecognised.reason}`);
+      }
     }
     return lines.join("\n");
   });
+}
+
+/** Why a fresh inventory forbids deleting the identity, or null; activity is judged separately. */
+function pruneRefusal(entry: ProjectReclamationEntry | undefined, identity: string, confirmationToken: string): string | null {
+  if (!entry) return null;
+  if (entry.confirmationToken !== confirmationToken) {
+    return `Refusing to delete ${identity}: the inventory changed. Run codebase_prune again and use its new confirmation token.`;
+  }
+  if (entry.requiresManualInspection) {
+    return `Refusing to delete ${identity}: its identity cannot be established safely from the stored metadata.`;
+  }
+  if (entry.inProgress) {
+    return `Refusing to delete ${identity}: a metadata record reports indexing in progress.`;
+  }
+  return null;
+}
+
+function identityOfPath(projectPath: string): string | null {
+  try {
+    return projectIdFromPath(projectPath);
+  } catch {
+    return null;
+  }
+}
+
+/** What is writing to the identity, or null. Cross-process locks are read only before the barrier, which then holds them. */
+async function reclamationActivity(identity: string, storedPath: string | null, crossProcess: boolean): Promise<string | null> {
+  const resolvedStored = storedPath === null ? null : path.resolve(storedPath);
+  // Matched by stored path too, so a path-hash entry whose directory is now pinned is still caught.
+  const touches = (paths: string[]) => paths.some((candidate) => {
+    const resolved = path.resolve(candidate);
+    return resolved === resolvedStored || identityOfPath(resolved) === identity;
+  });
+  if (touches(getIndexingInProgressProjects())) return "indexing is in progress";
+  if (touches(getWatchedProjects())) return "a watcher is running";
+  if (touches(getGraphBuildInProgressProjects())) return "a graph build is in progress";
+  if (touches(getContextIndexingInProgressProjects())) return "context artifacts are being indexed";
+  if (crossProcess) {
+    for (const operation of WRITER_OPERATIONS) {
+      if (await isProjectIdentityLocked(identity, operation)) return `its ${operation} lock is held by another process`;
+    }
+  }
+  return null;
+}
+
+async function findPruneEntry(identity: string): Promise<ProjectReclamationEntry | undefined> {
+  return (await getProjectReclamationInventory()).entries.find((candidate) => candidate.identity === identity);
 }
 
 export async function handleIndexTool(
@@ -339,37 +401,67 @@ export async function handleIndexTool(
       if (typeof identity !== "string" || typeof confirmationToken !== "string") {
         return "Prune apply requires the exact identity and confirmationToken returned by codebase_prune.";
       }
-
-      const inventory = await getProjectReclamationInventory();
-      const entry = inventory.entries.find((candidate) => candidate.identity === identity);
-      if (!entry) return `No resources remain for identity ${identity}. Nothing to delete.`;
-      if (entry.confirmationToken !== confirmationToken) {
-        return `Refusing to delete ${identity}: the inventory changed. Run codebase_prune again and use its new confirmation token.`;
-      }
-      if (entry.requiresManualInspection) {
-        return `Refusing to delete ${identity}: its identity cannot be established safely from the stored metadata.`;
-      }
-
-      const storedPath = entry.projectPath;
-      const activeInThisProcess = storedPath !== null && (isIndexingInProgress(storedPath) || isWatching(storedPath));
-      const activeLock = (await isProjectIdentityLocked(identity, "index")) || (await isProjectIdentityLocked(identity, "watch"));
-      if (activeInThisProcess || activeLock) {
-        return `Refusing to delete ${identity}: it is currently indexed, watched, or locked.`;
-      }
-
-      const outcomes = await removeProjectReclamationEntry(entry);
-      if (storedPath) invalidateGraphCache(storedPath);
-      resetSymbolGraphCollectionCache();
-      const remaining = (await getProjectReclamationInventory()).entries.find((candidate) => candidate.identity === identity);
-      const lines = outcomes.map((outcome) => `  ${outcome.outcome}: ${outcome.kind} ${outcome.resource}${outcome.error ? ` (${outcome.error})` : ""}`);
-      if (outcomes.some((outcome) => outcome.outcome === "failed") || remaining) {
+      if (args.acknowledgeNoRemoteWriters !== true) {
         return [
-          `Cleanup for ${identity} is incomplete.`,
-          ...lines,
-          remaining ? "The identity still has stored resources; inspect the inventory before retrying." : "Inspect the failed resources before retrying.",
+          `Refusing to delete ${identity}: acknowledgeNoRemoteWriters is not true.`,
+          "Locks on this host cannot see an indexer on another host sharing this Qdrant. Confirm that no other host is writing to this identity, then pass acknowledgeNoRemoteWriters: true.",
         ].join("\n");
       }
-      return [`Removed all inventoried resources for identity: ${identity}`, ...lines].join("\n");
+
+      const preview = await findPruneEntry(identity);
+      if (!preview) return `No resources remain for identity ${identity}. Nothing to delete.`;
+      const previewRefusal = pruneRefusal(preview, identity, confirmationToken);
+      if (previewRefusal) return previewRefusal;
+
+      let activity: string | null;
+      try {
+        activity = await reclamationActivity(identity, preview.projectPath, true);
+      } catch (err) {
+        return `Refusing to delete ${identity}: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      if (activity) return `Refusing to delete ${identity}: ${activity}.`;
+
+      const barrier = await acquireReclamationBarrier(identity);
+      if (!barrier) return `Refusing to delete ${identity}: a writer holds one of its locks, or the reclamation barrier could not be taken.`;
+
+      try {
+        // Everything is judged again under the barrier: a writer that started
+        // after the checks above, or a record that changed, is caught here.
+        const entry = await findPruneEntry(identity);
+        if (!entry) return `No resources remain for identity ${identity}. Nothing to delete.`;
+        const refusal = pruneRefusal(entry, identity, confirmationToken);
+        if (refusal) return refusal;
+        const lateActivity = await reclamationActivity(identity, entry.projectPath, false);
+        if (lateActivity) return `Refusing to delete ${identity}: ${lateActivity}.`;
+        if (barrier.isCompromised()) return `Refusing to delete ${identity}: its reclamation barrier was lost to another process.`;
+
+        const outcomes = await removeProjectReclamationEntry(entry);
+        invalidateGraphCacheForIdentity(identity);
+        if (entry.projectPath) invalidateGraphCache(entry.projectPath);
+        invalidateProjectHashesForIdentity(identity);
+        dropSymbolGraphCache(identity);
+        resetSymbolGraphCollectionCache();
+
+        const remaining = await findPruneEntry(identity);
+        const leftover = remaining
+          ? [
+              ...remaining.resourceCollections.map((resource) => `collection ${resource}`),
+              ...remaining.metadataRecords.map((record) => `metadata ${record.collectionName} [point ${record.pointId}]`),
+            ]
+          : [];
+        const lines = outcomes.map((outcome) => `  ${outcome.outcome}: ${outcome.kind} ${outcome.resource}${outcome.error ? ` (${outcome.error})` : ""}`);
+        if (outcomes.some((outcome) => outcome.outcome === "failed") || leftover.length > 0) {
+          return [
+            `Cleanup for ${identity} is incomplete.`,
+            ...lines,
+            ...(leftover.length > 0 ? ["Still stored after deletion:", ...leftover.map((item) => `  ${item}`)] : []),
+            "Inspect the inventory before retrying; a repeated apply with a fresh token is safe.",
+          ].join("\n");
+        }
+        return [`Removed all inventoried resources for identity: ${identity}`, ...lines].join("\n");
+      } finally {
+        await barrier.release();
+      }
     }
 
     case "codebase_stop": {

@@ -261,24 +261,42 @@ export async function deleteCollection(name: string): Promise<void> {
 
 export type ProjectPathState = "present-on-this-host" | "absent-on-this-host" | "unknown/inaccessible";
 
+/** One metadata point, projected to the fields that decide whether a preview is still current. */
+export interface ProjectMetadataRecord {
+  pointId: string | number;
+  collectionName: string;
+  projectPath: string | null;
+  indexingStatus: string | null;
+  lastIndexedAt: string | null;
+  lastBuiltAt: string | null;
+  builtByVersion: string | null;
+}
+
 export interface ProjectReclamationEntry {
   identity: string;
   projectPath: string | null;
   canonicalPath: string | null;
   pathState: ProjectPathState;
-  lastIndexedAt: string | null;
-  lastBuiltAt: string | null;
-  builtByVersion: string | null;
   resourceCollections: string[];
-  metadataCollections: string[];
+  metadataRecords: ProjectMetadataRecord[];
+  /** Some record says an indexer has this identity mid-write. */
+  inProgress: boolean;
   possibleSuperseded: boolean;
   requiresManualInspection: boolean;
   confirmationToken: string;
 }
 
+/** A metadata point the inventory could not attribute to an identity, kept for a person to look at. */
+export interface UnrecognisedMetadataEntry {
+  pointId: string | number;
+  collectionName: string | null;
+  projectPath: string | null;
+  reason: string;
+}
+
 export interface ProjectReclamationInventory {
   entries: ProjectReclamationEntry[];
-  unrecognisedMetadataEntries: number;
+  unrecognisedMetadata: UnrecognisedMetadataEntry[];
 }
 
 export interface ProjectReclamationOutcome {
@@ -291,36 +309,46 @@ export interface ProjectReclamationOutcome {
 interface InventorySeed {
   identity: string;
   resourceCollections: Set<string>;
-  metadataCollections: Set<string>;
-  projectPaths: Set<string>;
-  lastIndexedAt: string | null;
-  lastBuiltAt: string | null;
-  builtByVersion: string | null;
+  metadataRecords: ProjectMetadataRecord[];
 }
 
+const RESOURCE_FAMILIES = ["codebase_", "codegraph_", "context_"] as const;
+
+/** The identity a collection name belongs to; null for anything outside the configured prefix, which is foreign. */
 function identityFromResourceName(name: string): string | null {
   const prefix = QDRANT_COLLECTION_PREFIX;
-  const codebase = `${prefix}codebase_`;
-  const graph = `${prefix}codegraph_`;
-  const context = `${prefix}context_`;
-  if (name.startsWith(codebase)) return name.slice(codebase.length) || null;
-  if (name.startsWith(graph)) return name.slice(graph.length) || null;
-  if (name.startsWith(context)) return name.slice(context.length) || null;
-  const symbol = name.slice(prefix.length).match(/^(.+)_symgraph_(?:meta|file|index)$/);
-  return symbol?.[1] || null;
+  if (!name.startsWith(prefix)) return null;
+  const local = name.slice(prefix.length);
+  // Suffix first: a pinned id may itself begin with a family name (`context_docs_symgraph_meta`).
+  const symbol = local.match(/^(.+)_symgraph_(?:meta|file|index)$/);
+  if (symbol) return symbol[1];
+  for (const family of RESOURCE_FAMILIES) {
+    if (local.startsWith(family)) return local.slice(family.length) || null;
+  }
+  return null;
 }
 
+function compareRecords(a: ProjectMetadataRecord, b: ProjectMetadataRecord): number {
+  return String(a.pointId).localeCompare(String(b.pointId));
+}
+
+/** Fingerprint of everything a delete would act on, every metadata record included. */
 function inventoryToken(entry: Omit<ProjectReclamationEntry, "confirmationToken" | "possibleSuperseded">): string {
+  const records = [...entry.metadataRecords].sort(compareRecords).map((record) => [
+    String(record.pointId),
+    record.collectionName,
+    record.projectPath,
+    record.indexingStatus,
+    record.lastIndexedAt,
+    record.lastBuiltAt,
+    record.builtByVersion,
+  ]);
   return createHash("sha256")
     .update(JSON.stringify({
       identity: entry.identity,
-      projectPath: entry.projectPath,
-      canonicalPath: entry.canonicalPath,
-      resourceCollections: entry.resourceCollections,
-      metadataCollections: entry.metadataCollections,
-      lastIndexedAt: entry.lastIndexedAt,
-      lastBuiltAt: entry.lastBuiltAt,
-      builtByVersion: entry.builtByVersion,
+      pathState: entry.pathState,
+      resourceCollections: [...entry.resourceCollections].sort(),
+      records,
     }))
     .digest("hex");
 }
@@ -344,6 +372,10 @@ async function inspectStoredPath(projectPath: string | null): Promise<{
   }
 }
 
+function stringOrNull(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
 /**
  * Read the stored identities without deriving an identity from the local path.
  * The result is an inventory: an absent path is local observation, never proof
@@ -356,15 +388,7 @@ export async function getProjectReclamationInventory(): Promise<ProjectReclamati
   const seedFor = (identity: string) => {
     let seed = seeds.get(identity);
     if (!seed) {
-      seed = {
-        identity,
-        resourceCollections: new Set(),
-        metadataCollections: new Set(),
-        projectPaths: new Set(),
-        lastIndexedAt: null,
-        lastBuiltAt: null,
-        builtByVersion: null,
-      };
+      seed = { identity, resourceCollections: new Set(), metadataRecords: [] };
       seeds.set(identity, seed);
     }
     return seed;
@@ -375,7 +399,7 @@ export async function getProjectReclamationInventory(): Promise<ProjectReclamati
     if (identity) seedFor(identity).resourceCollections.add(name);
   }
 
-  let unrecognisedMetadataEntries = 0;
+  const unrecognisedMetadata: UnrecognisedMetadataEntry[] = [];
   if (collections.collections.some(({ name }) => name === METADATA_COLLECTION)) {
     let offset: string | number | Record<string, unknown> | undefined | null;
     do {
@@ -383,7 +407,7 @@ export async function getProjectReclamationInventory(): Promise<ProjectReclamati
         () => qdrant.scroll(METADATA_COLLECTION, {
           limit: 1000,
           with_payload: {
-            include: ["collectionName", "projectPath", "lastIndexedAt", "lastBuiltAt", "builtByVersion"],
+            include: ["collectionName", "projectPath", "indexingStatus", "lastIndexedAt", "lastBuiltAt", "builtByVersion"],
           },
           with_vector: false,
           ...(offset === undefined || offset === null ? {} : { offset }),
@@ -392,22 +416,31 @@ export async function getProjectReclamationInventory(): Promise<ProjectReclamati
       );
       for (const point of page.points) {
         const payload = point.payload as Record<string, unknown> | null | undefined;
-        const collectionName = payload?.collectionName;
-        if (typeof collectionName !== "string") {
-          unrecognisedMetadataEntries++;
+        const collectionName = stringOrNull(payload?.collectionName);
+        const projectPath = stringOrNull(payload?.projectPath);
+        if (collectionName === null) {
+          unrecognisedMetadata.push({ pointId: point.id, collectionName: null, projectPath, reason: "collectionName is missing or not a string" });
           continue;
         }
         const identity = identityFromResourceName(collectionName);
         if (!identity) {
-          unrecognisedMetadataEntries++;
+          unrecognisedMetadata.push({
+            pointId: point.id,
+            collectionName,
+            projectPath,
+            reason: "collectionName is outside the configured prefix or not a known resource family",
+          });
           continue;
         }
-        const seed = seedFor(identity);
-        seed.metadataCollections.add(collectionName);
-        if (typeof payload?.projectPath === "string") seed.projectPaths.add(payload.projectPath);
-        if (typeof payload?.lastIndexedAt === "string") seed.lastIndexedAt = payload.lastIndexedAt;
-        if (typeof payload?.lastBuiltAt === "string") seed.lastBuiltAt = payload.lastBuiltAt;
-        if (typeof payload?.builtByVersion === "string") seed.builtByVersion = payload.builtByVersion;
+        seedFor(identity).metadataRecords.push({
+          pointId: point.id,
+          collectionName,
+          projectPath,
+          indexingStatus: stringOrNull(payload?.indexingStatus),
+          lastIndexedAt: stringOrNull(payload?.lastIndexedAt),
+          lastBuiltAt: stringOrNull(payload?.lastBuiltAt),
+          builtByVersion: stringOrNull(payload?.builtByVersion),
+        });
       }
       const next = page.next_page_offset;
       if (next !== undefined && next !== null && JSON.stringify(next) === JSON.stringify(offset)) {
@@ -418,7 +451,7 @@ export async function getProjectReclamationInventory(): Promise<ProjectReclamati
   }
 
   const inspected = await Promise.all(Array.from(seeds.values()).map(async (seed) => {
-    const projectPaths = Array.from(seed.projectPaths).sort();
+    const projectPaths = Array.from(new Set(seed.metadataRecords.map((record) => record.projectPath).filter((value): value is string => value !== null))).sort();
     const projectPath = projectPaths.length === 1 ? projectPaths[0] : null;
     const { pathState, canonicalPath } = await inspectStoredPath(projectPath);
     const base: Omit<ProjectReclamationEntry, "confirmationToken" | "possibleSuperseded"> = {
@@ -426,11 +459,9 @@ export async function getProjectReclamationInventory(): Promise<ProjectReclamati
       projectPath,
       canonicalPath,
       pathState,
-      lastIndexedAt: seed.lastIndexedAt,
-      lastBuiltAt: seed.lastBuiltAt,
-      builtByVersion: seed.builtByVersion,
       resourceCollections: Array.from(seed.resourceCollections).sort(),
-      metadataCollections: Array.from(seed.metadataCollections).sort(),
+      metadataRecords: [...seed.metadataRecords].sort(compareRecords),
+      inProgress: seed.metadataRecords.some((record) => record.indexingStatus === "in-progress"),
       requiresManualInspection: projectPaths.length > 1,
     };
     return { ...base, possibleSuperseded: false, confirmationToken: inventoryToken(base) };
@@ -446,45 +477,36 @@ export async function getProjectReclamationInventory(): Promise<ProjectReclamati
 
   return {
     entries: inspected.sort((a, b) => a.identity.localeCompare(b.identity)),
-    unrecognisedMetadataEntries,
+    unrecognisedMetadata: unrecognisedMetadata.sort((a, b) => String(a.pointId).localeCompare(String(b.pointId))),
   };
 }
 
-/**
- * Delete exactly the resources returned by a prior inventory read. Errors are
- * kept per resource so callers can distinguish a completed cleanup from a
- * partial one instead of treating a best-effort deletion as success.
- */
+/** Delete exactly the inventoried resources, one outcome each; a resource already gone counts as deleted. */
 export async function removeProjectReclamationEntry(
   entry: ProjectReclamationEntry,
 ): Promise<ProjectReclamationOutcome[]> {
   const qdrant = getClient();
   const outcomes: ProjectReclamationOutcome[] = [];
+  const attempt = async (resource: string, kind: ProjectReclamationOutcome["kind"], remove: () => Promise<unknown>) => {
+    try {
+      await remove();
+      outcomes.push({ resource, kind, outcome: "deleted" });
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        outcomes.push({ resource, kind, outcome: "deleted" });
+        return;
+      }
+      outcomes.push({ resource, kind, outcome: "failed", error: error instanceof Error ? error.message : String(error) });
+    }
+  };
   for (const resource of entry.resourceCollections) {
-    try {
-      await qdrant.deleteCollection(resource);
-      outcomes.push({ resource, kind: "collection", outcome: "deleted" });
-    } catch (error) {
-      outcomes.push({
-        resource,
-        kind: "collection",
-        outcome: "failed",
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+    await attempt(resource, "collection", () => qdrant.deleteCollection(resource));
   }
-  for (const resource of entry.metadataCollections) {
-    try {
-      await qdrant.delete(METADATA_COLLECTION, { points: [metadataPointId(resource)] });
-      outcomes.push({ resource, kind: "metadata", outcome: "deleted" });
-    } catch (error) {
-      outcomes.push({
-        resource,
-        kind: "metadata",
-        outcome: "failed",
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+  for (const record of entry.metadataRecords) {
+    // wait: true, so the inventory read that follows sees the point gone.
+    await attempt(`${record.collectionName} [point ${record.pointId}]`, "metadata", () =>
+      qdrant.delete(METADATA_COLLECTION, { points: [record.pointId], wait: true }),
+    );
   }
   return outcomes;
 }

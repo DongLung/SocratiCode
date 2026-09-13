@@ -45,6 +45,7 @@ import { createIgnoreFilter } from "./ignore.js";
 import { logger } from "./logger.js";
 import { gdscriptParserAvailable, setGdscriptParserAvailable } from "./parser-availability.js";
 import { deleteGraphData, describeQdrantError, getGraphMetadata, loadGraphData, loadGraphInputs, saveGraphData } from "./qdrant.js";
+import { assertNoReclamationBarrier, withWriterLock } from "./reclamation-barrier.js";
 import {
   dropSymbolGraphCache,
   SymbolGraphCache,
@@ -157,6 +158,21 @@ const graphCache = new Map<string, CodeGraph>();
 /** Invalidate graph cache for a project (called by watcher on file changes) */
 export function invalidateGraphCache(projectPath: string): void {
   graphCache.delete(path.resolve(projectPath));
+}
+
+/** A pinned identity can be cached under more than one checkout path; drop them all. */
+export function invalidateGraphCacheForIdentity(projectId: string): void {
+  for (const cachedPath of Array.from(graphCache.keys())) {
+    if (identityOfCachedPath(cachedPath) === projectId) graphCache.delete(cachedPath);
+  }
+}
+
+function identityOfCachedPath(cachedPath: string): string | null {
+  try {
+    return projectIdFromPath(cachedPath);
+  } catch {
+    return null;
+  }
 }
 
 /** Get a cached graph, or load from Qdrant, or build one */
@@ -305,12 +321,16 @@ export async function rebuildGraph(
     return existing;
   }
 
+  const projectId = projectIdFromPath(resolved);
+  await assertNoReclamationBarrier(projectId);
+
   // Start tracked build
-  const promise = doRebuildGraph(resolved, opts);
-  graphBuildPromises.set(resolved, promise);
+  const promise = withWriterLock(projectId, "graph", () => doRebuildGraph(resolved, opts));
+  graphBuildPromises.set(resolved, promise as Promise<CodeGraph>);
 
   try {
     const graph = await promise;
+    if (graph === null) throw new Error(`Another process holds the graph lock for ${resolved}, or it could not be taken`);
     return graph;
   } finally {
     graphBuildPromises.delete(resolved);

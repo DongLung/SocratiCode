@@ -42,7 +42,10 @@ function ensureLockDir(): void {
 }
 
 function lockKey(projectPath: string, operation: string): string {
-  const projectId = projectIdFromPath(path.resolve(projectPath));
+  return identityLockKey(projectIdFromPath(path.resolve(projectPath)), operation);
+}
+
+function identityLockKey(projectId: string, operation: string): string {
   return `${projectId}-${operation}`;
 }
 
@@ -69,9 +72,19 @@ export async function acquireProjectLock(
   operation: string,
   onCompromised?: (err: Error) => void | Promise<void>,
 ): Promise<boolean> {
+  return acquireIdentityLock(projectIdFromPath(path.resolve(projectPath)), operation, onCompromised, projectPath);
+}
+
+/** Reclamation addresses an identity whose directory may be gone, so it locks by identity, not path. */
+export async function acquireIdentityLock(
+  projectId: string,
+  operation: string,
+  onCompromised?: (err: Error) => void | Promise<void>,
+  projectPath: string = projectId,
+): Promise<boolean> {
   ensureLockDir();
 
-  const key = lockKey(projectPath, operation);
+  const key = identityLockKey(projectId, operation);
   const filePath = lockFilePath(key);
 
   // Ensure the file to lock exists (proper-lockfile requires it)
@@ -153,6 +166,11 @@ export function holdsProjectLock(projectPath: string, operation: string): boolea
   return heldLocks.has(lockKey(projectPath, operation));
 }
 
+/** Whether this process holds the lock for a recorded project identity. */
+export function holdsIdentityLock(projectId: string, operation: string): boolean {
+  return heldLocks.has(identityLockKey(projectId, operation));
+}
+
 /**
  * Release a previously acquired lock.
  *
@@ -160,7 +178,12 @@ export function holdsProjectLock(projectPath: string, operation: string): boolea
  * @param operation - Operation type: "index" or "watch"
  */
 export async function releaseProjectLock(projectPath: string, operation: string): Promise<void> {
-  const key = lockKey(projectPath, operation);
+  return releaseIdentityLock(projectIdFromPath(path.resolve(projectPath)), operation, projectPath);
+}
+
+/** Release a lock acquired through {@link acquireIdentityLock}. */
+export async function releaseIdentityLock(projectId: string, operation: string, projectPath: string = projectId): Promise<void> {
+  const key = identityLockKey(projectId, operation);
   const release = heldLocks.get(key);
 
   if (release) {
@@ -184,25 +207,43 @@ export async function releaseProjectLock(projectPath: string, operation: string)
  * Check if a lock is currently held (by any process).
  */
 export async function isProjectLocked(projectPath: string, operation: string): Promise<boolean> {
-  return isProjectIdentityLocked(projectIdFromPath(path.resolve(projectPath)), operation);
+  try {
+    return await isProjectIdentityLocked(projectIdFromPath(path.resolve(projectPath)), operation);
+  } catch {
+    return false;
+  }
 }
 
-/** Check a lock by its recorded project identity, without resolving a path. */
+/** A lock whose state could not be read; a caller about to delete must treat it as held. */
+export class LockInspectionError extends Error {
+  constructor(
+    readonly projectId: string,
+    readonly operation: string,
+    cause: unknown,
+  ) {
+    super(`Could not inspect the ${operation} lock for ${projectId}: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = "LockInspectionError";
+  }
+}
+
+/** Check a lock by identity; throws LockInspectionError when the answer is unknown rather than answering false. */
 export async function isProjectIdentityLocked(projectId: string, operation: string): Promise<boolean> {
-  ensureLockDir();
-
-  const key = `${projectId}-${operation}`;
-  const filePath = lockFilePath(key);
-
-  if (!fs.existsSync(filePath)) return false;
-
   try {
+    ensureLockDir();
+    const filePath = lockFilePath(identityLockKey(projectId, operation));
+    try {
+      fs.statSync(filePath);
+    } catch (err) {
+      // Only a missing file means nobody holds the lock; an unreadable one says nothing.
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw err;
+    }
     return await lockfile.check(filePath, {
       stale: STALE_MS,
       realpath: false,
     });
-  } catch {
-    return false;
+  } catch (err) {
+    throw new LockInspectionError(projectId, operation, err);
   }
 }
 
