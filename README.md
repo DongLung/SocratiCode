@@ -217,6 +217,8 @@ codex plugin add socraticode@socraticode
 codex plugin list --available --json
 ```
 
+If SocratiCode fails to start in Codex Desktop with `No such file or directory`, Codex may not be able to find `npx`. Run `command -v npx`. Some desktop launches use only `/usr/bin:/bin:/usr/sbin:/sbin`; if `npx` is installed elsewhere, add its directory to `PATH` in the custom Codex configuration below, then restart Codex.
+
 Codex has a public plugin directory, but SocratiCode is not currently published there. Plugins are supported in the ChatGPT desktop Codex environment and Codex CLI. The Codex IDE extension supports shared MCP configuration, not plugin discovery. See the [OpenAI plugin documentation](https://learn.chatgpt.com/docs/plugins).
 
 Codex currently exposes enablement and tool policy for a plugin's bundled MCP server, but not a documented per-user environment override for that bundled definition. To keep the plugin skills while using custom SocratiCode variables, disable only the bundled server and add one top-level server in `~/.codex/config.toml`:
