@@ -225,7 +225,7 @@ describe("graph tool handlers", () => {
   });
 
   describe("codebase_graph_status unresolved call share (#172)", () => {
-    it("states the share as captured calls unmatched to a project symbol, builtins included", async () => {
+    it("states the share as captured symbol edges unmatched to a project symbol, builtins included", async () => {
       // Every call here targets the runtime, so the unchanged metric is 100%;
       // what this pins is that the definition reaches the output beside it.
       // An ambient explicit id would write this graph over another project's.
@@ -245,7 +245,8 @@ describe("graph tool handlers", () => {
         });
 
         expect(result).toContain("Status: READY");
-        expect(result).toContain("Unresolved: 100.0% of captured calls did not match a project symbol");
+        expect(result).toContain("Unresolved: 100.0% of captured symbol edges did not match a project symbol");
+        expect(result).toContain("Symbol edges are calls, imports, re-exports and type or value references.");
         expect(result).toContain("runtime builtins and external libraries");
         expect(result).not.toMatch(/Unresolved: 100\.0%\n/);
       } finally {

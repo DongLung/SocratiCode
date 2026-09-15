@@ -210,14 +210,15 @@ export function describeGraphBuilder(
 }
 
 /**
- * The symbol graph's unresolved share, stated as what it counts. A member call
- * is reduced to its terminal name, so a runtime or external-library callee is
- * indistinguishable from a project method that failed to resolve (issue #172).
+ * The symbol graph's unresolved share, stated as what it counts: every symbol
+ * edge but the GDScript engine ones. A member call is reduced to its terminal
+ * name, so a runtime or external-library callee is indistinguishable from a
+ * project method that failed to resolve (issue #172).
  */
-export function describeUnresolvedCallEdges(unresolvedEdgePct: number): string[] {
+export function describeUnresolvedSymbolEdges(unresolvedEdgePct: number): string[] {
   return [
-    `  Unresolved: ${unresolvedEdgePct.toFixed(1)}% of captured calls did not match a project symbol`,
-    "    This share includes calls into runtime builtins and external libraries (setTimeout, JSON.stringify, an SDK client's methods), which no project symbol can resolve, and leaves out only GDScript engine calls; it runs high on healthy code and is not a resolver failure rate.",
+    `  Unresolved: ${unresolvedEdgePct.toFixed(1)}% of captured symbol edges did not match a project symbol`,
+    "    Symbol edges are calls, imports, re-exports and type or value references. Edges into runtime builtins and external libraries (setTimeout, JSON.stringify, an SDK client's methods) count here, since no project symbol can resolve them, and only GDScript engine calls are left out; the share runs high on healthy code and is not a resolver failure rate.",
   ];
 }
 

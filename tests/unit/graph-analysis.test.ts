@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import {
   describeGraphBuilder,
-  describeUnresolvedCallEdges,
+  describeUnresolvedSymbolEdges,
   findCircularDependencies,
   generateMermaidDiagram,
   getFileDependencies,
@@ -514,27 +514,28 @@ describe("graph-analysis", () => {
 
   // ── Unresolved call share (#172) ─────────────────────────────────────
 
-  describe("describeUnresolvedCallEdges", () => {
+  describe("describeUnresolvedSymbolEdges", () => {
     // The number is the persisted unresolvedEdgePct, unchanged; what these pin
     // is that the output says what it is a share of and what that share includes.
 
     it("keeps the one-decimal number and says what it is a share of", () => {
-      const lines = describeUnresolvedCallEdges(57.5);
-      expect(lines[0]).toBe("  Unresolved: 57.5% of captured calls did not match a project symbol");
+      const lines = describeUnresolvedSymbolEdges(57.5);
+      expect(lines[0]).toBe("  Unresolved: 57.5% of captured symbol edges did not match a project symbol");
     });
 
-    it("names runtime builtins and external libraries as part of the share", () => {
-      const [, explanation] = describeUnresolvedCallEdges(57.5);
+    it("names every edge kind counted, and runtime builtins and external libraries as part of the share", () => {
+      const [, explanation] = describeUnresolvedSymbolEdges(57.5);
+      expect(explanation).toContain("calls, imports, re-exports and type or value references");
       expect(explanation).toContain("runtime builtins");
       expect(explanation).toContain("external libraries");
-      expect(explanation).toContain("leaves out only GDScript engine calls");
+      expect(explanation).toContain("only GDScript engine calls are left out");
       expect(explanation).toContain("not a resolver failure rate");
     });
 
     it("renders a fully resolved graph with the same shape", () => {
-      const lines = describeUnresolvedCallEdges(0);
+      const lines = describeUnresolvedSymbolEdges(0);
       expect(lines).toHaveLength(2);
-      expect(lines[0]).toContain("Unresolved: 0.0% of captured calls");
+      expect(lines[0]).toContain("Unresolved: 0.0% of captured symbol edges");
     });
   });
 });
