@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { graphCollectionName, projectIdFromPath } from "../../src/config.js";
 import { QDRANT_COLLECTION_PREFIX, SOCRATICODE_VERSION } from "../../src/constants.js";
 import { invalidateGraphCache, rebuildGraph } from "../../src/services/code-graph.js";
@@ -228,6 +228,8 @@ describe("graph tool handlers", () => {
     it("states the share as captured calls unmatched to a project symbol, builtins included", async () => {
       // Every call here targets the runtime, so the unchanged metric is 100%;
       // what this pins is that the definition reaches the output beside it.
+      // An ambient explicit id would write this graph over another project's.
+      vi.stubEnv("SOCRATICODE_PROJECT_ID", undefined);
       const root = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-unresolved-share-"));
       fs.mkdirSync(path.join(root, "src"), { recursive: true });
       fs.writeFileSync(
@@ -247,6 +249,7 @@ describe("graph tool handlers", () => {
         expect(result).toContain("runtime builtins and external libraries");
         expect(result).not.toMatch(/Unresolved: 100\.0%\n/);
       } finally {
+        vi.unstubAllEnvs();
         invalidateGraphCache(root);
         try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
       }

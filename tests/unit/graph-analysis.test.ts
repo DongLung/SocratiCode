@@ -527,6 +527,7 @@ describe("graph-analysis", () => {
       const [, explanation] = describeUnresolvedCallEdges(57.5);
       expect(explanation).toContain("runtime builtins");
       expect(explanation).toContain("external libraries");
+      expect(explanation).toContain("leaves out only GDScript engine calls");
       expect(explanation).toContain("not a resolver failure rate");
     });
 

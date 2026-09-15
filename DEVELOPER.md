@@ -955,7 +955,7 @@ The call graph is built from static analysis without type inference. These class
 - **Macros** — Rust (`println!`, custom `macro_rules!`) and C / C++ preprocessor macros are not expanded. Macro invocations are captured as calls to the macro *name*, not to whatever the expansion actually calls.
 - **Framework magic** — Dependency injection (Spring `@Autowired`, Angular DI, NestJS providers), ORM metaprogramming (Rails `has_many`, ActiveRecord callbacks), decorator-driven routing where the handler is never named at a call site (Django class-based view dispatch, some FastAPI patterns), and similar indirection goes through the framework rather than through a direct call. A method that is only called via `@Autowired` will show zero callers in `codebase_impact`.
 
-`SymbolGraphMeta.unresolvedEdgePct` is the quality signal for this class of limit, read with the definition above: the share counts every call that no project symbol matched, runtime and external APIs included, so a high value on a runtime-heavy codebase is the expected shape rather than a finding, and the number alone does not separate a genuine gap (heavy framework magic, a language where extractor coverage is incomplete) from those external calls. Users running `codebase_impact` on a service-oriented codebase with heavy DI should treat "zero callers" as a hint to double-check, not a guarantee.
+`SymbolGraphMeta.unresolvedEdgePct` is the quality signal for this class of limit, read with the definition above: the share counts every captured call that no project symbol matched, GDScript `engine` calls excepted, runtime and external APIs included, so a high value on a runtime-heavy codebase is the expected shape rather than a finding, and the number alone does not separate a genuine gap (heavy framework magic, a language where extractor coverage is incomplete) from those external calls. Users running `codebase_impact` on a service-oriented codebase with heavy DI should treat "zero callers" as a hint to double-check, not a guarantee.
 
 #### Per-file incremental updates (Phase F)
 
@@ -1287,7 +1287,7 @@ Parameters:
 Returns:
   If build in progress: Status BUILDING with phase, progress % (and a skipped count when non-zero), elapsed time
   If ready: Status READY with node/edge count, last built time, cache status, last build duration, and files skipped when non-zero
-  If a symbol graph exists: its file, symbol and call-edge counts, plus the unresolved share — the percentage of captured calls not matched to a project symbol, runtime builtins and external libraries included
+  If a symbol graph exists: its file, symbol and call-edge counts, plus the unresolved share — the percentage of captured calls not matched to a project symbol, runtime builtins and external libraries included, GDScript engine calls excluded
   If not found: Instructions to build
 ```
 

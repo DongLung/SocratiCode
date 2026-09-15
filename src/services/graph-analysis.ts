@@ -217,7 +217,7 @@ export function describeGraphBuilder(
 export function describeUnresolvedCallEdges(unresolvedEdgePct: number): string[] {
   return [
     `  Unresolved: ${unresolvedEdgePct.toFixed(1)}% of captured calls did not match a project symbol`,
-    "    This share includes calls into runtime builtins and external libraries (setTimeout, JSON.stringify, an SDK client's methods), which no project symbol can resolve, so it runs high on healthy code and is not a resolver failure rate.",
+    "    This share includes calls into runtime builtins and external libraries (setTimeout, JSON.stringify, an SDK client's methods), which no project symbol can resolve, and leaves out only GDScript engine calls; it runs high on healthy code and is not a resolver failure rate.",
   ];
 }
 
