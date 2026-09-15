@@ -6,7 +6,7 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { graphCollectionName, projectIdFromPath } from "../../src/config.js";
 import { QDRANT_COLLECTION_PREFIX, SOCRATICODE_VERSION } from "../../src/constants.js";
-import { invalidateGraphCache, rebuildGraph } from "../../src/services/code-graph.js";
+import { invalidateGraphCache, rebuildGraph, removeGraph } from "../../src/services/code-graph.js";
 import { getClient } from "../../src/services/qdrant.js";
 import { stopAllWatchers } from "../../src/services/watcher.js";
 import { handleContextTool } from "../../src/tools/context-tools.js";
@@ -249,8 +249,8 @@ describe("graph tool handlers", () => {
         expect(result).toContain("runtime builtins and external libraries");
         expect(result).not.toMatch(/Unresolved: 100\.0%\n/);
       } finally {
+        await removeGraph(root);
         vi.unstubAllEnvs();
-        invalidateGraphCache(root);
         try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
       }
     });
