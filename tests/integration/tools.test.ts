@@ -224,6 +224,35 @@ describe("graph tool handlers", () => {
     });
   });
 
+  describe("codebase_graph_status unresolved call share (#172)", () => {
+    it("states the share as captured calls unmatched to a project symbol, builtins included", async () => {
+      // Every call here targets the runtime, so the unchanged metric is 100%;
+      // what this pins is that the definition reaches the output beside it.
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-unresolved-share-"));
+      fs.mkdirSync(path.join(root, "src"), { recursive: true });
+      fs.writeFileSync(
+        path.join(root, "src", "clock.ts"),
+        "export function tick(): string {\n  setTimeout(() => {}, 1);\n  return JSON.stringify({ at: Date.now() });\n}\n",
+        "utf-8",
+      );
+      try {
+        await rebuildGraph(root);
+
+        const result = await handleGraphTool("codebase_graph_status", {
+          projectPath: root,
+        });
+
+        expect(result).toContain("Status: READY");
+        expect(result).toContain("Unresolved: 100.0% of captured calls did not match a project symbol");
+        expect(result).toContain("runtime builtins and external libraries");
+        expect(result).not.toMatch(/Unresolved: 100\.0%\n/);
+      } finally {
+        invalidateGraphCache(root);
+        try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
+      }
+    });
+  });
+
   describe("codebase_graph_circular", () => {
     it("reports circular dependency results", async () => {
       const result = await handleGraphTool("codebase_graph_circular", {

@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import {
   describeGraphBuilder,
+  describeUnresolvedCallEdges,
   findCircularDependencies,
   generateMermaidDiagram,
   getFileDependencies,
@@ -508,6 +509,31 @@ describe("graph-analysis", () => {
       expect(lines[0]).toContain("unknown");
       expect(lines[0]).not.toContain("STALE");
       expect(lines[1]).toContain("codebase_graph_build");
+    });
+  });
+
+  // ── Unresolved call share (#172) ─────────────────────────────────────
+
+  describe("describeUnresolvedCallEdges", () => {
+    // The number is the persisted unresolvedEdgePct, unchanged; what these pin
+    // is that the output says what it is a share of and what that share includes.
+
+    it("keeps the one-decimal number and says what it is a share of", () => {
+      const lines = describeUnresolvedCallEdges(57.5);
+      expect(lines[0]).toBe("  Unresolved: 57.5% of captured calls did not match a project symbol");
+    });
+
+    it("names runtime builtins and external libraries as part of the share", () => {
+      const [, explanation] = describeUnresolvedCallEdges(57.5);
+      expect(explanation).toContain("runtime builtins");
+      expect(explanation).toContain("external libraries");
+      expect(explanation).toContain("not a resolver failure rate");
+    });
+
+    it("renders a fully resolved graph with the same shape", () => {
+      const lines = describeUnresolvedCallEdges(0);
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toContain("Unresolved: 0.0% of captured calls");
     });
   });
 });

@@ -210,6 +210,18 @@ export function describeGraphBuilder(
 }
 
 /**
+ * The symbol graph's unresolved share, stated as what it counts. A member call
+ * is reduced to its terminal name, so a runtime or external-library callee is
+ * indistinguishable from a project method that failed to resolve (issue #172).
+ */
+export function describeUnresolvedCallEdges(unresolvedEdgePct: number): string[] {
+  return [
+    `  Unresolved: ${unresolvedEdgePct.toFixed(1)}% of captured calls did not match a project symbol`,
+    "    This share includes calls into runtime builtins and external libraries (setTimeout, JSON.stringify, an SDK client's methods), which no project symbol can resolve, so it runs high on healthy code and is not a resolver failure rate.",
+  ];
+}
+
+/**
  * Get dependencies for a specific file.
  * The input path is normalized to forward slashes so lookups succeed
  * regardless of whether the caller passes `/` or `\` separators.

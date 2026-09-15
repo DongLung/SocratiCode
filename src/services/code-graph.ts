@@ -70,7 +70,7 @@ import {
 } from "./symbol-graph-store.js";
 
 // Re-export analysis functions for external consumers
-export { describeGraphBuilder, findCircularDependencies, generateMermaidDiagram, getFileDependencies, getGraphStats, isGraphBuilderStale, isImportResolutionLow } from "./graph-analysis.js";
+export { describeGraphBuilder, describeUnresolvedCallEdges, findCircularDependencies, generateMermaidDiagram, getFileDependencies, getGraphStats, isGraphBuilderStale, isImportResolutionLow } from "./graph-analysis.js";
 
 // createRequire needed to load native addon packages in ESM
 const esmRequire = createRequire(import.meta.url);

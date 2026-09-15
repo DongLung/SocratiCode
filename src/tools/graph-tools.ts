@@ -3,7 +3,7 @@
 import path from "node:path";
 import { projectIdFromPath } from "../config.js";
 import { getWatcherMode, mergeExtraExtensions, SOCRATICODE_VERSION } from "../constants.js";
-import { awaitGraphBuild, describeGraphBuilder, ensureDynamicLanguages, findCircularDependencies, generateMermaidDiagram, getAstGrepLang, getDynamicLanguageStatus, getExistingGraph, getFileDependencies, getGraphBuildProgress, getGraphStats, getGraphStatus, getLastGraphBuildCompleted, getOrBuildGraph, isGraphBuildInProgress, isImportResolutionLow, rebuildGraph, removeGraph } from "../services/code-graph.js";
+import { awaitGraphBuild, describeGraphBuilder, describeUnresolvedCallEdges, ensureDynamicLanguages, findCircularDependencies, generateMermaidDiagram, getAstGrepLang, getDynamicLanguageStatus, getExistingGraph, getFileDependencies, getGraphBuildProgress, getGraphStats, getGraphStatus, getLastGraphBuildCompleted, getOrBuildGraph, isGraphBuildInProgress, isImportResolutionLow, rebuildGraph, removeGraph } from "../services/code-graph.js";
 import { detectEntryPoints } from "../services/graph-entrypoints.js";
 import {
   type FlowNode,
@@ -459,7 +459,7 @@ async function dispatchGraphTool(
         lines.push(`  Files: ${sm.fileCount}`);
         lines.push(`  Symbols: ${sm.symbolCount}`);
         lines.push(`  Call edges: ${sm.edgeCount}`);
-        lines.push(`  Unresolved: ${sm.unresolvedEdgePct.toFixed(1)}%`);
+        lines.push(...describeUnresolvedCallEdges(sm.unresolvedEdgePct));
       }
 
       lines.push(...renderGrammarBlock());
