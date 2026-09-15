@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import {
   describeGraphBuilder,
+  describeUnresolvedSymbolEdges,
   findCircularDependencies,
   generateMermaidDiagram,
   getFileDependencies,
@@ -508,6 +509,33 @@ describe("graph-analysis", () => {
       expect(lines[0]).toContain("unknown");
       expect(lines[0]).not.toContain("STALE");
       expect(lines[1]).toContain("codebase_graph_build");
+    });
+  });
+
+  // ── Unresolved call share (#172) ─────────────────────────────────────
+
+  describe("describeUnresolvedSymbolEdges", () => {
+    // The number is the persisted unresolvedEdgePct, unchanged; what these pin
+    // is that the output says what it is a share of and what that share includes.
+
+    it("keeps the one-decimal number and says what it is a share of", () => {
+      const lines = describeUnresolvedSymbolEdges(57.5);
+      expect(lines[0]).toBe("  Unresolved: 57.5% of captured symbol edges did not match a project symbol");
+    });
+
+    it("names every edge kind counted, and runtime builtins and external libraries as part of the share", () => {
+      const [, explanation] = describeUnresolvedSymbolEdges(57.5);
+      expect(explanation).toContain("calls, imports, re-exports and type or value references");
+      expect(explanation).toContain("runtime builtins");
+      expect(explanation).toContain("external libraries");
+      expect(explanation).toContain("only GDScript engine calls are left out");
+      expect(explanation).toContain("not a resolver failure rate");
+    });
+
+    it("renders a fully resolved graph with the same shape", () => {
+      const lines = describeUnresolvedSymbolEdges(0);
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toContain("Unresolved: 0.0% of captured symbol edges");
     });
   });
 });

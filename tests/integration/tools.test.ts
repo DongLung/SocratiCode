@@ -3,10 +3,10 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { graphCollectionName, projectIdFromPath } from "../../src/config.js";
 import { QDRANT_COLLECTION_PREFIX, SOCRATICODE_VERSION } from "../../src/constants.js";
-import { invalidateGraphCache, rebuildGraph } from "../../src/services/code-graph.js";
+import { invalidateGraphCache, rebuildGraph, removeGraph } from "../../src/services/code-graph.js";
 import { getClient } from "../../src/services/qdrant.js";
 import { stopAllWatchers } from "../../src/services/watcher.js";
 import { handleContextTool } from "../../src/tools/context-tools.js";
@@ -221,6 +221,39 @@ describe("graph tool handlers", () => {
       expect(result).toContain(`Built by: v${SOCRATICODE_VERSION}`);
       expect(result).not.toContain("STALE");
       expect(result).not.toContain("Built by: unknown");
+    });
+  });
+
+  describe("codebase_graph_status unresolved call share (#172)", () => {
+    it("states the share as captured symbol edges unmatched to a project symbol, builtins included", async () => {
+      // Every call here targets the runtime, so the unchanged metric is 100%;
+      // what this pins is that the definition reaches the output beside it.
+      // An ambient explicit id would write this graph over another project's.
+      vi.stubEnv("SOCRATICODE_PROJECT_ID", undefined);
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-unresolved-share-"));
+      fs.mkdirSync(path.join(root, "src"), { recursive: true });
+      fs.writeFileSync(
+        path.join(root, "src", "clock.ts"),
+        "export function tick(): string {\n  setTimeout(() => {}, 1);\n  return JSON.stringify({ at: Date.now() });\n}\n",
+        "utf-8",
+      );
+      try {
+        await rebuildGraph(root);
+
+        const result = await handleGraphTool("codebase_graph_status", {
+          projectPath: root,
+        });
+
+        expect(result).toContain("Status: READY");
+        expect(result).toContain("Unresolved: 100.0% of captured symbol edges did not match a project symbol");
+        expect(result).toContain("Symbol edges are calls, imports, re-exports and type or value references.");
+        expect(result).toContain("runtime builtins and external libraries");
+        expect(result).not.toMatch(/Unresolved: 100\.0%\n/);
+      } finally {
+        await removeGraph(root);
+        vi.unstubAllEnvs();
+        try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
+      }
     });
   });
 

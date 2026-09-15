@@ -944,7 +944,7 @@ TypeScript / JavaScript / TSX, Python, Go, Rust, Java, Kotlin, Scala, C#, C, C++
 - `multiple-candidates` — name matched in more than one dependency; all candidates kept
 - `unresolved` — no symbol found anywhere reachable; left as a name-only edge
 
-`SymbolGraphMeta.unresolvedEdgePct` exposes how much of the call graph is fuzzy — useful as a quality signal.
+`SymbolGraphMeta.unresolvedEdgePct` is the percentage of captured symbol edges that matched no project symbol: `confidence: "unresolved"` over every `SymbolEdge` of any kind (call, import, re-export, type or value reference), the GDScript `engine` ones excepted. A member call is reduced to its terminal name, so a call into a runtime builtin or an external library (`setTimeout`, `JSON.stringify`, an SDK client's `pull`) is counted exactly like a project method that failed to resolve: the resolver cannot tell an external `includes` from a project one, and a callee-name allowlist would misclassify legitimate project methods. Read the value as coverage of the project's own symbols, not as a resolver failure rate; it runs high on healthy TypeScript/JavaScript code (issue #172).
 
 #### Accepted limits — what the call graph does not see
 
@@ -955,7 +955,7 @@ The call graph is built from static analysis without type inference. These class
 - **Macros** — Rust (`println!`, custom `macro_rules!`) and C / C++ preprocessor macros are not expanded. Macro invocations are captured as calls to the macro *name*, not to whatever the expansion actually calls.
 - **Framework magic** — Dependency injection (Spring `@Autowired`, Angular DI, NestJS providers), ORM metaprogramming (Rails `has_many`, ActiveRecord callbacks), decorator-driven routing where the handler is never named at a call site (Django class-based view dispatch, some FastAPI patterns), and similar indirection goes through the framework rather than through a direct call. A method that is only called via `@Autowired` will show zero callers in `codebase_impact`.
 
-`SymbolGraphMeta.unresolvedEdgePct` is the quality signal for this class of limit: consistently high values (>20%) indicate either heavy framework magic in the codebase or a language where extractor coverage is incomplete. Users running `codebase_impact` on a service-oriented codebase with heavy DI should treat "zero callers" as a hint to double-check, not a guarantee.
+`SymbolGraphMeta.unresolvedEdgePct` is the quality signal for this class of limit, read with the definition above: the share counts every captured symbol edge that no project symbol matched, GDScript `engine` calls excepted, runtime and external APIs included, so a high value on a runtime-heavy codebase is the expected shape rather than a finding, and the number alone does not separate a genuine gap (heavy framework magic, a language where extractor coverage is incomplete) from those external calls. Users running `codebase_impact` on a service-oriented codebase with heavy DI should treat "zero callers" as a hint to double-check, not a guarantee.
 
 #### Per-file incremental updates (Phase F)
 
@@ -1287,6 +1287,7 @@ Parameters:
 Returns:
   If build in progress: Status BUILDING with phase, progress % (and a skipped count when non-zero), elapsed time
   If ready: Status READY with node/edge count, last built time, cache status, last build duration, and files skipped when non-zero
+  If a symbol graph exists: its file, symbol and call-edge counts, plus the unresolved share — the percentage of captured symbol edges (calls, imports, re-exports, type and value references) not matched to a project symbol, runtime builtins and external libraries included, GDScript engine calls excluded
   If not found: Instructions to build
 ```
 
