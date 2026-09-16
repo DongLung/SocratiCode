@@ -22,7 +22,11 @@ vi.mock("../../src/services/graph-inputs.js", async (importOriginal) => {
       const real = actual.createGraphInputRecorder(projectRoot);
       return {
         ...real,
-        finish: (extras: ReadonlySet<string>, capabilities: string) => {
+        finish: (
+          extras: ReadonlySet<string>,
+          capabilities: string,
+          pythonRoots?: readonly string[],
+        ) => {
           moving.sealAttempts++;
           if (moving.throwOther) throw new TypeError("something genuinely broken");
           if (moving.failuresLeft > 0) {
@@ -31,7 +35,7 @@ vi.mock("../../src/services/graph-inputs.js", async (importOriginal) => {
               new Map([["src/index.ts", "read twice, with different content each time"]]),
             );
           }
-          return real.finish(extras, capabilities);
+          return real.finish(extras, capabilities, pythonRoots);
         },
       };
     },

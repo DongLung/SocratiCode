@@ -156,8 +156,9 @@ const sortedRecord = <T>(entries: Iterable<[string, T]>): Record<string, T> =>
 /**
  * Hash of the inputs the build reads from configuration rather than from the
  * tree: which extra extensions count as source, which extensions are mapped to
- * another language's grammar, whether dotfiles and `.gitignore` are honoured,
- * and how large a file the graph will still read.
+ * another language's grammar, which configured Python roots are searched and
+ * in what order, whether dotfiles and `.gitignore` are honoured, and how large
+ * a file the graph will still read.
  */
 /**
  * Which parsers were available to the build, as one hash.
@@ -181,10 +182,18 @@ export function graphCapabilitiesHash(input: {
   );
 }
 
-export function graphSettingsHash(extraExtensions: ReadonlySet<string>): string {
+export function graphSettingsHash(
+  extraExtensions: ReadonlySet<string>,
+  pythonRoots: readonly string[] = [],
+): string {
   return hashContent(
     JSON.stringify({
       extraExtensions: [...extraExtensions].sort(),
+      // Preserve the pre-pythonRoots fingerprint when the feature is unused,
+      // so an upgrade alone does not rebuild every existing project's graph.
+      // Order is significant when roots are configured because they are
+      // searched in declared order.
+      ...(pythonRoots.length > 0 ? { pythonRoots: [...pythonRoots] } : {}),
       // Decides whether an extensionless file can become a node at all, so
       // toggling it moves the node set with no file on disk changing.
       indexExtensionless: indexExtensionlessEnabled(),
@@ -294,7 +303,11 @@ export interface GraphInputRecorder {
    *
    * @throws {GraphInputsMovedDuringBuild} if any file was observed two ways.
    */
-  finish(extraExtensions: ReadonlySet<string>, capabilities: string): GraphInputRecord;
+  finish(
+    extraExtensions: ReadonlySet<string>,
+    capabilities: string,
+    pythonRoots?: readonly string[],
+  ): GraphInputRecord;
 }
 
 export function createGraphInputRecorder(projectRoot: string): GraphInputRecorder {
@@ -397,7 +410,7 @@ export function createGraphInputRecorder(projectRoot: string): GraphInputRecorde
       const key = rel(absolutePath);
       if (!directories.has(key)) unreadableDirectories.add(key);
     },
-    finish(extraExtensions, capabilities) {
+    finish(extraExtensions, capabilities, pythonRoots = []) {
       if (conflicts.size > 0) throw new GraphInputsMovedDuringBuild(new Map(conflicts));
       return {
         version: GRAPH_INPUTS_VERSION,
@@ -409,7 +422,7 @@ export function createGraphInputRecorder(projectRoot: string): GraphInputRecorde
         unreadable: [...unreadable].sort(),
         unreadableDirectories: [...unreadableDirectories].sort(),
         directories: sortedRecord(directories),
-        settings: graphSettingsHash(extraExtensions),
+        settings: graphSettingsHash(extraExtensions, pythonRoots),
       };
     },
   };
@@ -578,6 +591,7 @@ export async function decideGraphRebuild(
   change: GraphChangeSummary,
   extraExtensions: ReadonlySet<string>,
   capabilities: string,
+  pythonRoots: readonly string[] = [],
 ): Promise<GraphRebuildDecision> {
   const record = parseGraphInputRecord(stored);
   if (!record) {
@@ -602,7 +616,7 @@ export async function decideGraphRebuild(
       `built by SocratiCode ${record.builtByVersion}, running ${SOCRATICODE_VERSION}`,
     );
   }
-  if (record.settings !== graphSettingsHash(extraExtensions)) {
+  if (record.settings !== graphSettingsHash(extraExtensions, pythonRoots)) {
     return rebuildFor("graph configuration changed since the last build");
   }
   if (change.hasAdditions) {

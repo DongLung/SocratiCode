@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { QDRANT_COLLECTION_PREFIX } from "./constants.js";
+import { QDRANT_COLLECTION_PREFIX, toForwardSlash } from "./constants.js";
 import { logger } from "./services/logger.js";
 
 // ── Branch detection ─────────────────────────────────────────────────────
@@ -278,6 +278,8 @@ interface SocratiCodeConfig {
   projectId?: string;
   /** Paths (absolute or relative to this file) of related projects to search alongside this one. */
   linkedProjects?: string[];
+  /** Project-root-relative directories Python treats as additional import roots. */
+  pythonRoots?: string[];
 }
 
 /**
@@ -296,6 +298,64 @@ function loadSocratiCodeConfig(projectPath: string): SocratiCodeConfig | null {
   } catch {
     return null;
   }
+}
+
+/** Whether `candidate` is inside `root`, including `root` itself. */
+function isWithinRoot(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
+}
+
+/**
+ * Load the effective Python import roots from `.socraticode.json`.
+ *
+ * Entries are interpreted relative to the project root, normalised to
+ * forward-slash project-relative paths, deduplicated in declared order, and
+ * kept only when they resolve to an existing directory inside the project.
+ * Absolute paths, paths that escape the project (including through symlinks),
+ * non-directories, missing paths, malformed values, and an unusable config
+ * file are ignored. Returning an empty list preserves the legacy resolver
+ * exactly.
+ */
+export function loadPythonRoots(projectPath: string): string[] {
+  const resolvedRoot = path.resolve(projectPath);
+  const config = loadSocratiCodeConfig(resolvedRoot);
+  if (!config || !Array.isArray(config.pythonRoots)) return [];
+
+  let realRoot: string;
+  try {
+    realRoot = fs.realpathSync(resolvedRoot);
+  } catch {
+    return [];
+  }
+
+  const roots: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of config.pythonRoots) {
+    if (typeof entry !== "string") continue;
+    const trimmed = entry.trim();
+    if (!trimmed || path.posix.isAbsolute(trimmed) || path.win32.isAbsolute(trimmed)) continue;
+
+    const platformPath = trimmed.replace(/[\\/]+/g, path.sep);
+    const candidate = path.resolve(resolvedRoot, platformPath);
+    if (!isWithinRoot(resolvedRoot, candidate)) continue;
+
+    let realCandidate: string;
+    try {
+      if (!fs.statSync(candidate).isDirectory()) continue;
+      realCandidate = fs.realpathSync(candidate);
+    } catch {
+      continue;
+    }
+    if (!isWithinRoot(realRoot, realCandidate)) continue;
+
+    const normalized = toForwardSlash(path.relative(realRoot, realCandidate)) || ".";
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    roots.push(normalized);
+  }
+
+  return roots;
 }
 
 /**

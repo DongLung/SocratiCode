@@ -4,10 +4,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { loadPythonRoots } from "../../src/config.js";
 import {
   DETECT_HEAD_BYTES,
+  EXTENSION_LANGUAGE_MAP,
   EXTRA_EXTENSIONS,
   hashContent,
+  indexExtensionlessEnabled,
   MAX_GRAPH_FILE_BYTES,
   SOCRATICODE_VERSION,
 } from "../../src/constants.js";
@@ -28,6 +31,7 @@ import {
   type GraphInputRecord,
   GraphInputsMovedDuringBuild,
   graphCapabilitiesHash,
+  graphSettingsHash,
 } from "../../src/services/graph-inputs.js";
 import {
   addFileToFixture,
@@ -99,6 +103,26 @@ describe("graph input invalidation", () => {
   afterAll(() => fixture.cleanup());
 
   describe("what the build reports", () => {
+    it("preserves the legacy settings fingerprint when Python roots are not configured", () => {
+      const legacySettings = hashContent(
+        JSON.stringify({
+          extraExtensions: [...EXTRA_EXTENSIONS].sort(),
+          indexExtensionless: indexExtensionlessEnabled(),
+          extensionLanguageMap: [...EXTENSION_LANGUAGE_MAP.entries()].sort(
+            ([a], [b]) => (a < b ? -1 : a > b ? 1 : 0),
+          ),
+          includeDotFiles:
+            (process.env.INCLUDE_DOT_FILES ?? "false").toLowerCase() === "true",
+          respectGitignore:
+            (process.env.RESPECT_GITIGNORE ?? "true").toLowerCase() !== "false",
+          maxGraphFileBytes: MAX_GRAPH_FILE_BYTES,
+        }),
+      );
+
+      expect(graphSettingsHash(EXTRA_EXTENSIONS)).toBe(legacySettings);
+      expect(record.settings).toBe(legacySettings);
+    });
+
     it("records the source it parsed, and the manifest and ignore file it read", () => {
       expect(record.version).toBe(GRAPH_INPUTS_VERSION);
       expect(record.builtByVersion).toBe(SOCRATICODE_VERSION);
@@ -297,6 +321,68 @@ describe("graph input invalidation", () => {
       } finally {
         if (before === undefined) delete process.env.INDEX_EXTENSIONLESS;
         else process.env.INDEX_EXTENSIONLESS = before;
+      }
+    });
+
+    it("rebuilds when effective Python roots are added", async () => {
+      const configPath = at(".socraticode.json");
+      fs.mkdirSync(at("dags"), { recursive: true });
+      fs.writeFileSync(configPath, JSON.stringify({ pythonRoots: ["dags"] }));
+      try {
+        await expect(
+          decideGraphRebuild(
+            fixture.root,
+            record,
+            quiet(),
+            EXTRA_EXTENSIONS,
+            await currentGraphCapabilities(),
+            loadPythonRoots(fixture.root),
+          ),
+        ).resolves.toMatchObject({
+          rebuild: true,
+          reason: "graph configuration changed since the last build",
+        });
+      } finally {
+        fs.rmSync(configPath, { force: true });
+        fs.rmSync(at("dags"), { recursive: true, force: true });
+      }
+    });
+
+    it("keeps matching Python roots, then rebuilds when they change or are removed", async () => {
+      const configPath = at(".socraticode.json");
+      fs.mkdirSync(at("dags"), { recursive: true });
+      fs.mkdirSync(at("python"), { recursive: true });
+      fs.writeFileSync(configPath, JSON.stringify({ pythonRoots: ["dags"] }));
+      try {
+        const configured = (await buildCodeGraph(fixture.root)).graphInputs;
+        const capabilities = await currentGraphCapabilities();
+        const decideConfigured = () =>
+          decideGraphRebuild(
+            fixture.root,
+            configured,
+            quiet(),
+            EXTRA_EXTENSIONS,
+            capabilities,
+            loadPythonRoots(fixture.root),
+          );
+
+        await expect(decideConfigured()).resolves.toMatchObject({ rebuild: false });
+
+        fs.writeFileSync(configPath, JSON.stringify({ pythonRoots: ["python"] }));
+        await expect(decideConfigured()).resolves.toMatchObject({
+          rebuild: true,
+          reason: "graph configuration changed since the last build",
+        });
+
+        fs.rmSync(configPath);
+        await expect(decideConfigured()).resolves.toMatchObject({
+          rebuild: true,
+          reason: "graph configuration changed since the last build",
+        });
+      } finally {
+        fs.rmSync(configPath, { force: true });
+        fs.rmSync(at("dags"), { recursive: true, force: true });
+        fs.rmSync(at("python"), { recursive: true, force: true });
       }
     });
 
