@@ -1109,6 +1109,35 @@ Results are tagged with `[project-name]` labels showing which project each resul
 
 > **Note:** Each linked project must be independently indexed (`codebase_index`) before it can be searched.
 
+### Python Import Roots
+
+Python projects whose import root is not the project root, `src/`, `lib/`, or a
+root declared by `pyproject.toml` can list their runtime path entries in the
+project-root `.socraticode.json`. For example, Apache Airflow adds `dags/` to
+`sys.path`, so a DAG repository can declare:
+
+```json
+{
+  "pythonRoots": ["dags"]
+}
+```
+
+Entries must name existing project-root-relative directories. They are trimmed,
+normalized, and deduplicated while preserving their declared order. Absolute
+paths, paths outside the project root (including escaping symlinks), missing
+paths, files, and non-string values are ignored. If `pythonRoots` is absent,
+empty, or has no usable entry, Python resolution behaves exactly as before.
+
+Resolution keeps the existing probes first: the project root, project-root
+`src/` and `lib/`, and the importing file's directory. Configured roots are
+then tried in their declared order, followed by roots derived from applicable
+`pyproject.toml` manifests. This lets an explicit runtime layout take precedence
+over manifest-derived alternatives without changing existing projects.
+
+Adding, removing, reordering, or changing the effective roots rebuilds the code
+graph on the next incremental update. It does not rebuild or invalidate the
+code/vector index, and no manual re-index is required.
+
 ### Branch-Aware Indexing
 
 By default, all branches of a project share the same index. When you switch branches, changed files are re-indexed by the watcher, and the index reflects the current branch state.

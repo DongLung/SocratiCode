@@ -2722,21 +2722,23 @@ export function resolveImport(
       );
       if (sibling) return sibling;
 
-      // Manifest-declared import roots (issue #107), nearest first. The probes
-      // above reach `src/` and `lib/` at the project root and the importing
-      // file's own directory; neither reaches `<package>/src/`, where a
-      // workspace puts each package's modules, so cross-package imports and a
-      // package's own absolute self-imports resolved to nothing.
+      // Additional import roots: explicit `.socraticode.json` roots first in
+      // declared order (issue #171), then manifest-declared roots nearest first
+      // (issue #107). The probes above reach `src/` and `lib/` at the project
+      // root and the importing file's own directory; neither reaches `dags/`
+      // or `<package>/src/`, so convention-root and cross-package imports — and
+      // a package's own absolute self-imports — resolved to nothing.
       //
-      // The list is already scoped to this file and ordered by proximity by
-      // pythonRootsForFile — a root that is not on the file's ancestor path
-      // and not a declared workspace member never appears here, and a package's
-      // own root is tried before a sibling package's.
+      // The manifest portion is already scoped to this file and ordered by
+      // proximity by pythonRootsForFile — a root that is not on the file's
+      // ancestor path and not a declared workspace member never appears here,
+      // and a package's own root is tried before a sibling package's.
       //
       // A self match here ends resolution, like the root and `src/` probes
-      // above: the roots are ordered containing-first, so the root that
-      // supplies the source file itself is the nearest path entry this file
-      // has, and every root behind it belongs to a sibling package.
+      // above. Configured order explicitly models sys.path order; manifest
+      // roots are ordered containing-first, so the root supplying the source
+      // file is the nearest inferred path entry and roots behind it belong to
+      // sibling packages.
       for (const importRoot of pythonImportRoots ?? []) {
         const inRoot = resolveRelativePath(
           path.posix.join(importRoot, modulePath), projectPath, projectPath, fileSet, [".py"],

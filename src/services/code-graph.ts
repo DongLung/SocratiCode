@@ -8,7 +8,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Lang, registerDynamicLanguage } from "@ast-grep/napi";
-import { graphCollectionName, projectIdFromPath } from "../config.js";
+import { graphCollectionName, loadPythonRoots, projectIdFromPath } from "../config.js";
 import { ELIXIR_TEMPLATE_EXTENSIONS, EXTENSION_LANGUAGE_MAP, EXTRA_EXTENSIONS, getLanguageFromExtension, MAX_GRAPH_FILE_BYTES, toForwardSlash } from "../constants.js";
 import type {
   CodeGraph, CodeGraphEdge, CodeGraphNode,
@@ -267,6 +267,7 @@ export async function shouldRebuildGraph(
       change,
       extraExtensions ?? EXTRA_EXTENSIONS,
       await currentGraphCapabilities(),
+      loadPythonRoots(resolved),
     );
   } catch (err) {
     // Failing to answer is not an answer. Anything unexpected here leaves the
@@ -1200,6 +1201,7 @@ export async function buildCodeGraph(
   const resolvedPath = path.resolve(projectPath);
   const recorder = createGraphInputRecorder(resolvedPath);
   const effectiveExtras = extraExtensions ?? EXTRA_EXTENSIONS;
+  const configuredPythonRoots = loadPythonRoots(resolvedPath);
   const aliases = await loadPathAliases(resolvedPath, recorder);
   const { files, detectedExts } = await getGraphableFiles(resolvedPath, extraExtensions, recorder);
   const fileSet = new Set(files);
@@ -1356,21 +1358,29 @@ export async function buildCodeGraph(
   // resolver's project-root probe cannot reach, so without these roots every
   // cross-package import — and every package's own absolute self-import —
   // resolved to null and the file graph came out all but empty (issue #107).
-  // An empty list keeps the resolver's old behavior exactly.
+  // Explicit `.socraticode.json` roots precede these inferred roots in their
+  // declared order (issue #171). Empty lists keep the resolver's old behavior
+  // exactly.
   const hasPython = files.some(
     (f) => getLanguageFromExtension(path.extname(f).toLowerCase()) === "python",
   );
   const pythonManifests = hasPython ? buildPythonManifests(resolvedPath, recorder) : [];
-  // Which roots apply, and in what order, depends on where the importing file
-  // sits, so it is resolved per directory rather than once for the project —
-  // cached because a package directory typically holds many files.
+  // Which manifest roots apply, and in what order, depends on where the
+  // importing file sits, so the combined list is resolved per directory rather
+  // than once for the project — cached because a package directory typically
+  // holds many files.
   const pythonRootsByDir = new Map<string, string[]>();
   const pythonRootsFor = (relPath: string): string[] | undefined => {
-    if (pythonManifests.length === 0) return undefined;
+    if (configuredPythonRoots.length === 0 && pythonManifests.length === 0) return undefined;
     const dir = toForwardSlash(path.dirname(relPath));
     let roots = pythonRootsByDir.get(dir);
     if (!roots) {
-      roots = pythonRootsForFile(pythonManifests, dir);
+      roots = [
+        ...new Set([
+          ...configuredPythonRoots,
+          ...pythonRootsForFile(pythonManifests, dir),
+        ]),
+      ];
       pythonRootsByDir.set(dir, roots);
     }
     return roots;
@@ -1747,6 +1757,10 @@ export async function buildCodeGraph(
     rustCrateRootsByFile,
     rustInlineScopedCalls,
     rustInlineDeclaredSymbols,
-    graphInputs: recorder.finish(effectiveExtras, await currentGraphCapabilities()),
+    graphInputs: recorder.finish(
+      effectiveExtras,
+      await currentGraphCapabilities(),
+      configuredPythonRoots,
+    ),
   };
 }

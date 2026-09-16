@@ -5,7 +5,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { collectionName, contextCollectionName, detectGitBranch, graphCollectionName, loadLinkedProjects, projectIdFromPath, resolveLinkedCollections, sanitizeBranchName } from "../../src/config.js";
+import {
+  collectionName,
+  contextCollectionName,
+  detectGitBranch,
+  graphCollectionName,
+  loadLinkedProjects,
+  loadPythonRoots,
+  projectIdFromPath,
+  resolveLinkedCollections,
+  sanitizeBranchName,
+} from "../../src/config.js";
 
 describe("config", () => {
   // Clean up env overrides between tests
@@ -240,6 +250,83 @@ describe("config", () => {
         JSON.stringify({ someOtherField: true }),
       );
       expect(loadLinkedProjects(projectDir)).toEqual([]);
+    });
+  });
+
+  describe("loadPythonRoots", () => {
+    let tmpDir: string;
+    let projectDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-python-roots-"));
+      projectDir = path.join(tmpDir, "project");
+      fs.mkdirSync(path.join(projectDir, "dags"), { recursive: true });
+      fs.mkdirSync(path.join(projectDir, "services", "api"), { recursive: true });
+      fs.mkdirSync(path.join(tmpDir, "outside"), { recursive: true });
+      fs.writeFileSync(path.join(projectDir, "not-a-directory.py"), "pass\n");
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("returns no roots when the setting is absent, empty, or malformed", () => {
+      expect(loadPythonRoots(projectDir)).toEqual([]);
+
+      fs.writeFileSync(
+        path.join(projectDir, ".socraticode.json"),
+        JSON.stringify({ pythonRoots: [] }),
+      );
+      expect(loadPythonRoots(projectDir)).toEqual([]);
+
+      fs.writeFileSync(path.join(projectDir, ".socraticode.json"), "not json");
+      expect(loadPythonRoots(projectDir)).toEqual([]);
+
+      fs.writeFileSync(
+        path.join(projectDir, ".socraticode.json"),
+        JSON.stringify({ pythonRoots: "dags" }),
+      );
+      expect(loadPythonRoots(projectDir)).toEqual([]);
+    });
+
+    it("normalizes and deduplicates valid directories in declared order", () => {
+      fs.writeFileSync(
+        path.join(projectDir, ".socraticode.json"),
+        JSON.stringify({
+          pythonRoots: [" services/api ", "dags/../dags", "dags", "services\\api"],
+        }),
+      );
+
+      expect(loadPythonRoots(projectDir)).toEqual(["services/api", "dags"]);
+    });
+
+    it("rejects absolute, outside-root, missing, and non-directory entries", () => {
+      fs.writeFileSync(
+        path.join(projectDir, ".socraticode.json"),
+        JSON.stringify({
+          pythonRoots: [
+            path.join(tmpDir, "outside"),
+            "C:\\outside",
+            "../outside",
+            "missing",
+            "not-a-directory.py",
+            42,
+            null,
+          ],
+        }),
+      );
+
+      expect(loadPythonRoots(projectDir)).toEqual([]);
+    });
+
+    it.runIf(process.platform !== "win32")("rejects a symlink that escapes the project", () => {
+      fs.symlinkSync(path.join(tmpDir, "outside"), path.join(projectDir, "outside-link"));
+      fs.writeFileSync(
+        path.join(projectDir, ".socraticode.json"),
+        JSON.stringify({ pythonRoots: ["outside-link"] }),
+      );
+
+      expect(loadPythonRoots(projectDir)).toEqual([]);
     });
   });
 
