@@ -4,6 +4,48 @@ All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
 
+## [1.14.0](https://github.com/giancarloerra/socraticode/compare/v1.13.3...v1.14.0) (2026-09-16)
+
+### Features
+
+* **graph:** support configured Python import roots ([fe2def5](https://github.com/giancarloerra/socraticode/commit/fe2def54fd1d288842055904fa652e3ade21ffcb))
+* **index:** reclaim stored identities explicitly ([a74cf6c](https://github.com/giancarloerra/socraticode/commit/a74cf6cd4975b2b87c4db549008f121d84e8053e))
+
+### Bug Fixes
+
+* **config:** keep the resolver documented, and only advise what is true ([ef9edbc](https://github.com/giancarloerra/socraticode/commit/ef9edbcbe158fc596bfe50a76ee6de902b40f0a5))
+* **config:** treat an unusable branch name as no branch, and unsign the fixture ([6401b8c](https://github.com/giancarloerra/socraticode/commit/6401b8c597936a4b7567433a015cf2f529c718da))
+* **config:** warn when branch-aware mode is ignored by an explicit project id ([68f4ded](https://github.com/giancarloerra/socraticode/commit/68f4dedf96981c3750f0daeb32b1a7fa9e4d4854))
+* **graph:** name the engine exclusion in the unresolved share, pin the test identity ([65638d3](https://github.com/giancarloerra/socraticode/commit/65638d395725d9240666f8beec367ec3073905ba))
+* **graph:** say what the unresolved call share counts ([8330069](https://github.com/giancarloerra/socraticode/commit/83300696936ae32c3eb60b9e71a708b8941defc2)), closes [#172](https://github.com/giancarloerra/socraticode/issues/172)
+* **graph:** state the denominator as captured symbol edges ([974d572](https://github.com/giancarloerra/socraticode/commit/974d5721d56ff1762981d138a9f720b9f67260f3))
+* **index, watch:** stand down when the re-entered lock is the barrier's ([4866280](https://github.com/giancarloerra/socraticode/commit/4866280da243386487be8520484f86369466c272))
+* **index, watch:** take the writer lock non-reentrantly, never by inference ([fdf60d7](https://github.com/giancarloerra/socraticode/commit/fdf60d75f0377278e145570e08ab24beb00b5590))
+* **indexing:** address the review on the character-cap split ([29e5323](https://github.com/giancarloerra/socraticode/commit/29e5323ee56ed7a107f6b4b4770af93ba05fc036))
+* **indexing:** preserve minified chunk boundaries ([cacc518](https://github.com/giancarloerra/socraticode/commit/cacc518c0e66c448b2edeb5b64fb3a9d3d79e6b4))
+* **indexing:** split chunks at the character cap instead of truncating ([d57ae21](https://github.com/giancarloerra/socraticode/commit/d57ae216a661b87c7509cc395e484468b9856a50))
+* **prune:** correct the reclamation pass after review ([0eb2b6f](https://github.com/giancarloerra/socraticode/commit/0eb2b6f3b84dba1127908faac4e9919ed8e6ba21))
+* **prune:** cover the manual-inspection hold in the confirmation token ([9677af3](https://github.com/giancarloerra/socraticode/commit/9677af3eae721b26eb2dad58711c957fe0d6dbde))
+* **prune:** hold back candidates of unsettled names and stop on a lost barrier ([d8bfc17](https://github.com/giancarloerra/socraticode/commit/d8bfc17066327a9e7d98d57adc750448c119bb16))
+* **prune:** settle ambiguous names, close the barrier race, cache by identity ([71e0a86](https://github.com/giancarloerra/socraticode/commit/71e0a86bf35260d732547e31b3d68614f7aded2a))
+
+### Performance
+
+* **graph:** rebuild only when a graph input changed ([cb480de](https://github.com/giancarloerra/socraticode/commit/cb480de38c9e25fbba416b1516ccfef81fccd265)), closes [#120](https://github.com/giancarloerra/socraticode/issues/120)
+
+### Documentation
+
+* explain Codex Desktop npx PATH failure ([88feca7](https://github.com/giancarloerra/socraticode/commit/88feca7a069320a38bcb56942f9e72ef844e7d38))
+* **extension:** carry the explicit-id exception into the extension README ([b629db1](https://github.com/giancarloerra/socraticode/commit/b629db16e439d612f0cd3d5c040ceb978c5ef709))
+* **indexing:** describe legacy chunk coverage ([202bb86](https://github.com/giancarloerra/socraticode/commit/202bb86fc0e76e5d10afeb6b7920ff6e5ac5ff09))
+
+### Tests
+
+* **graph:** remove the fixture graph the unresolved-share case persists ([0e68469](https://github.com/giancarloerra/socraticode/commit/0e68469cdd10b15c44503d5a89446c520c32434d))
+* **indexing:** exercise chunk line mapping ([4a0d508](https://github.com/giancarloerra/socraticode/commit/4a0d5083b57976fcbc0a6594be3fa26bbc287adc))
+* **indexing:** retrieve intact minified identifiers ([afe6647](https://github.com/giancarloerra/socraticode/commit/afe664707d4a2460f41cfc53b7544470447e43ee))
+* **reclamation:** pin identities against an ambient SOCRATICODE_PROJECT_ID ([fbd8278](https://github.com/giancarloerra/socraticode/commit/fbd827841b4ec07e2cfd195de9f21468d57b5aec))
+
 ## [1.13.3](https://github.com/giancarloerra/socraticode/compare/v1.13.2...v1.13.3) (2026-09-10)
 
 ### Bug Fixes
