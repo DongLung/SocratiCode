@@ -790,7 +790,7 @@ Google Generative AI embedding provider. Requires `GOOGLE_API_KEY`.
 | `deleteFileChunks` | `(collection, filePath) → Promise<void>` | Remove all chunks for a file |
 | `searchChunks` | `(collection, query, limit?, fileFilter?, languageFilter?) → Promise<SearchResult[]>` | Hybrid search (dense + BM25, RRF-fused) |
 | `searchChunksWithFilter` | `(collection, query, limit, filters) → Promise<SearchResult[]>` | Hybrid search with arbitrary payload filters |
-| `getCollectionInfo` | `(name) → Promise<{ pointsCount, status } \| null>` | Collection info (null if not found, throws on transient errors) |
+| `getCollectionInfo` | `(name) → Promise<{ pointsCount, status } \| null>` | Collection info (null if not found, throws on transient errors; first waits for this process's in-flight `ensureCollection` of the same name) |
 | `resetMetadataCollectionCache` | `() → void` | Reset cached metadata collection readiness (testing) |
 | `saveProjectMetadata` | `(collName, projectPath, filesTotal, filesIndexed, fileHashes, indexingStatus) → Promise<void>` | Persist project metadata and file hashes |
 | `loadProjectHashes` | `(collName) → Promise<Map<string, string> \| null>` | Load file content hashes (throws on transient errors) |

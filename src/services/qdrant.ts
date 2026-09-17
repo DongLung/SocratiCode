@@ -1286,7 +1286,20 @@ function denseVectorSizeFromInfo(info: unknown): number | undefined {
     : undefined;
 }
 
+/**
+ * Read a collection's point count, status and dense vector size.
+ *
+ * Returns `null` only when the collection does not exist; every other failure
+ * propagates.
+ *
+ * A read of a collection this process is still initializing waits for that
+ * initialization first: Qdrant can answer a read made during the create with a
+ * 500 rather than 404 or the new collection. If the initialization fails, that
+ * failure propagates. Reads with no local initialization in flight are
+ * unaffected.
+ */
 export async function getCollectionInfo(name: string): Promise<CollectionInfo | null> {
+  await collectionEnsureInFlight.get(name);
   const qdrant = getClient();
   try {
     const info = await qdrant.getCollection(name);
