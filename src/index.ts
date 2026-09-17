@@ -26,6 +26,9 @@ const server = new McpServer(
   {
     capabilities: {
       tools: {},
+      // Required for the log forwarding below: the SDK sends notifications/message
+      // (and accepts logging/setLevel) only when the server declares it.
+      logging: {},
     },
   },
 );
@@ -519,6 +522,10 @@ async function main() {
   process.stdin.on("end", () => shutdown("stdin EOF"));
   process.stdin.on("error", () => shutdown("stdin error"));
   process.stdin.on("close", () => shutdown("stdin close"));
+  // Log lines go to stdout as notifications/message. Once the host has closed
+  // its end, that write fails with EPIPE; unhandled, the error would exit the
+  // process in the middle of shutdown instead of letting it finish.
+  process.stdout.on("error", () => shutdown("stdout error"));
 }
 
 main().catch((err) => {
