@@ -89,6 +89,53 @@ describe("qdrant error wrapping (issue #55)", () => {
         expect((err as Error & { cause?: unknown }).cause).toBe(originalErr);
       }
     });
+
+    // #178: the client's `message` is only the HTTP status text; the reason the
+    // server gave is on `data.status.error` and must survive the wrap, once.
+    const REASON = "Service internal error: 0 of 0 read operations failed";
+
+    it("includes Qdrant's reason exactly once, keeping the message shape and cause", async () => {
+      const apiError = Object.assign(new Error("Internal Server Error"), {
+        status: 500,
+        data: { status: { error: REASON } },
+      });
+      mockGetCollection.mockRejectedValueOnce(apiError);
+
+      const { getCollectionInfo } = await import("../../src/services/qdrant.js");
+      const err = (await getCollectionInfo("some_collection").catch((e: unknown) => e)) as Error & {
+        cause?: unknown;
+      };
+
+      expect(err.message).toBe(
+        `getCollectionInfo(collection=some_collection) failed [status 500]: Internal Server Error: ${REASON}`,
+      );
+      expect(err.message.split(REASON)).toHaveLength(2);
+      expect(err.cause).toBe(apiError);
+    });
+
+    it("does not repeat a reason the underlying message already carries", async () => {
+      const apiError = Object.assign(new Error(`Internal Server Error: ${REASON}`), {
+        status: 500,
+        data: { status: { error: REASON } },
+      });
+      mockGetCollection.mockRejectedValueOnce(apiError);
+
+      const { getCollectionInfo } = await import("../../src/services/qdrant.js");
+      const err = (await getCollectionInfo("some_collection").catch((e: unknown) => e)) as Error;
+
+      expect(err.message.split(REASON)).toHaveLength(2);
+    });
+
+    it("still returns null on a 404 that carries a Qdrant reason", async () => {
+      const notFound = Object.assign(new Error("Not Found"), {
+        status: 404,
+        data: { status: { error: "Not found: Collection `missing_collection` doesn't exist!" } },
+      });
+      mockGetCollection.mockRejectedValueOnce(notFound);
+
+      const { getCollectionInfo } = await import("../../src/services/qdrant.js");
+      await expect(getCollectionInfo("missing_collection")).resolves.toBeNull();
+    });
   });
 
   describe("loadProjectHashes", () => {

@@ -77,20 +77,21 @@ export function describeQdrantError(err: unknown): string {
 /**
  * Wrap a Qdrant client error with operation context so callers further up the
  * stack (and ultimately the MCP response) get a useful message instead of a
- * bare "Internal Server Error". Preserves the original error via `cause` and
- * surfaces the HTTP status code if the client attached one.
+ * bare "Internal Server Error". Preserves the original error via `cause`,
+ * surfaces the HTTP status code if the client attached one, and includes the
+ * reason the server gave (see {@link describeQdrantError}) exactly once.
  *
  * Used at every catch-and-rethrow site whose intent is "let this propagate so
  * callers don't mistake a transient blip for missing data". Wrapping at that
  * boundary turns "Internal Server Error" into something like:
- *   "loadProjectHashes(socraticode_<hash>) failed [status 500]: Internal Server Error"
+ *   "getCollectionInfo(collection=codebase_<id>) failed [status 500]: Internal Server Error: Service internal error: 0 of 0 read operations failed"
  */
 function wrapQdrantError(
   operation: string,
   context: Record<string, unknown>,
   err: unknown,
 ): Error {
-  const original = err instanceof Error ? err.message : String(err);
+  const original = describeQdrantError(err);
   const status =
     (err as { status?: number })?.status ?? (err as { statusCode?: number })?.statusCode;
   const ctxStr = Object.entries(context)
