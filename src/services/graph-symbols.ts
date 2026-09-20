@@ -2647,8 +2647,8 @@ function phpAliasAt(
  *               force is a question about position, not just about the file.
  * @param aliasAt Resolver for the imports in force at an offset.
  * @returns The name to resolve and the local alias, or null for a spelling no
- *          project symbol can answer (a pseudo-type, a built-in, or a form
- *          that is not an identifier at all).
+ *          project symbol can answer (a pseudo-type, a built-in, or a form the
+ *          guard below does not admit as an identifier).
  */
 function phpTypeRefName(
   raw: string,
@@ -2657,6 +2657,14 @@ function phpTypeRefName(
 ): { calleeName: string; localAlias?: string } | null {
   const segments = raw.trim().replace(/^\\+/, "").split("\\");
   const terminal = segments[segments.length - 1]?.trim() ?? "";
+  // Deliberately ASCII-only, and narrower than the language: PHP states its
+  // identifier rule over bytes — `[a-zA-Z_\x80-\xff][a-zA-Z0-9_\x80-\xff]*` —
+  // and every byte of a UTF-8 multibyte sequence is at least 0x80, so `class X
+  // extends Café` is legal and the grammar parses `Café` as a `name`. This
+  // guard drops it, and the reference gets no edge. The same ASCII assumption
+  // is made by `extractCalleeNamePhp`, so widening it belongs in one change
+  // covering both guards rather than here, where it would be a behaviour
+  // change riding along with an unrelated fix.
   if (!/^[A-Za-z_]\w*$/.test(terminal)) return null;
   if (PHP_NON_SYMBOL_TYPES.has(terminal.toLowerCase())) return null;
   // Only a bare name can carry an alias: a written-out path names its own
