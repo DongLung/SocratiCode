@@ -2563,6 +2563,74 @@ const PHP_NON_SYMBOL_TYPES = new Set([
 ]);
 
 /**
+ * One `use` clause's import, tagged with where it was declared.
+ *
+ * PHP resolves a name at compile time against the imports seen so far, so an
+ * alias reaches only the code BELOW its `use`. Without the offset, a table
+ * keyed on the local spelling alone applies the import backwards:
+ *
+ *     namespace A; class One extends Al {} use X\Base as Al;
+ *
+ * fatals with `Class "A\Al" not found` under the real runtime, yet a
+ * position-blind table rewrote the parent to `Base` — an edge to a class the
+ * reference never names, which is the one outcome this extractor must not
+ * produce. Move the `use` above the class and the runtime does resolve the
+ * parent to `X\Base`, so the offset is the whole of the difference.
+ */
+interface PhpAliasEntry {
+  /** Source offset of the `use` clause that declares it. */
+  readonly offset: number;
+  /** Imported short name. */
+  readonly imported: string;
+}
+
+/**
+ * Local spelling → every `use` that declares it, in no particular order.
+ *
+ * A list rather than a single entry: the lookup picks by offset, so it must
+ * hold every declaration of a spelling, and grouping by spelling keeps that
+ * scan down to the one or two entries a local name actually has.
+ */
+type PhpAliasTable = Map<string, PhpAliasEntry[]>;
+
+/**
+ * (local spelling, reference offset) → the imported short name in force there,
+ * or undefined where nothing imports that spelling.
+ */
+type PhpAliasLookup = (local: string, offset: number) => string | undefined;
+
+/** Record one `use` clause's import under its local spelling. */
+function phpAliasAdd(table: PhpAliasTable, local: string, entry: PhpAliasEntry): void {
+  const entries = table.get(local);
+  if (entries) entries.push(entry);
+  else table.set(local, [entry]);
+}
+
+/**
+ * The import in force for `local` at `offset`: the latest `use` declared
+ * before it, and nothing at all when every declaration comes after.
+ *
+ * The scan does not assume the entries are ordered — it compares offsets — so
+ * it does not depend on the traversal handing back `use` clauses in source
+ * order.
+ */
+function phpAliasAt(
+  table: PhpAliasTable,
+  local: string,
+  offset: number,
+): string | undefined {
+  const entries = table.get(local);
+  if (!entries) return undefined;
+  let best: PhpAliasEntry | undefined;
+  for (const entry of entries) {
+    if (entry.offset < offset && (best === undefined || entry.offset > best.offset)) {
+      best = entry;
+    }
+  }
+  return best?.imported;
+}
+
+/**
  * The short name a PHP type reference names, plus the local spelling it was
  * written with when the two differ.
  *
@@ -2570,19 +2638,22 @@ const PHP_NON_SYMBOL_TYPES = new Set([
  * path (`Base\Base`) or a bare name (`Base`) that a `use` statement may have
  * aliased. Only the terminal segment can match a declared symbol — PHP symbols
  * are indexed under the short name they were declared with — so every form
- * reduces to it. A bare name is then mapped through the file's `use` aliases,
- * which is what makes `use App\Base\Base as Ancestor; class X extends Ancestor`
- * an edge to `Base`.
+ * reduces to it. A bare name is then mapped through the `use` aliases in force
+ * where it is written, which is what makes
+ * `use App\Base\Base as Ancestor; class X extends Ancestor` an edge to `Base`.
  *
  * @param raw Type spelling exactly as written, leading `\` included.
- * @param aliases Local spelling → imported short name for the file's `use`s.
+ * @param offset Source offset of the reference. Which `use` statements are in
+ *               force is a question about position, not just about the file.
+ * @param aliasAt Resolver for the imports in force at an offset.
  * @returns The name to resolve and the local alias, or null for a spelling no
  *          project symbol can answer (a pseudo-type, a built-in, or a form
  *          that is not an identifier at all).
  */
 function phpTypeRefName(
   raw: string,
-  aliases: ReadonlyMap<string, string>,
+  offset: number,
+  aliasAt: PhpAliasLookup,
 ): { calleeName: string; localAlias?: string } | null {
   const segments = raw.trim().replace(/^\\+/, "").split("\\");
   const terminal = segments[segments.length - 1]?.trim() ?? "";
@@ -2591,7 +2662,7 @@ function phpTypeRefName(
   // Only a bare name can carry an alias: a written-out path names its own
   // terminal segment and no `use` statement renames it.
   if (segments.length > 1) return { calleeName: terminal };
-  const imported = aliases.get(terminal);
+  const imported = aliasAt(terminal, offset);
   return imported && imported !== terminal
     ? { calleeName: imported, localAlias: terminal }
     : { calleeName: terminal };
@@ -2633,8 +2704,8 @@ interface PhpNamespaceScope {
   readonly start: number;
   /** Source offset one past the last character in scope. */
   readonly end: number;
-  /** Local spelling → imported short name, for this namespace alone. */
-  readonly aliases: Map<string, string>;
+  /** The `use` imports declared in this namespace alone, with their offsets. */
+  readonly aliases: PhpAliasTable;
 }
 
 /**
@@ -2673,7 +2744,7 @@ function buildPhpNamespaceScopes(root: any): PhpNamespaceScope[] {
     return {
       start: range.start.index,
       end: braced ? range.end.index : (defs[i + 1]?.range().start.index ?? endOfFile),
-      aliases: new Map<string, string>(),
+      aliases: new Map() as PhpAliasTable,
     };
   });
   return scopes.sort((a, b) => a.end - a.start - (b.end - b.start));
@@ -2700,24 +2771,37 @@ function buildPhpNamespaceScopes(root: any): PhpNamespaceScope[] {
  * A file with no namespace, or one whose reference sits outside every declared
  * namespace, falls back to the whole file's aliases — the behaviour before this
  * became scope-aware, and the right answer for the single-namespace file that
- * nearly every PSR-4 autoloaded class is.
+ * nearly every PSR-4 autoloaded class is. That fallback is position-scoped too:
+ * the runtime is no more forgiving at global scope, where the same file without
+ * its `namespace` line fatals with `Class "Al" not found`.
+ *
+ * Scope selects the table; the offset then selects within it, because being in
+ * the right namespace is necessary for an import to apply but not sufficient —
+ * it must also have been declared above the reference. See
+ * {@link PhpAliasEntry}.
  *
  * @param root Parsed root of a PHP file.
- * @returns Source offset → the alias table in force at that offset.
+ * @returns (local spelling, offset) → the import in force there.
  */
 // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
-function buildPhpAliasResolver(root: any): (offset: number) => ReadonlyMap<string, string> {
+function buildPhpAliasResolver(root: any): PhpAliasLookup {
   const scopes = buildPhpNamespaceScopes(root);
   const scopeAt = (offset: number): PhpNamespaceScope | undefined =>
     scopes.find((s) => offset >= s.start && offset < s.end);
-  const fileAliases = new Map<string, string>();
+  const fileAliases: PhpAliasTable = new Map();
   for (const clause of safeFindAll(root, "namespace_use_clause")) {
-    const entry = phpUseClauseAlias(clause);
-    if (!entry) continue;
-    fileAliases.set(entry[0], entry[1]);
-    scopeAt(clause.range().start.index)?.aliases.set(entry[0], entry[1]);
+    const alias = phpUseClauseAlias(clause);
+    if (!alias) continue;
+    const entry: PhpAliasEntry = {
+      offset: clause.range().start.index,
+      imported: alias[1],
+    };
+    phpAliasAdd(fileAliases, alias[0], entry);
+    const scope = scopeAt(entry.offset);
+    if (scope) phpAliasAdd(scope.aliases, alias[0], entry);
   }
-  return (offset) => scopeAt(offset)?.aliases ?? fileAliases;
+  return (local, offset) =>
+    phpAliasAt(scopeAt(offset)?.aliases ?? fileAliases, local, offset);
 }
 
 function extractFromPhp(
@@ -2809,16 +2893,17 @@ function extractFromPhp(
   // Aliases are resolved per namespace, not per file: see
   // {@link buildPhpAliasResolver} for why a file-wide table fabricates an edge
   // in a file that opens more than one namespace.
-  const aliasesAt = buildPhpAliasResolver(root);
+  const aliasAt = buildPhpAliasResolver(root);
   const typeRefs: ExtractedSymbols["rawCalls"] = [];
   // Takes the node rather than its text and line so the alias lookup can use
   // the reference's own source offset — two braced namespace blocks fit on one
-  // line, and a line number could not tell their references apart.
+  // line, a line number could not tell their references apart, and an alias
+  // declared later on the same line must not reach back to it.
   // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
   const pushTypeRef = (node: any, kind: EdgeKind): void => {
     const range = node.range();
     const line = range.start.line + 1;
-    const ref = phpTypeRefName(node.text(), aliasesAt(range.start.index));
+    const ref = phpTypeRefName(node.text(), range.start.index, aliasAt);
     if (!ref) return;
     typeRefs.push({
       callerId: findCallerId(scopes, line, moduleSym.id),

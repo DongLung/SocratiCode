@@ -371,4 +371,51 @@ class One extends Al {}
       ]);
     });
   });
+
+  /**
+   * `use` is scoped to the code that FOLLOWS it, not to the whole namespace.
+   *
+   * PHP resolves a name at compile time against the imports seen so far, so an
+   * alias declared below a reference never reaches it. Verified against the
+   * runtime: `namespace A; class One extends Al {} use X\Base as Al;` fatals
+   * with `Class "A\Al" not found`, while the same file with the `use` moved
+   * above the class resolves the parent to `X\Base`. Applying the alias
+   * backwards therefore names a class the reference does not — a fabricated
+   * edge, which is the one outcome this extractor must not produce.
+   */
+  describe("position-scoped `use` aliases", () => {
+    it("does not apply an alias declared after the reference", () => {
+      // `Al` here is `A\Al`, which nothing imports; the honest edge keeps the
+      // raw spelling and stays unresolved rather than pointing at `X\Base`.
+      const php = "<?php\nnamespace A; class One extends Al {} use X\\Base as Al;\n";
+      expect(refsIn(php)).toEqual([{ calleeName: "Al", kind: "type_reference" }]);
+    });
+
+    it("still applies an alias declared before the reference", () => {
+      // Positive control for the test above: the fix must be position-aware,
+      // not "drop every alias". Same file, `use` moved ahead of the class.
+      const php = "<?php\nnamespace A; use X\\Base as Al; class One extends Al {}\n";
+      expect(refsIn(php)).toEqual([
+        { calleeName: "Base", kind: "type_reference", localAlias: "Al" },
+      ]);
+    });
+
+    it("applies the same rule through the no-namespace fallback", () => {
+      // The whole-file fallback is a separate path from the per-namespace
+      // tables, and the runtime is just as strict there: the global-scope form
+      // fatals with `Class "Al" not found`.
+      const php = "<?php\nclass One extends Al {}\nuse X\\Base as Al;\n";
+      expect(refsIn(php)).toEqual([{ calleeName: "Al", kind: "type_reference" }]);
+    });
+
+    it("keeps a later reference resolving through an earlier `use`", () => {
+      // Positive control for the fallback: one `use` at the top of a
+      // namespace-free file must still reach everything below it.
+      const php = "<?php\nuse X\\Base as Al;\nclass One extends Al {}\nclass Two extends Al {}\n";
+      expect(refsIn(php)).toEqual([
+        { calleeName: "Base", kind: "type_reference", localAlias: "Al" },
+        { calleeName: "Base", kind: "type_reference", localAlias: "Al" },
+      ]);
+    });
+  });
 });
