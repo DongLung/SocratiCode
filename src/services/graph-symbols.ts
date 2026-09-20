@@ -2859,13 +2859,22 @@ function extractFromPhp(
     }
   }
 
-  // Parameter and return types. `named_type` is the only wrapper that carries
-  // a project name, and `findAll` on a node includes that node itself, so one
-  // search unwraps `?Foo`, `A|B`, `A&B` and `(A&B)|null` alike and yields
-  // nothing for a `primitive_type`. `property_promotion_parameter` is a
-  // constructor-promoted property, which is a parameter in the signature.
+  // Parameter, property and return types. `named_type` is the only wrapper that
+  // carries a project name, and `findAll` on a node includes that node itself,
+  // so one search unwraps `?Foo`, `A|B`, `A&B` and `(A&B)|null` alike and
+  // yields nothing for a `primitive_type`.
+  //
+  // The two property kinds are the same declaration written two ways:
+  // `property_promotion_parameter` is a constructor-promoted property, which is
+  // a parameter in the signature, and `property_declaration` is the longhand
+  // `private ?PersonRecord $rec = null;`. Reading only the promoted form made a
+  // class's collaborator visible or invisible according to which spelling it
+  // happened to use, which is not a distinction the graph should draw.
   const TYPED_NODE_FIELDS: ReadonlyArray<[readonly string[], string]> = [
-    [["simple_parameter", "property_promotion_parameter"], "type"],
+    [
+      ["simple_parameter", "property_promotion_parameter", "property_declaration"],
+      "type",
+    ],
     [["method_declaration", "function_definition"], "return_type"],
   ];
   for (const [kinds, field] of TYPED_NODE_FIELDS) {

@@ -101,6 +101,28 @@ describe("PHP structural type-reference extraction", () => {
       .toEqual(["Repo"]);
   });
 
+  it("records a longhand typed property's type", () => {
+    // The same collaborator as the promoted form above, written out. Reading
+    // only the promoted one made the edge depend on the spelling.
+    expect(namesOf("<?php\nclass P {\n    private ?PersonRecord $rec = null;\n}\n"))
+      .toEqual(["PersonRecord"]);
+  });
+
+  it("records every member of a union-typed property", () => {
+    expect(namesOf("<?php\nclass P {\n    public Alpha|Beta $either;\n}\n"))
+      .toEqual(["Alpha", "Beta"]);
+  });
+
+  it("emits nothing for a primitive-typed property", () => {
+    const php = `<?php
+class P {
+    public int $n = 0;
+    protected static string $s = '';
+    public readonly ?bool $flag;
+}`;
+    expect(refsIn(php)).toEqual([]);
+  });
+
   it("unwraps a nullable type", () => {
     expect(namesOf("<?php\nclass C {\n    public function go(?Base $b): ?Other {}\n}\n"))
       .toEqual(["Base", "Other"]);
