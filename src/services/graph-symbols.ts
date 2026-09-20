@@ -2832,8 +2832,24 @@ function extractFromPhp(
       scopes.push({ name, startLine, endLine, symbolId: sym.id });
     }
   }
+  // Each declaration's `return_type`, stashed by node kind as the symbols are
+  // read. These two kinds are walked here anyway, so asking `safeFindAll` for
+  // them again below re-walked the whole tree twice per file for nodes already
+  // in hand. Stashed rather than emitted: `pushTypeRef` attributes a reference
+  // to its innermost caller and so needs `scopes` complete, and the emission
+  // order - parameters and properties first, then methods, then functions -
+  // decides which of two same-key edges survives the dedupe, so it is kept
+  // exactly as it was. Collected above the name guard, because a declaration
+  // the guard skips still contributed its return type before.
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const returnTypes = new Map<string, any[]>();
   for (const k of ["function_definition", "method_declaration"]) {
+    // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+    const forKind: any[] = [];
+    returnTypes.set(k, forKind);
     for (const m of safeFindAll(root, k)) {
+      const returnType = m.field("return_type");
+      if (returnType) forKind.push(returnType);
       const nameNode = safeFind(m, "name");
       if (!nameNode) continue;
       const name = nameNode.text();
@@ -2893,7 +2909,16 @@ function extractFromPhp(
   // Aliases are resolved per namespace, not per file: see
   // {@link buildPhpAliasResolver} for why a file-wide table fabricates an edge
   // in a file that opens more than one namespace.
-  const aliasAt = buildPhpAliasResolver(root);
+  // Built on first use, not per file. The resolver walks the tree twice - for
+  // `namespace_definition` and `namespace_use_clause` - and most PHP files hold
+  // no structural type reference at all, so building it eagerly charged every
+  // one of them for a table nothing would read. Memoised on the first lookup,
+  // since a file that has one reference usually has many.
+  let aliasResolver: PhpAliasLookup | undefined;
+  const aliasAt: PhpAliasLookup = (local, offset) => {
+    if (aliasResolver === undefined) aliasResolver = buildPhpAliasResolver(root);
+    return aliasResolver(local, offset);
+  };
   const typeRefs: ExtractedSymbols["rawCalls"] = [];
   // Takes the node rather than its text and line so the alias lookup can use
   // the reference's own source offset — two braced namespace blocks fit on one
@@ -2955,23 +2980,23 @@ function extractFromPhp(
   // `private ?PersonRecord $rec = null;`. Reading only the promoted form made a
   // class's collaborator visible or invisible according to which spelling it
   // happened to use, which is not a distinction the graph should draw.
-  const TYPED_NODE_FIELDS: ReadonlyArray<[readonly string[], string]> = [
-    [
-      ["simple_parameter", "property_promotion_parameter", "property_declaration"],
-      "type",
-    ],
-    [["method_declaration", "function_definition"], "return_type"],
-  ];
-  for (const [kinds, field] of TYPED_NODE_FIELDS) {
-    for (const k of kinds) {
-      for (const node of safeFindAll(root, k)) {
-        const typeNode = node.field(field);
-        if (!typeNode) continue;
-        for (const named of safeFindAll(typeNode, "named_type")) {
-          pushTypeRef(named, "type_reference");
-        }
-      }
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const pushNamedTypes = (typeNode: any): void => {
+    for (const named of safeFindAll(typeNode, "named_type")) {
+      pushTypeRef(named, "type_reference");
     }
+  };
+  for (const k of ["simple_parameter", "property_promotion_parameter", "property_declaration"]) {
+    for (const node of safeFindAll(root, k)) {
+      const typeNode = node.field("type");
+      if (typeNode) pushNamedTypes(typeNode);
+    }
+  }
+  // Return types, from the nodes the declaration loop already held, in the
+  // order the pass that used to re-walk for them emitted: methods, then
+  // functions.
+  for (const k of ["method_declaration", "function_definition"]) {
+    for (const typeNode of returnTypes.get(k) ?? []) pushNamedTypes(typeNode);
   }
 
   // Deduplicate on (callerId, calleeName, kind), as the TypeScript extractor
