@@ -2598,37 +2598,126 @@ function phpTypeRefName(
 }
 
 /**
- * The `use`-alias table for one PHP file: local spelling → imported short name.
+ * The (local spelling → imported short name) pair one `use` clause declares.
  *
  * Covers the plain (`use A\B\C;`), aliased (`use A\B\C as D;`) and grouped
- * (`use A\{B, C as D};`) forms in one traversal — the grammar files a group's
- * members as `namespace_use_clause` nodes of their own, so `findAll` reaches
- * all three. `use function` and `use const` import a function or a constant
- * rather than a type and are skipped, so a function alias can never answer a
- * type reference.
+ * (`use A\{B, C as D};`) forms — the grammar files a group's members as
+ * `namespace_use_clause` nodes of their own, so one `findAll` over a file
+ * reaches all three. `use function` and `use const` import a function or a
+ * constant rather than a type and yield null, so a function alias can never
+ * answer a type reference.
  *
- * @param root Parsed root of a PHP file.
- * @returns Local spelling → imported short name, empty when the file has no
- *          class `use` statements.
+ * @param clause A `namespace_use_clause` node.
+ * @returns `[local spelling, imported short name]`, or null for a clause that
+ *          imports no type.
  */
 // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
-function buildPhpUseAliases(root: any): Map<string, string> {
-  const aliases = new Map<string, string>();
-  for (const clause of safeFindAll(root, "namespace_use_clause")) {
+function phpUseClauseAlias(clause: any): [string, string] | null {
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const kids: any[] = clause.children();
+  if (kids.some((c) => c.kind() === "function" || c.kind() === "const")) return null;
+  const names = kids.filter((c) => c.kind() === "name" || c.kind() === "qualified_name");
+  if (names.length === 0) return null;
+  const importedPath = names[0].text().trim().replace(/^\\+/, "").split("\\");
+  const imported = importedPath[importedPath.length - 1]?.trim() ?? "";
+  if (!imported) return null;
+  const aliased = names.length > 1 && kids.some((c) => c.kind() === "as");
+  const local = aliased ? names[names.length - 1].text().trim() : imported;
+  if (!local) return null;
+  return [local, imported];
+}
+
+/** One namespace's extent in the source, and the `use` aliases declared in it. */
+interface PhpNamespaceScope {
+  /** Source offset of the first character in scope, inclusive. */
+  readonly start: number;
+  /** Source offset one past the last character in scope. */
+  readonly end: number;
+  /** Local spelling → imported short name, for this namespace alone. */
+  readonly aliases: Map<string, string>;
+}
+
+/**
+ * Every namespace a PHP file declares, as a source extent, shortest first.
+ *
+ * PHP writes a namespace in two forms and scopes them differently:
+ *
+ *   - braced, `namespace A { … }`, whose scope is exactly its braces, and which
+ *     is the only form that may appear more than once with different names in
+ *     one file *and* enclose code;
+ *   - unbraced, `namespace A;`, whose scope runs from the statement to the next
+ *     `namespace` statement or to end of file.
+ *
+ * The grammar gives an unbraced `namespace_definition` a range covering only
+ * `namespace A;` itself, so its extent has to be computed from its successor —
+ * hence the two branches. Sorting shortest-first makes a lookup's first hit the
+ * innermost scope, which keeps a malformed or nested tree from resolving
+ * against an outer namespace when an inner one also contains the reference.
+ *
+ * @param root Parsed root of a PHP file.
+ * @returns Extents with empty alias tables, shortest extent first; empty for a
+ *          file that declares no namespace.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+function buildPhpNamespaceScopes(root: any): PhpNamespaceScope[] {
+  const endOfFile = root.range().end.index;
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const defs: any[] = safeFindAll(root, "namespace_definition").sort(
     // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
-    const kids: any[] = clause.children();
-    if (kids.some((c) => c.kind() === "function" || c.kind() === "const")) continue;
-    const names = kids.filter((c) => c.kind() === "name" || c.kind() === "qualified_name");
-    if (names.length === 0) continue;
-    const importedPath = names[0].text().trim().replace(/^\\+/, "").split("\\");
-    const imported = importedPath[importedPath.length - 1]?.trim() ?? "";
-    if (!imported) continue;
-    const aliased = names.length > 1 && kids.some((c) => c.kind() === "as");
-    const local = aliased ? names[names.length - 1].text().trim() : imported;
-    if (!local) continue;
-    aliases.set(local, imported);
+    (a: any, b: any) => a.range().start.index - b.range().start.index,
+  );
+  const scopes: PhpNamespaceScope[] = defs.map((def, i) => {
+    const range = def.range();
+    // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+    const braced = def.children().some((c: any) => c.kind() === "compound_statement");
+    return {
+      start: range.start.index,
+      end: braced ? range.end.index : (defs[i + 1]?.range().start.index ?? endOfFile),
+      aliases: new Map<string, string>(),
+    };
+  });
+  return scopes.sort((a, b) => a.end - a.start - (b.end - b.start));
+}
+
+/**
+ * Resolve a source offset to the `use`-alias table in force there.
+ *
+ * PHP scopes a `use` statement to its enclosing namespace, not to the file. One
+ * table per file therefore applies an alias where nothing imports it, and that
+ * FABRICATES an edge rather than omitting one:
+ *
+ *     namespace A { use X\Base as Al; class One extends Al {} }
+ *     namespace B { class Two extends Al {} }
+ *
+ * `Two` extends `B\Al` — a class this file never names — yet a file-wide table
+ * rewrote it to `Base` and drew an edge to `A`'s import. Every other decision in
+ * this extractor prefers an honest `unresolved` over a guess, so a wrong edge is
+ * the one outcome it must not produce.
+ *
+ * Offsets, not lines: two braced namespace blocks are legal on one line, and a
+ * line number cannot tell their references apart.
+ *
+ * A file with no namespace, or one whose reference sits outside every declared
+ * namespace, falls back to the whole file's aliases — the behaviour before this
+ * became scope-aware, and the right answer for the single-namespace file that
+ * nearly every PSR-4 autoloaded class is.
+ *
+ * @param root Parsed root of a PHP file.
+ * @returns Source offset → the alias table in force at that offset.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+function buildPhpAliasResolver(root: any): (offset: number) => ReadonlyMap<string, string> {
+  const scopes = buildPhpNamespaceScopes(root);
+  const scopeAt = (offset: number): PhpNamespaceScope | undefined =>
+    scopes.find((s) => offset >= s.start && offset < s.end);
+  const fileAliases = new Map<string, string>();
+  for (const clause of safeFindAll(root, "namespace_use_clause")) {
+    const entry = phpUseClauseAlias(clause);
+    if (!entry) continue;
+    fileAliases.set(entry[0], entry[1]);
+    scopeAt(clause.range().start.index)?.aliases.set(entry[0], entry[1]);
   }
-  return aliases;
+  return (offset) => scopeAt(offset)?.aliases ?? fileAliases;
 }
 
 function extractFromPhp(
@@ -2717,10 +2806,19 @@ function extractFromPhp(
   // reach it and the edge stays `unresolved`. That is the honest outcome —
   // the only alternative is the repository-wide short-name guessing this is
   // built to avoid.
-  const useAliases = buildPhpUseAliases(root);
+  // Aliases are resolved per namespace, not per file: see
+  // {@link buildPhpAliasResolver} for why a file-wide table fabricates an edge
+  // in a file that opens more than one namespace.
+  const aliasesAt = buildPhpAliasResolver(root);
   const typeRefs: ExtractedSymbols["rawCalls"] = [];
-  const pushTypeRef = (raw: string, line: number, kind: EdgeKind): void => {
-    const ref = phpTypeRefName(raw, useAliases);
+  // Takes the node rather than its text and line so the alias lookup can use
+  // the reference's own source offset — two braced namespace blocks fit on one
+  // line, and a line number could not tell their references apart.
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const pushTypeRef = (node: any, kind: EdgeKind): void => {
+    const range = node.range();
+    const line = range.start.line + 1;
+    const ref = phpTypeRefName(node.text(), aliasesAt(range.start.index));
     if (!ref) return;
     typeRefs.push({
       callerId: findCallerId(scopes, line, moduleSym.id),
@@ -2743,7 +2841,7 @@ function extractFromPhp(
       for (const child of clause.children()) {
         const kind = child.kind();
         if (kind !== "name" && kind !== "qualified_name") continue;
-        pushTypeRef(child.text(), child.range().start.line + 1, "type_reference");
+        pushTypeRef(child, "type_reference");
       }
     }
   }
@@ -2756,7 +2854,7 @@ function extractFromPhp(
     for (const child of node.children()) {
       const kind = child.kind();
       if (kind !== "name" && kind !== "qualified_name") continue;
-      pushTypeRef(child.text(), child.range().start.line + 1, "call");
+      pushTypeRef(child, "call");
       break; // the class name is the only such child; `arguments` is its own node
     }
   }
@@ -2776,7 +2874,7 @@ function extractFromPhp(
         const typeNode = node.field(field);
         if (!typeNode) continue;
         for (const named of safeFindAll(typeNode, "named_type")) {
-          pushTypeRef(named.text(), named.range().start.line + 1, "type_reference");
+          pushTypeRef(named, "type_reference");
         }
       }
     }

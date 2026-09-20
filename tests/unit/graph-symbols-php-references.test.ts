@@ -249,4 +249,104 @@ class LogoutController extends Controller {
     expect(new Set(namesOf(php)))
       .toEqual(new Set(["Controller", "Request", "JsonResponse"]));
   });
+
+  /**
+   * `use` is scoped to its namespace, not to its file.
+   *
+   * A single alias table per file applies an import where nothing declares one,
+   * which fabricates an edge to a class the file never names — the one failure
+   * mode this extractor is built to avoid, and strictly worse than the omission
+   * the structural edges were added to fix.
+   */
+  describe("namespace-scoped `use` aliases", () => {
+    it("confines a braced namespace's alias to its own block", () => {
+      // `B` imports nothing, so `extends Al` there names `B\Al`. Rewriting it
+      // to `Base` would point the edge at `A`'s import — a class `B` never
+      // mentions.
+      const php = `<?php
+namespace A { use X\\Base as Al; class One extends Al {} }
+namespace B { class Two extends Al {} }
+`;
+      expect(refsIn(php)).toEqual([
+        { calleeName: "Base", kind: "type_reference", localAlias: "Al" },
+        { calleeName: "Al", kind: "type_reference" },
+      ]);
+    });
+
+    it("gives each braced block its own meaning for the same local spelling", () => {
+      const php = `<?php
+namespace A { use X\\Base as Al; class One extends Al {} }
+namespace B { use Y\\Other as Al; class Two extends Al {} }
+`;
+      expect(refsIn(php)).toEqual([
+        { calleeName: "Base", kind: "type_reference", localAlias: "Al" },
+        { calleeName: "Other", kind: "type_reference", localAlias: "Al" },
+      ]);
+    });
+
+    it("tells two braced blocks apart when they share a line", () => {
+      // Two namespace blocks on one line is legal PHP, so the block a
+      // reference belongs to cannot be decided by line number — only by its
+      // source offset.
+      const php =
+        "<?php\nnamespace A { use X\\\\Base as Al; class One extends Al {} }"
+        + " namespace B { class Two extends Al {} }\n";
+      expect(refsIn(php)).toEqual([
+        { calleeName: "Base", kind: "type_reference", localAlias: "Al" },
+        { calleeName: "Al", kind: "type_reference" },
+      ]);
+    });
+
+    it("scopes an unbraced namespace's alias to the run of code it opens", () => {
+      // `namespace A;` runs to the next `namespace` statement, so `B` is no
+      // more entitled to `A`'s import than a braced block would be.
+      const php = `<?php
+namespace A;
+use X\\Base as Al;
+class One extends Al {}
+
+namespace B;
+class Two extends Al {}
+`;
+      expect(refsIn(php)).toEqual([
+        { calleeName: "Base", kind: "type_reference", localAlias: "Al" },
+        { calleeName: "Al", kind: "type_reference" },
+      ]);
+    });
+
+    it("resolves through the block's own `use` in a single braced namespace", () => {
+      // Non-regression guard: the common single-namespace file must keep the
+      // behaviour it already had.
+      const php = `<?php
+namespace A {
+    use X\\Base as Al;
+    class One extends Al {}
+}
+`;
+      expect(refsIn(php)).toEqual([
+        { calleeName: "Base", kind: "type_reference", localAlias: "Al" },
+      ]);
+    });
+
+    it("resolves through the file's `use` in a single unbraced namespace", () => {
+      // Non-regression guard: the shape of nearly every PSR-4 autoloaded class.
+      const php = `<?php
+namespace App\\Models;
+
+use X\\Base as Al;
+
+class One extends Al {}
+`;
+      expect(refsIn(php)).toEqual([
+        { calleeName: "Base", kind: "type_reference", localAlias: "Al" },
+      ]);
+    });
+
+    it("resolves through the file's `use` when the file declares no namespace", () => {
+      // Non-regression guard: no namespace means no scope to fall back from.
+      expect(refsIn("<?php\nuse X\\Base as Al;\nclass One extends Al {}\n")).toEqual([
+        { calleeName: "Base", kind: "type_reference", localAlias: "Al" },
+      ]);
+    });
+  });
 });
