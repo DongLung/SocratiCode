@@ -186,6 +186,26 @@ For custom providers or external Qdrant, put inherited variables in Claude Code'
 
 Keep this user-scoped file private, or provide secrets through the process environment. Never commit secret values.
 
+#### Pinning the engine version
+
+By default the plugin launches `npx -y --prefer-online socraticode@latest`, which checks npm for the current release every time the server starts. Each start resolves independently, so two servers begun at different moments on one host can run different releases.
+
+`SOCRATICODE_SPEC` replaces the package specification. Unset, it resolves to `socraticode@latest` and the launcher is unchanged, so an existing installation needs no reconfiguration. Set it where the plugin's server inherits it, in Claude Code's user settings:
+
+```json
+{
+  "env": {
+    "SOCRATICODE_SPEC": "socraticode@1.14.0"
+  }
+}
+```
+
+Remove the entry to go back to the default; an empty string is a value, not an absence, and would be passed to npm as the specification.
+
+Every server on that host then resolves the same build. npm is still contacted for metadata, so start-up is not free, but a pinned version is already in the npx cache after its first resolution and is not downloaded again on each new release. A pinned engine no longer updates on its own — raise the value deliberately to pick up a release.
+
+This applies to the Claude Code plugin only. Codex and Cursor read the shared `.mcp.json`, whose launcher is unchanged; the VS Code extension exposes the equivalent `socraticode.command` and `socraticode.args` settings.
+
 See the [Claude Code plugin documentation](https://code.claude.com/docs/en/discover-plugins).
 
 #### Claude Code MCP-only installation
