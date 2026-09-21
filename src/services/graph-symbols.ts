@@ -2602,7 +2602,7 @@ interface PhpAliasEntry {
  * `use X\Base as ImportedBase; class C extends importedbase {}` resolves the
  * parent to `X\Base` under the runtime. A case-sensitive table missed that and
  * emitted the spelling as written, which names no declared symbol. Only the
- * KEY is folded - {@link PhpAliasEntry.imported} keeps the spelling the `use`
+ * KEY is folded — {@link PhpAliasEntry.imported} keeps the spelling the `use`
  * declared, because that is the name symbols are indexed under.
  */
 type PhpAliasTable = Map<string, PhpAliasEntry[]>;
@@ -2619,7 +2619,7 @@ type PhpAliasLookup = (local: string, offset: number) => string | undefined;
  * `String.prototype.toLowerCase` is Unicode-aware and PHP is not: `class É {}`
  * followed by `new é()` fails with `Class "é" not found`, while `Widget` and
  * `WIDGET` are the same class. The difference is not academic here, because a
- * non-ASCII character can fold INTO ASCII - `toLowerCase("\u212a")` (KELVIN SIGN) is `"k"` -
+ * non-ASCII character can fold INTO ASCII — `toLowerCase("\u212a")` (KELVIN SIGN) is `"k"` -
  * so a Unicode fold would let an ordinary ASCII reference match an alias
  * declared with a character PHP considers unrelated, drawing an edge the
  * runtime never would.
@@ -2689,7 +2689,7 @@ function phpTypeRefName(
   // exactly like the bare `Foo` that a `use` may alias. PHP draws the
   // opposite conclusion from the same two spellings: under
   // `use X\Other as Foo;`, `extends Foo` resolves to `X\Other` while
-  // `extends \Foo` fatals with `Class "Foo" not found` - the alias is not
+  // `extends \Foo` fatals with `Class "Foo" not found` — the alias is not
   // consulted at all. Treating `\Foo` as the alias named an entirely
   // different class from the one written.
   const fullyQualified = trimmed.startsWith("\\");
@@ -2729,7 +2729,7 @@ function phpTypeRefName(
  * Checking only the clause let the grouped form through, and checking only the
  * declaration would let the mixed group's `function c` member through. A
  * function or constant import that reaches the alias table answers a type
- * reference with a name no class was declared under - a fabricated edge.
+ * reference with a name no class was declared under — a fabricated edge.
  *
  * @param node A `namespace_use_declaration` or `namespace_use_clause`.
  */
@@ -2927,7 +2927,7 @@ function extractFromPhp(
   // them again below re-walked the whole tree twice per file for nodes already
   // in hand. Stashed rather than emitted: `pushTypeRef` attributes a reference
   // to its innermost caller and so needs `scopes` complete, and the emission
-  // order - parameters and properties first, then methods, then functions -
+  // order — parameters and properties first, then methods, then functions -
   // decides which of two same-key edges survives the dedupe, so it is kept
   // exactly as it was. Collected above the name guard, because a declaration
   // the guard skips still contributed its return type before.
@@ -3000,9 +3000,9 @@ function extractFromPhp(
   // Aliases are resolved per namespace, not per file: see
   // {@link buildPhpAliasResolver} for why a file-wide table fabricates an edge
   // in a file that opens more than one namespace.
-  // Built on first use, not per file. The resolver walks the tree twice - for
+  // Built on first use, not per file. The resolver walks the tree twice — for
   // `namespace_definition` and `namespace_use_declaration`, then the clauses
-  // inside each declaration - and most PHP files hold no structural type
+  // inside each declaration — and most PHP files hold no structural type
   // reference at all, so building it eagerly charged every one of them for a
   // table nothing would read. Memoised on the first lookup,
   // since a file that has one reference usually has many.
