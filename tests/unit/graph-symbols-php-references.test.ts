@@ -318,10 +318,10 @@ class C {
     // PHP's fold is ASCII-only: `class É {}` then `new é()` fails with
     // `Class "é" not found`, while `Widget` and `WIDGET` are one class. A
     // Unicode-aware fold is not merely stricter, it is wrong in a direction
-    // that invents edges - `"K"` (KELVIN SIGN) lowercases to ASCII `k`,
+    // that invents edges - `"\u212a"` (KELVIN SIGN) lowercases to ASCII `k`,
     // so `Kelvin` spelled with it would answer a reference to a plain
     // `kelvin` that PHP considers an unrelated name.
-    const php = "<?php\nuse X\\Base as Kelvin;\nclass C extends kelvin {}\n";
+    const php = "<?php\nuse X\\Base as \u212aelvin;\nclass C extends kelvin {}\n";
     expect(refsIn(php)).toEqual([{ calleeName: "kelvin", kind: "type_reference" }]);
   });
 

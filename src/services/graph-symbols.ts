@@ -2618,7 +2618,7 @@ type PhpAliasLookup = (local: string, offset: number) => string | undefined;
  * `String.prototype.toLowerCase` is Unicode-aware and PHP is not: `class É {}`
  * followed by `new é()` fails with `Class "é" not found`, while `Widget` and
  * `WIDGET` are the same class. The difference is not academic here, because a
- * non-ASCII character can fold INTO ASCII - `toLowerCase("K")` is `"k"` -
+ * non-ASCII character can fold INTO ASCII - `toLowerCase("\u212a")` (KELVIN SIGN) is `"k"` -
  * so a Unicode fold would let an ordinary ASCII reference match an alias
  * declared with a character PHP considers unrelated, drawing an edge the
  * runtime never would.
