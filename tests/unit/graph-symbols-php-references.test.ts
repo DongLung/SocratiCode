@@ -94,6 +94,41 @@ describe("PHP structural type-reference extraction", () => {
       .toEqual(["Base"]);
   });
 
+  it("records a closure's return type", () => {
+    // A closure's parameters were already reached by the parameter scan, so
+    // before this a collaborator named only in the return position was
+    // invisible on a closure while visible on the same signature written as a
+    // named function.
+    expect(namesOf("<?php\n$f = function (): Widget {};\n")).toEqual(["Widget"]);
+  });
+
+  it("records an arrow function's return type", () => {
+    expect(namesOf("<?php\n$f = fn (): Gadget => null;\n")).toEqual(["Gadget"]);
+  });
+
+  it("records a static closure's and a static arrow function's return types", () => {
+    expect(namesOf("<?php\n$a = static function (): Widget {};\n$b = static fn (): Gadget => null;\n"))
+      .toEqual(["Widget", "Gadget"]);
+  });
+
+  it("unwraps a closure's nullable and an arrow function's union return type", () => {
+    expect(namesOf("<?php\n$a = function (): ?Widget {};\n$b = fn (): Alpha|Beta => null;\n"))
+      .toEqual(["Widget", "Alpha", "Beta"]);
+  });
+
+  it("registers no symbol for an anonymous function", () => {
+    // Collected apart from the declaration loop for this reason: that loop
+    // files a symbol per node, and `safeFind(fn, "name")` on an anonymous
+    // function would return the first `name` in its body.
+    const { symbols } = extractSymbolsAndCalls(
+      "<?php\n$f = function (): Widget { return helper(); };\n",
+      "php",
+      ".php",
+      "t.php",
+    );
+    expect(symbols.map((s) => s.name)).toEqual(["<module>"]);
+  });
+
   it("records a constructor-promoted property's type", () => {
     // A promoted property is a parameter in the signature, and constructor
     // injection is where most modern PHP names its collaborators.
@@ -170,10 +205,57 @@ class P {
       .toEqual([{ calleeName: "Thing", kind: "type_reference" }]);
   });
 
+  it("does not let a grouped `use function` alias answer a type reference", () => {
+    // The grouped form puts `function` on the DECLARATION, not on the clause,
+    // so a per-clause check alone read this as a type import and rewrote the
+    // parent to `Base`. PHP disagrees: the same file fatals with
+    // `Class "Main\Thing" not found`.
+    expect(refsIn("<?php\nuse function App\\Fn\\{Base as Thing};\nclass X extends Thing {}\n"))
+      .toEqual([{ calleeName: "Thing", kind: "type_reference" }]);
+  });
+
+  it("does not let a grouped `use const` alias answer a type reference", () => {
+    expect(refsIn("<?php\nuse const App\\C\\{Base as Thing};\nclass X extends Thing {}\n"))
+      .toEqual([{ calleeName: "Thing", kind: "type_reference" }]);
+  });
+
+  it("applies a mixed group's type member while rejecting its function member", () => {
+    // `use A\{B, function c};` qualifies each member individually, so the
+    // declaration carries no keyword and only the per-clause check can tell
+    // the two apart. Positive control for the declaration-level check: it
+    // must not reject the whole group.
+    const php = "<?php\nuse App\\{Base, function helper};\nclass X extends Base {}\nclass Y extends helper {}\n";
+    expect(refsIn(php)).toEqual([
+      { calleeName: "Base", kind: "type_reference" },
+      { calleeName: "helper", kind: "type_reference" },
+    ]);
+  });
+
   it("names a leading-backslash FQCN by its terminal segment", () => {
     // Symbols are indexed under the short name they were declared with, so
     // only the last segment can ever match one.
     expect(namesOf("<?php\nclass X extends \\App\\Base\\Base {}\n")).toEqual(["Base"]);
+  });
+
+  it("does not let a `use` alias answer a fully-qualified single-segment name", () => {
+    // `\Foo` is rooted at the global namespace, and stripping the slash makes
+    // it indistinguishable from the bare `Foo` a `use` may alias. PHP reads
+    // the two oppositely: under `use X\Other as Foo;`, `extends Foo` resolves
+    // to `X\Other` while `extends \Foo` fatals with `Class "Foo" not found`.
+    expect(refsIn("<?php\nuse X\\Other as Foo;\nclass C extends \\Foo {}\n"))
+      .toEqual([{ calleeName: "Foo", kind: "type_reference" }]);
+  });
+
+  it("does not let a `use` alias answer a fully-qualified name in a `new`", () => {
+    expect(refsIn("<?php\nuse X\\Other as Foo;\nfunction f() { return new \\Foo(); }\n"))
+      .toEqual([{ calleeName: "Foo", kind: "call" }]);
+  });
+
+  it("still applies the alias to the same name written bare", () => {
+    // Positive control for the two above: the slash is the whole difference,
+    // and the runtime resolves this one to `X\Other`.
+    expect(refsIn("<?php\nuse X\\Other as Foo;\nclass C extends Foo {}\n"))
+      .toEqual([{ calleeName: "Other", kind: "type_reference", localAlias: "Foo" }]);
   });
 
   it("names a namespace-relative path by its terminal segment", () => {
@@ -207,6 +289,29 @@ class C {
   it("filters a built-in written in another case, PHP type names being case-insensitive", () => {
     expect(refsIn("<?php\nclass C {\n    public function a(Array $a, INT $i): VOID {}\n}\n"))
       .toEqual([]);
+  });
+
+  it("keeps `integer`, `double` and `boolean`, which PHP reads as class names", () => {
+    // These read like type keywords and are not. PHP warns
+    // `"integer" will be interpreted as a class name. Did you mean "int"?`
+    // and then resolves it as a class, so filtering them dropped a real
+    // reference from any project that declares one.
+    expect(namesOf("<?php\nclass C {\n    public function a(integer $a, double $b, boolean $c) {}\n}\n"))
+      .toEqual(["integer", "double", "boolean"]);
+  });
+
+  it("matches a `use` alias case-insensitively, as PHP resolves class names", () => {
+    // `use X\Base as ImportedBase; class C extends importedbase {}` resolves
+    // the parent to `X\Base` under the runtime. A case-sensitive table emitted
+    // `importedbase`, which names no declared symbol. The edge carries the
+    // imported spelling and keeps the local one as written.
+    expect(refsIn("<?php\nuse X\\Base as ImportedBase;\nclass C extends importedbase {}\n"))
+      .toEqual([{ calleeName: "Base", kind: "type_reference", localAlias: "importedbase" }]);
+  });
+
+  it("matches an unaliased `use` case-insensitively too", () => {
+    expect(refsIn("<?php\nuse X\\Base;\nclass C extends BASE {}\n"))
+      .toEqual([{ calleeName: "Base", kind: "type_reference", localAlias: "BASE" }]);
   });
 
   it("attributes `extends` to the class and a type hint to the method", () => {

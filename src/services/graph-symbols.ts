@@ -2555,9 +2555,14 @@ function extractFromRuby(
  * `new static()` and `new self()` both arrive as one. PHP type names are
  * case-insensitive, so membership is tested lowercased.
  */
+// `integer`, `double` and `boolean` are deliberately absent. They read like
+// type keywords and are not: PHP treats each as a CLASS name, warning
+// `"integer" will be interpreted as a class name. Did you mean "int"?` and
+// then resolving it to a class of that name. Filtering them would drop a real
+// reference from any project that declares one.
 const PHP_NON_SYMBOL_TYPES = new Set([
   "self", "parent", "static",
-  "int", "integer", "float", "double", "string", "bool", "boolean",
+  "int", "float", "string", "bool",
   "array", "object", "callable", "iterable", "mixed", "void", "never",
   "null", "false", "true",
 ]);
@@ -2585,11 +2590,19 @@ interface PhpAliasEntry {
 }
 
 /**
- * Local spelling → every `use` that declares it, in no particular order.
+ * Local spelling, lowercased → every `use` that declares it, in no particular
+ * order.
  *
  * A list rather than a single entry: the lookup picks by offset, so it must
  * hold every declaration of a spelling, and grouping by spelling keeps that
  * scan down to the one or two entries a local name actually has.
+ *
+ * Keyed lowercase because PHP matches class and alias names case-insensitively:
+ * `use X\Base as ImportedBase; class C extends importedbase {}` resolves the
+ * parent to `X\Base` under the runtime. A case-sensitive table missed that and
+ * emitted the spelling as written, which names no declared symbol. Only the
+ * KEY is folded - {@link PhpAliasEntry.imported} keeps the spelling the `use`
+ * declared, because that is the name symbols are indexed under.
  */
 type PhpAliasTable = Map<string, PhpAliasEntry[]>;
 
@@ -2599,11 +2612,12 @@ type PhpAliasTable = Map<string, PhpAliasEntry[]>;
  */
 type PhpAliasLookup = (local: string, offset: number) => string | undefined;
 
-/** Record one `use` clause's import under its local spelling. */
+/** Record one `use` clause's import under its local spelling, case-folded. */
 function phpAliasAdd(table: PhpAliasTable, local: string, entry: PhpAliasEntry): void {
-  const entries = table.get(local);
+  const key = local.toLowerCase();
+  const entries = table.get(key);
   if (entries) entries.push(entry);
-  else table.set(local, [entry]);
+  else table.set(key, [entry]);
 }
 
 /**
@@ -2619,7 +2633,7 @@ function phpAliasAt(
   local: string,
   offset: number,
 ): string | undefined {
-  const entries = table.get(local);
+  const entries = table.get(local.toLowerCase());
   if (!entries) return undefined;
   let best: PhpAliasEntry | undefined;
   for (const entry of entries) {
@@ -2655,7 +2669,17 @@ function phpTypeRefName(
   offset: number,
   aliasAt: PhpAliasLookup,
 ): { calleeName: string; localAlias?: string } | null {
-  const segments = raw.trim().replace(/^\\+/, "").split("\\");
+  const trimmed = raw.trim();
+  // A leading `\` roots the name at the global namespace, and that is decided
+  // before the slash is stripped, because stripping it makes `\Foo` look
+  // exactly like the bare `Foo` that a `use` may alias. PHP draws the
+  // opposite conclusion from the same two spellings: under
+  // `use X\Other as Foo;`, `extends Foo` resolves to `X\Other` while
+  // `extends \Foo` fatals with `Class "Foo" not found` - the alias is not
+  // consulted at all. Treating `\Foo` as the alias named an entirely
+  // different class from the one written.
+  const fullyQualified = trimmed.startsWith("\\");
+  const segments = trimmed.replace(/^\\+/, "").split("\\");
   const terminal = segments[segments.length - 1]?.trim() ?? "";
   // Deliberately ASCII-only, and narrower than the language: PHP states its
   // identifier rule over bytes — `[a-zA-Z_\x80-\xff][a-zA-Z0-9_\x80-\xff]*` —
@@ -2668,12 +2692,37 @@ function phpTypeRefName(
   if (!/^[A-Za-z_]\w*$/.test(terminal)) return null;
   if (PHP_NON_SYMBOL_TYPES.has(terminal.toLowerCase())) return null;
   // Only a bare name can carry an alias: a written-out path names its own
-  // terminal segment and no `use` statement renames it.
-  if (segments.length > 1) return { calleeName: terminal };
+  // terminal segment, and a fully-qualified one names the global namespace -
+  // no `use` statement renames either.
+  if (fullyQualified || segments.length > 1) return { calleeName: terminal };
   const imported = aliasAt(terminal, offset);
   return imported && imported !== terminal
     ? { calleeName: imported, localAlias: terminal }
     : { calleeName: terminal };
+}
+
+/**
+ * Whether a `use` node carries a `function` or `const` qualifier, making it an
+ * import of something that is not a type.
+ *
+ * Asked of two different nodes, because the grammar files the keyword in two
+ * different places and neither alone covers PHP's three spellings:
+ *
+ *     use function A\B as C;        // keyword on the CLAUSE
+ *     use function A\{B as C};      // keyword on the DECLARATION
+ *     use A\{B, function c};        // keyword on the CLAUSE again, per member
+ *
+ * Checking only the clause let the grouped form through, and checking only the
+ * declaration would let the mixed group's `function c` member through. A
+ * function or constant import that reaches the alias table answers a type
+ * reference with a name no class was declared under - a fabricated edge.
+ *
+ * @param node A `namespace_use_declaration` or `namespace_use_clause`.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+function phpUseImportsNonType(node: any): boolean {
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  return node.children().some((c: any) => c.kind() === "function" || c.kind() === "const");
 }
 
 /**
@@ -2682,9 +2731,9 @@ function phpTypeRefName(
  * Covers the plain (`use A\B\C;`), aliased (`use A\B\C as D;`) and grouped
  * (`use A\{B, C as D};`) forms — the grammar files a group's members as
  * `namespace_use_clause` nodes of their own, so one `findAll` over a file
- * reaches all three. `use function` and `use const` import a function or a
- * constant rather than a type and yield null, so a function alias can never
- * answer a type reference.
+ * reaches all three. A clause that imports a function or a constant rather
+ * than a type yields null; see {@link phpUseImportsNonType} for why its
+ * caller has to make the same check of the enclosing declaration.
  *
  * @param clause A `namespace_use_clause` node.
  * @returns `[local spelling, imported short name]`, or null for a clause that
@@ -2692,9 +2741,9 @@ function phpTypeRefName(
  */
 // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
 function phpUseClauseAlias(clause: any): [string, string] | null {
+  if (phpUseImportsNonType(clause)) return null;
   // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
   const kids: any[] = clause.children();
-  if (kids.some((c) => c.kind() === "function" || c.kind() === "const")) return null;
   const names = kids.filter((c) => c.kind() === "name" || c.kind() === "qualified_name");
   if (names.length === 0) return null;
   const importedPath = names[0].text().trim().replace(/^\\+/, "").split("\\");
@@ -2797,16 +2846,24 @@ function buildPhpAliasResolver(root: any): PhpAliasLookup {
   const scopeAt = (offset: number): PhpNamespaceScope | undefined =>
     scopes.find((s) => offset >= s.start && offset < s.end);
   const fileAliases: PhpAliasTable = new Map();
-  for (const clause of safeFindAll(root, "namespace_use_clause")) {
-    const alias = phpUseClauseAlias(clause);
-    if (!alias) continue;
-    const entry: PhpAliasEntry = {
-      offset: clause.range().start.index,
-      imported: alias[1],
-    };
-    phpAliasAdd(fileAliases, alias[0], entry);
-    const scope = scopeAt(entry.offset);
-    if (scope) phpAliasAdd(scope.aliases, alias[0], entry);
+  // Walked declaration-first rather than straight to the clauses, because a
+  // `use function A\{B as C};` carries its qualifier on the declaration and
+  // its clauses look exactly like type imports from below. The per-clause
+  // check inside `phpUseClauseAlias` still has to run: a mixed group,
+  // `use A\{B, function c};`, qualifies its members individually.
+  for (const decl of safeFindAll(root, "namespace_use_declaration")) {
+    if (phpUseImportsNonType(decl)) continue;
+    for (const clause of safeFindAll(decl, "namespace_use_clause")) {
+      const alias = phpUseClauseAlias(clause);
+      if (!alias) continue;
+      const entry: PhpAliasEntry = {
+        offset: clause.range().start.index,
+        imported: alias[1],
+      };
+      phpAliasAdd(fileAliases, alias[0], entry);
+      const scope = scopeAt(entry.offset);
+      if (scope) phpAliasAdd(scope.aliases, alias[0], entry);
+    }
   }
   return (local, offset) =>
     phpAliasAt(scopeAt(offset)?.aliases ?? fileAliases, local, offset);
@@ -3000,10 +3057,28 @@ function extractFromPhp(
       if (typeNode) pushNamedTypes(typeNode);
     }
   }
-  // Return types, from the nodes the declaration loop already held, in the
-  // order the pass that used to re-walk for them emitted: methods, then
-  // functions.
-  for (const k of ["method_declaration", "function_definition"]) {
+  // A closure and an arrow function carry a return type as well, and their
+  // parameters were already reached by the `simple_parameter` scan above - so
+  // before this, `fn (): Gadget => …` named a collaborator the graph could not
+  // see, while the same signature on a named function could. Collected here
+  // rather than in the declaration loop because that loop registers a symbol
+  // per node, and neither of these declares a name: `safeFind(fn, "name")`
+  // would return the first `name` in the body and file a symbol under it.
+  for (const k of ["anonymous_function", "arrow_function"]) {
+    // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+    const forKind: any[] = [];
+    returnTypes.set(k, forKind);
+    for (const fn of safeFindAll(root, k)) {
+      const returnType = fn.field("return_type");
+      if (returnType) forKind.push(returnType);
+    }
+  }
+
+  // Return types, from the nodes the loops above already held, in the order
+  // the pass that used to re-walk for them emitted: methods, then functions.
+  // The two anonymous forms follow, so the emission order the dedupe depends
+  // on is unchanged for every file that has none.
+  for (const k of ["method_declaration", "function_definition", "anonymous_function", "arrow_function"]) {
     for (const typeNode of returnTypes.get(k) ?? []) pushNamedTypes(typeNode);
   }
 
