@@ -2999,9 +2999,10 @@ function extractFromPhp(
   // {@link buildPhpAliasResolver} for why a file-wide table fabricates an edge
   // in a file that opens more than one namespace.
   // Built on first use, not per file. The resolver walks the tree twice - for
-  // `namespace_definition` and `namespace_use_clause` - and most PHP files hold
-  // no structural type reference at all, so building it eagerly charged every
-  // one of them for a table nothing would read. Memoised on the first lookup,
+  // `namespace_definition` and `namespace_use_declaration`, then the clauses
+  // inside each declaration - and most PHP files hold no structural type
+  // reference at all, so building it eagerly charged every one of them for a
+  // table nothing would read. Memoised on the first lookup,
   // since a file that has one reference usually has many.
   let aliasResolver: PhpAliasLookup | undefined;
   const aliasAt: PhpAliasLookup = (local, offset) => {
