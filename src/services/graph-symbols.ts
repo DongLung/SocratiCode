@@ -3064,21 +3064,25 @@ function extractFromPhp(
   // rather than in the declaration loop because that loop registers a symbol
   // per node, and neither of these declares a name: `safeFind(fn, "name")`
   // would return the first `name` in the body and file a symbol under it.
-  for (const k of ["anonymous_function", "arrow_function"]) {
-    // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
-    const forKind: any[] = [];
-    returnTypes.set(k, forKind);
-    for (const fn of safeFindAll(root, k)) {
-      const returnType = fn.field("return_type");
-      if (returnType) forKind.push(returnType);
-    }
+  // Both kinds in ONE traversal. `safeFindAllAny` hands them back in document
+  // order rather than grouped by kind, which is why the named declarations
+  // above cannot use it - their emission order is pinned by the dedupe. These
+  // two are new, nothing downstream distinguishes them, and a closure and an
+  // arrow function in one file are as likely to interleave as not, so document
+  // order is the honest order here and it costs one walk instead of two.
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const anonReturnTypes: any[] = [];
+  returnTypes.set("anonymous", anonReturnTypes);
+  for (const fn of safeFindAllAny(root, ["anonymous_function", "arrow_function"])) {
+    const returnType = fn.field("return_type");
+    if (returnType) anonReturnTypes.push(returnType);
   }
 
   // Return types, from the nodes the loops above already held, in the order
   // the pass that used to re-walk for them emitted: methods, then functions.
   // The two anonymous forms follow, so the emission order the dedupe depends
   // on is unchanged for every file that has none.
-  for (const k of ["method_declaration", "function_definition", "anonymous_function", "arrow_function"]) {
+  for (const k of ["method_declaration", "function_definition", "anonymous"]) {
     for (const typeNode of returnTypes.get(k) ?? []) pushNamedTypes(typeNode);
   }
 
