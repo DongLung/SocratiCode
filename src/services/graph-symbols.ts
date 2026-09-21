@@ -2554,12 +2554,13 @@ function extractFromRuby(
  * a trait `use` read a bare `name` node, which draws no such distinction —
  * `new static()` and `new self()` both arrive as one. PHP type names are
  * case-insensitive, so membership is tested lowercased.
+ *
+ * `integer`, `double` and `boolean` are deliberately absent. They read like
+ * type keywords and are not: PHP treats each as a CLASS name, warning
+ * `"integer" will be interpreted as a class name. Did you mean "int"?` and
+ * then resolving it to a class of that name. Filtering them would drop a real
+ * reference from any project that declares one.
  */
-// `integer`, `double` and `boolean` are deliberately absent. They read like
-// type keywords and are not: PHP treats each as a CLASS name, warning
-// `"integer" will be interpreted as a class name. Did you mean "int"?` and
-// then resolving it to a class of that name. Filtering them would drop a real
-// reference from any project that declares one.
 const PHP_NON_SYMBOL_TYPES = new Set([
   "self", "parent", "static",
   "int", "float", "string", "bool",
