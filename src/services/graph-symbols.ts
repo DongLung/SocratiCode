@@ -3083,21 +3083,18 @@ function extractFromPhp(
       if (typeNode) pushNamedTypes(typeNode);
     }
   }
-  // A closure and an arrow function carry a return type as well, and their
-  // parameters were already reached by the `simple_parameter` scan above - so
-  // before this, `fn (): Gadget => …` named a collaborator the graph could not
-  // see, while the same signature on a named function could. Collected here
-  // rather than in the declaration loop because that loop registers a symbol
-  // per node, and neither of these declares a name: `safeFind(fn, "name")`
-  // would return the first `name` in the body and file a symbol under it.
-  // Both kinds in ONE traversal. `safeFindAllAny` hands them back in document
-  // order rather than grouped by kind, which is why the named declarations
-  // above cannot use it - their emission order is pinned by the dedupe. These
-  // two are new, nothing downstream distinguishes them, and a closure and an
-  // arrow function in one file are as likely to interleave as not, so document
-  // order is the honest order here and it costs one walk instead of two.
-  // Not a node kind, unlike every other key in this map - the two anonymous
-  // forms share one bucket because they are collected in one traversal.
+  // Closure and arrow-function return types. Their parameters were already
+  // reached by the `simple_parameter` scan above, so without this
+  // `fn (): Gadget => …` named a collaborator the graph could not see, while
+  // the same signature on a named function could.
+  //
+  // Collected here rather than in the declaration loop, because that loop
+  // registers a symbol per node and neither form declares a name —
+  // `safeFind(fn, "name")` would return the first `name` in the body and file a
+  // symbol under it. Both kinds are read in one `safeFindAllAny` traversal,
+  // which returns document order rather than grouping by kind; the named
+  // declarations cannot use it for that reason, since the dedupe pins their
+  // order, but nothing downstream tells these two apart.
   // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
   const anonReturnTypes: any[] = [];
   returnTypes.set(ANON_RETURN_TYPES, anonReturnTypes);
