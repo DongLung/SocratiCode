@@ -2612,9 +2612,22 @@ type PhpAliasTable = Map<string, PhpAliasEntry[]>;
  */
 type PhpAliasLookup = (local: string, offset: number) => string | undefined;
 
+/**
+ * PHP's own identifier case folding, which is ASCII-only.
+ *
+ * `String.prototype.toLowerCase` is Unicode-aware and PHP is not: `class É {}`
+ * followed by `new é()` fails with `Class "é" not found`, while `Widget` and
+ * `WIDGET` are the same class. The difference is not academic here, because a
+ * non-ASCII character can fold INTO ASCII - `toLowerCase("K")` is `"k"` -
+ * so a Unicode fold would let an ordinary ASCII reference match an alias
+ * declared with a character PHP considers unrelated, drawing an edge the
+ * runtime never would.
+ */
+const phpFoldCase = (name: string): string => name.replace(/[A-Z]+/g, (m) => m.toLowerCase());
+
 /** Record one `use` clause's import under its local spelling, case-folded. */
 function phpAliasAdd(table: PhpAliasTable, local: string, entry: PhpAliasEntry): void {
-  const key = local.toLowerCase();
+  const key = phpFoldCase(local);
   const entries = table.get(key);
   if (entries) entries.push(entry);
   else table.set(key, [entry]);
@@ -2633,7 +2646,7 @@ function phpAliasAt(
   local: string,
   offset: number,
 ): string | undefined {
-  const entries = table.get(local.toLowerCase());
+  const entries = table.get(phpFoldCase(local));
   if (!entries) return undefined;
   let best: PhpAliasEntry | undefined;
   for (const entry of entries) {

@@ -314,6 +314,17 @@ class C {
       .toEqual([{ calleeName: "Base", kind: "type_reference", localAlias: "BASE" }]);
   });
 
+  it("folds alias case over ASCII only, as PHP does", () => {
+    // PHP's fold is ASCII-only: `class É {}` then `new é()` fails with
+    // `Class "é" not found`, while `Widget` and `WIDGET` are one class. A
+    // Unicode-aware fold is not merely stricter, it is wrong in a direction
+    // that invents edges - `"K"` (KELVIN SIGN) lowercases to ASCII `k`,
+    // so `Kelvin` spelled with it would answer a reference to a plain
+    // `kelvin` that PHP considers an unrelated name.
+    const php = "<?php\nuse X\\Base as Kelvin;\nclass C extends kelvin {}\n";
+    expect(refsIn(php)).toEqual([{ calleeName: "kelvin", kind: "type_reference" }]);
+  });
+
   it("attributes `extends` to the class and a type hint to the method", () => {
     // `findCallerId` takes the innermost scope containing the line, so the two
     // edges must not share a caller — that is what makes symbol-mode impact
