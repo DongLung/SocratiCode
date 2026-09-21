@@ -2973,8 +2973,9 @@ function extractFromPhp(
   }
 
   // ── Structural type references ──────────────────────────────────────
-  // `extends`, `implements`, a trait `use`, `new`, and parameter and return
-  // types. Without these a class reached only by inheritance or a type hint
+  // `extends`, `implements`, a trait `use`, `new`, and parameter, property and
+  // return types — including a closure's and an arrow function's return type.
+  // Without these a class reached only by inheritance or a type hint
   // has no symbol edge at all, so file-mode `codebase_impact` — which derives
   // its reverse index from resolved symbol edges — reports no dependents for
   // a base class every subclass names.
