@@ -2882,6 +2882,17 @@ function buildPhpAliasResolver(root: any): PhpAliasLookup {
     phpAliasAt(scopeAt(offset)?.aliases ?? fileAliases, local, offset);
 }
 
+/**
+ * Bucket name for closure and arrow-function return types.
+ *
+ * Every other key in that map is a tree-sitter node kind; this one deliberately
+ * is not, because the two anonymous forms are gathered in a single traversal
+ * and share one bucket. Named rather than spelled inline so a reader checking
+ * the emission loop against the grammar does not go looking for a node kind
+ * called "anonymous".
+ */
+const ANON_RETURN_TYPES = "anonymous-function-return-types";
+
 function extractFromPhp(
   source: string,
   file: string,
@@ -3083,9 +3094,11 @@ function extractFromPhp(
   // two are new, nothing downstream distinguishes them, and a closure and an
   // arrow function in one file are as likely to interleave as not, so document
   // order is the honest order here and it costs one walk instead of two.
+  // Not a node kind, unlike every other key in this map - the two anonymous
+  // forms share one bucket because they are collected in one traversal.
   // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
   const anonReturnTypes: any[] = [];
-  returnTypes.set("anonymous", anonReturnTypes);
+  returnTypes.set(ANON_RETURN_TYPES, anonReturnTypes);
   for (const fn of safeFindAllAny(root, ["anonymous_function", "arrow_function"])) {
     const returnType = fn.field("return_type");
     if (returnType) anonReturnTypes.push(returnType);
@@ -3095,7 +3108,7 @@ function extractFromPhp(
   // the pass that used to re-walk for them emitted: methods, then functions.
   // The two anonymous forms follow, so the emission order the dedupe depends
   // on is unchanged for every file that has none.
-  for (const k of ["method_declaration", "function_definition", "anonymous"]) {
+  for (const k of ["method_declaration", "function_definition", ANON_RETURN_TYPES]) {
     for (const typeNode of returnTypes.get(k) ?? []) pushNamedTypes(typeNode);
   }
 
