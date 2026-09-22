@@ -87,4 +87,50 @@ class LogoutController {
     expect(names).toHaveLength(2);
     expect(new Set(names)).toEqual(new Set(["bar", "qux"]));
   });
+
+  /**
+   * PHP admits any non-ASCII character in an identifier, and the callee scan
+   * is anchored at the end of the receiver. An ASCII-only pattern there did not
+   * only drop a non-ASCII name: where the name ended in ASCII it matched that
+   * tail alone, so `$o->crée()` was recorded as a call to `e`.
+   */
+  describe("non-ASCII identifiers", () => {
+    it.each([
+      ["an ASCII method, as before", "$o->render();", "render"],
+      ["an accented method", "$o->crée();", "crée"],
+      ["an accented method with a longer ASCII tail", "$o->données();", "données"],
+      ["a Cyrillic method", "$o->данные();", "данные"],
+      ["a CJK method", "$o->文書();", "文書"],
+      ["a Cyrillic method that ends in ASCII", "$o->данныеJson();", "данныеJson"],
+      ["a CJK method that ends in ASCII", "$o->文書Id();", "文書Id"],
+      // Outside the BMP, so only a pattern without the `u` flag keeps it whole.
+      ["a CJK method outside the BMP that ends in ASCII", "$o->𠮷Id();", "𠮷Id"],
+      ["an accented function", "crée();", "crée"],
+      ["an ASCII static method on an accented class", "Café::make();", "make"],
+      ["a Cyrillic static method on a Cyrillic class", "Документ::создать();", "создать"],
+    ])("names %s exactly", (_label, statement, expected) => {
+      expect(callsIn(`<?php\n${statement}\n`)).toEqual([expected]);
+    });
+
+    /**
+     * The parse's own BMP limit, pinned so a grammar change is not silent.
+     * `name` stops at U+FFFF, so a declaration written past it is filed under
+     * the remainder — `𠮷Id` becomes `Id` — while the callee scan reads the
+     * call node's own text and keeps the character. Above the BMP the two
+     * therefore never meet, and the call resolves to nothing. Truncating the
+     * call to agree would be the `crée` → `e` bug again from the other side:
+     * `Id` is a name the source does not write, and an unrelated `Id` in the
+     * caller's dependency closure would answer it.
+     */
+    it("keeps a callee past the BMP whole, which the cut declaration cannot answer", () => {
+      const { symbols, rawCalls } = extractSymbolsAndCalls(
+        "<?php\nclass C {\n    public function \u{20BB7}Id(): void {}\n    public function run(): void { $this->\u{20BB7}Id(); }\n}\n",
+        "php",
+        ".php",
+        "t.php",
+      );
+      expect(symbols.filter((s) => s.kind === "method").map((s) => s.name)).toEqual(["Id", "run"]);
+      expect(rawCalls.map((c) => c.calleeName)).toEqual(["\u{20BB7}Id"]);
+    });
+  });
 });

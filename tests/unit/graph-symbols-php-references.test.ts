@@ -293,6 +293,24 @@ class P {
       .toEqual([{ calleeName: "Qualified", kind: "call" }]);
   });
 
+  it("names a class whose identifier is not ASCII", () => {
+    // PHP admits any non-ASCII character in a name, and the grammar parses
+    // `Café`, `Документ` and `文書` alike as a `name`. An ASCII-only guard
+    // dropped each of these edges without a word.
+    expect(namesOf("<?php\nclass A extends Café {}\nclass B extends Документ {}\nclass C extends 文書 {}\n"))
+      .toEqual(["Café", "Документ", "文書"]);
+  });
+
+  it("names a non-ASCII class in every structural position, and by its terminal segment", () => {
+    const php = `<?php
+class C extends Базовый implements 可比较 {
+    private ?Журнал $log = null;
+    public function go(Документ $d): \\App\\Модель\\文書 { return new Отчет(); }
+}`;
+    expect(namesOf(php)).toEqual(["Базовый", "可比较", "Документ", "Журнал", "文書"]);
+    expect(namesOf(php, "call")).toEqual(["Отчет"]);
+  });
+
   it("emits nothing for `self`, `parent` and `static`", () => {
     const php = `<?php
 class C {
@@ -349,6 +367,18 @@ class C {
     // `kelvin` that PHP considers an unrelated name.
     const php = "<?php\nuse X\\Base as \u212aelvin;\nclass C extends kelvin {}\n";
     expect(refsIn(php)).toEqual([{ calleeName: "kelvin", kind: "type_reference" }]);
+  });
+
+  it("maps a non-ASCII alias through the same ASCII-only fold", () => {
+    // `ÄRGER` folds to `Ärger` and names the import; `ärger` differs in a
+    // non-ASCII letter, which PHP does not fold, so it names another class.
+    // Escaped so the source holds the precomposed letters: decomposed, `Ä` is
+    // an ASCII `A` plus a combining mark, and the ASCII fold would reach it.
+    const php = "<?php\nuse X\\Base as \u00c4rger;\nclass A extends \u00c4RGER {}\nclass B extends \u00e4rger {}\n";
+    expect(refsIn(php)).toEqual([
+      { calleeName: "Base", kind: "type_reference", localAlias: "\u00c4RGER" },
+      { calleeName: "\u00e4rger", kind: "type_reference" },
+    ]);
   });
 
   it("attributes `extends` to the class and a type hint to the method", () => {

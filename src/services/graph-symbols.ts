@@ -1607,6 +1607,68 @@ function extractCalleeNameJs(text: string): string | null {
   return extractCalleeInfoJs(text)?.calleeName ?? null;
 }
 
+/** The characters PHP admits first in an identifier, as a character-class body. */
+const PHP_IDENTIFIER_START = "A-Za-z_\\u0080-\\uffff";
+
+/** The characters PHP admits after the first: the same set plus the digits. */
+const PHP_IDENTIFIER_PART = `${PHP_IDENTIFIER_START}0-9`;
+
+/**
+ * PHP's identifier rule, as it reaches this code once the source is decoded.
+ *
+ * The language states the rule over bytes —
+ * `[a-zA-Z_\x80-\xff][a-zA-Z0-9_\x80-\xff]*` — and every byte of a UTF-8
+ * multibyte sequence is at least 0x80, so after decoding it reduces to "ASCII
+ * letters, digits and `_`, plus any non-ASCII character". `Café`, `Документ`
+ * and `文書` are all legal PHP names, and the grammar parses each as a `name`;
+ * a character class transliterated straight from the spec's `\x80-\xff` would
+ * still reject the last two. The same argument holds one level down, over
+ * UTF-16: every code unit of a non-ASCII character is at least 0x80, so
+ * `\u0080-\uffff`, matched code unit by code unit, admits every non-ASCII
+ * character — one outside the BMP by its two surrogate halves.
+ *
+ * That is why these patterns carry no `u` flag, and it is load-bearing: with
+ * it the range would end at U+FFFF, and `$o->𠮷Id()` would be cut down to its
+ * ASCII tail `Id`. The grammar's own `name` token does stop at the BMP, and it
+ * cuts there on both sides of a call — a limit of the parse, which the rule
+ * here cannot see past. A type name holding such a character reaches
+ * {@link phpTypeRefName} already cut short at it and is read as the shorter
+ * name, and so is every declaration's: `class 𠮷Doc {}` is filed under `Doc`
+ * and `function 𠮷Id()` under `Id`. A callee name is read from the call node's
+ * own text, which the cut does not reach, so above the BMP the two no longer
+ * meet: `$o->𠮷Id()` is named `𠮷Id` and answers no declaration. The ASCII-only
+ * pattern truncated that call to `Id` and so agreed with the truncated
+ * declaration by coincidence — the same truncation that answered `$o->crée()`
+ * with an unrelated `e` — so the whole name is preferred to it. Inside the BMP,
+ * where every accented, Cyrillic and CJK name lives, both sides read the name
+ * whole and it resolves.
+ *
+ * Both PHP name guards in this file are built from this one source, so they
+ * cannot drift apart: {@link phpTypeRefName} tests a whole name against
+ * {@link PHP_IDENTIFIER}, and {@link extractCalleeNamePhp} takes the name a
+ * receiver ends with through {@link PHP_IDENTIFIER_TAIL}. `graph-resolution.ts`
+ * states the same rule again for the file-import graph, which reads PHP
+ * namespace and class declarations out of source text rather than a parse.
+ */
+const PHP_IDENTIFIER_SOURCE = `[${PHP_IDENTIFIER_START}][${PHP_IDENTIFIER_PART}]*`;
+
+/** A string that is exactly one PHP identifier. */
+const PHP_IDENTIFIER = new RegExp(`^${PHP_IDENTIFIER_SOURCE}$`);
+
+/**
+ * The PHP identifier a string ends with, as group 1.
+ *
+ * The lookbehind pins every attempt to the start of a run of identifier
+ * characters. Without it the engine retries from each character of a run and
+ * rescans to the end of it every time, which is quadratic in the run's length
+ * — and once non-ASCII is admitted, a CJK paragraph in an earlier argument of a
+ * fluent chain is a single run, its punctuation included. Leading digits are
+ * skipped rather than rejected, as the ASCII-only pattern skipped them.
+ */
+const PHP_IDENTIFIER_TAIL = new RegExp(
+  `(?<![${PHP_IDENTIFIER_PART}])[0-9]*(${PHP_IDENTIFIER_SOURCE})$`,
+);
+
 /**
  * Callee name for a PHP call expression.
  *
@@ -1629,11 +1691,17 @@ function extractCalleeNameJs(text: string): string | null {
  * Quoted sections are skipped so a parenthesis inside a string literal —
  * `where('a)b')` — cannot unbalance the scan.
  *
+ * The name is read by PHP's own identifier rule, {@link PHP_IDENTIFIER_TAIL}.
+ * The match is anchored at the end of the receiver, so an ASCII-only pattern
+ * did worse than miss a non-ASCII name: `$o->crée()` matched the ASCII tail
+ * alone and recorded a call to `e`, which then resolved like any real name.
+ *
  *   foo(…)                                 → "foo"
  *   Cls::make(…)                           → "make"
  *   $this->svc->blacklist(…)               → "blacklist"
  *   Acme\Support\Cls::of(…)                → "of"
  *   Model::where(…)->orderBy(…)->get()     → "get"   (outermost node)
+ *   $o->crée(…)                            → "crée"
  */
 function extractCalleeNamePhp(text: string): string | null {
   let depth = 0;
@@ -1660,7 +1728,7 @@ function extractCalleeNamePhp(text: string): string | null {
 
   if (lastTopLevelOpen <= 0) return null;
   const receiver = text.slice(0, lastTopLevelOpen).trimEnd();
-  const m = receiver.match(/([A-Za-z_]\w*)$/);
+  const m = receiver.match(PHP_IDENTIFIER_TAIL);
   return m ? m[1] : null;
 }
 
@@ -2695,15 +2763,10 @@ function phpTypeRefName(
   const fullyQualified = trimmed.startsWith("\\");
   const segments = trimmed.replace(/^\\+/, "").split("\\");
   const terminal = segments[segments.length - 1]?.trim() ?? "";
-  // Deliberately ASCII-only, and narrower than the language: PHP states its
-  // identifier rule over bytes — `[a-zA-Z_\x80-\xff][a-zA-Z0-9_\x80-\xff]*` —
-  // and every byte of a UTF-8 multibyte sequence is at least 0x80, so `class X
-  // extends Café` is legal and the grammar parses `Café` as a `name`. This
-  // guard drops it, and the reference gets no edge. The same ASCII assumption
-  // is made by `extractCalleeNamePhp`, so widening it belongs in one change
-  // covering both guards rather than here, where it would be a behaviour
-  // change riding along with an unrelated fix.
-  if (!/^[A-Za-z_]\w*$/.test(terminal)) return null;
+  // PHP's own identifier rule, non-ASCII names included — see
+  // {@link PHP_IDENTIFIER}. Matched whole, so a name it does not admit gets no
+  // edge rather than a shortened one.
+  if (!PHP_IDENTIFIER.test(terminal)) return null;
   if (PHP_NON_SYMBOL_TYPES.has(terminal.toLowerCase())) return null;
   // Only a bare name can carry an alias: a written-out path names its own
   // terminal segment, and a fully-qualified one names the global namespace —
