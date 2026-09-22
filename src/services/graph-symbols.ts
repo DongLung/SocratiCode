@@ -2619,7 +2619,7 @@ type PhpAliasLookup = (local: string, offset: number) => string | undefined;
  * `String.prototype.toLowerCase` is Unicode-aware and PHP is not: `class É {}`
  * followed by `new é()` fails with `Class "é" not found`, while `Widget` and
  * `WIDGET` are the same class. The difference is not academic here, because a
- * non-ASCII character can fold INTO ASCII — `toLowerCase("\u212a")` (KELVIN SIGN) is `"k"` -
+ * non-ASCII character can fold INTO ASCII — `toLowerCase("\u212a")` (KELVIN SIGN) is `"k"` —
  * so a Unicode fold would let an ordinary ASCII reference match an alias
  * declared with a character PHP considers unrelated, drawing an edge the
  * runtime never would.
@@ -2706,7 +2706,7 @@ function phpTypeRefName(
   if (!/^[A-Za-z_]\w*$/.test(terminal)) return null;
   if (PHP_NON_SYMBOL_TYPES.has(terminal.toLowerCase())) return null;
   // Only a bare name can carry an alias: a written-out path names its own
-  // terminal segment, and a fully-qualified one names the global namespace -
+  // terminal segment, and a fully-qualified one names the global namespace —
   // no `use` statement renames either.
   if (fullyQualified || segments.length > 1) return { calleeName: terminal };
   const imported = aliasAt(terminal, offset);
@@ -2927,7 +2927,7 @@ function extractFromPhp(
   // them again below re-walked the whole tree twice per file for nodes already
   // in hand. Stashed rather than emitted: `pushTypeRef` attributes a reference
   // to its innermost caller and so needs `scopes` complete, and the emission
-  // order — parameters and properties first, then methods, then functions -
+  // order — parameters and properties first, then methods, then functions —
   // decides which of two same-key edges survives the dedupe, so it is kept
   // exactly as it was. Collected above the name guard, because a declaration
   // the guard skips still contributed its return type before.
