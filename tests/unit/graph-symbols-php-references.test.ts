@@ -453,7 +453,7 @@ namespace B { use Y\\Other as Al; class Two extends Al {} }
       // reference belongs to cannot be decided by line number — only by its
       // source offset.
       const php =
-        "<?php\nnamespace A { use X\\\\Base as Al; class One extends Al {} }"
+        "<?php\nnamespace A { use X\\Base as Al; class One extends Al {} }"
         + " namespace B { class Two extends Al {} }\n";
       expect(refsIn(php)).toEqual([
         { calleeName: "Base", kind: "type_reference", localAlias: "Al" },
