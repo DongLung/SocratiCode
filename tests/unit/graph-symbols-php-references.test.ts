@@ -89,6 +89,32 @@ describe("PHP structural type-reference extraction", () => {
       .toEqual(["Base"]);
   });
 
+  it("records a variadic parameter's type and attributes it to its method or function", () => {
+    // `Handler ...$handlers` is a `variadic_parameter`, not a
+    // `simple_parameter`, so a scan naming only the plain kind dropped the one
+    // parameter that takes a list of collaborators. The by-reference nullable
+    // form puts `&` and `...` between the type and the name as well.
+    const { symbols, rawCalls } = extractSymbolsAndCalls(
+      "<?php\nclass C {\n    public function go(Handler ...$handlers) {}\n}\n"
+        + "function run(?Middleware &...$stack) {}\n",
+      "php", ".php", "t.php",
+    );
+    const go = symbols.find((s) => s.name === "go");
+    const run = symbols.find((s) => s.name === "run");
+    expect(go && run).toBeTruthy();
+    expect(rawCalls
+      .filter((c) => c.kind === "type_reference")
+      .map((c) => ({ calleeName: c.calleeName, callerId: c.callerId })))
+      .toEqual([
+        { calleeName: "Handler", callerId: go?.id },
+        { calleeName: "Middleware", callerId: run?.id },
+      ]);
+    // A closure's and an arrow function's parameters are reached by the same
+    // scan, variadic ones included.
+    expect(namesOf("<?php\n$a = function (Widget ...$w) {};\n$b = fn (Gadget ...$g) => null;\n"))
+      .toEqual(["Widget", "Gadget"]);
+  });
+
   it("records a return type hint", () => {
     expect(namesOf("<?php\nclass C {\n    public function go(): Base {}\n}\n"))
       .toEqual(["Base"]);

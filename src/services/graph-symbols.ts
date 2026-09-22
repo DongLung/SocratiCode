@@ -3072,20 +3072,29 @@ function extractFromPhp(
   // `private ?PersonRecord $rec = null;`. Reading only the promoted form made a
   // class's collaborator visible or invisible according to which spelling it
   // happened to use, which is not a distinction the graph should draw.
+  //
+  // A variadic parameter is its own node kind rather than a `simple_parameter`
+  // with a flag, so `Handler ...$handlers` carries its type under the same
+  // `type` field but is invisible to a scan that names only the plain kind.
   // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
   const pushNamedTypes = (typeNode: any): void => {
     for (const named of safeFindAll(typeNode, "named_type")) {
       pushTypeRef(named, "type_reference");
     }
   };
-  for (const k of ["simple_parameter", "property_promotion_parameter", "property_declaration"]) {
+  for (const k of [
+    "simple_parameter",
+    "variadic_parameter",
+    "property_promotion_parameter",
+    "property_declaration",
+  ]) {
     for (const node of safeFindAll(root, k)) {
       const typeNode = node.field("type");
       if (typeNode) pushNamedTypes(typeNode);
     }
   }
   // Closure and arrow-function return types. Their parameters were already
-  // reached by the `simple_parameter` scan above, so without this
+  // reached by the parameter scan above, so without this
   // `fn (): Gadget => …` named a collaborator the graph could not see, while
   // the same signature on a named function could.
   //
