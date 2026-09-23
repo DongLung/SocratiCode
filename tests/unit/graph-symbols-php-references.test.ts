@@ -369,6 +369,84 @@ class C {
     expect(refsIn(php)).toEqual([{ calleeName: "kelvin", kind: "type_reference" }]);
   });
 
+  it("emits nothing for a name the parse split at a character past the BMP", () => {
+    // The grammar's `name` token stops at the BMP, so each of these arrives as
+    // part of the written name with an `ERROR` fragment beside it: `野` before
+    // the fragment, `Doc` after it. Emitting either would name a class the
+    // source never writes, and a reachable class of that name would answer it.
+    const php = `<?php
+class A extends 野𠮷 {}
+class B extends 𠮷Doc {}
+class C implements 可比较𠮷 {}
+function f() { return new 野𠮷(); }
+function g(𠮷Doc $d): 野𠮷 {}
+`;
+    expect(refsIn(php)).toEqual([]);
+  });
+
+  it("suppresses a split name whose surviving part is ASCII, as the grammar cuts there too", () => {
+    // `main` recorded `B` here. It is the same partial name, and the same
+    // wrong parent if a class `B` is reachable.
+    expect(refsIn("<?php\nclass A extends B𝑓 {}\n")).toEqual([]);
+  });
+
+  it("emits nothing for a qualified name the parse split, not the namespace it opens with", () => {
+    // A qualified name loses more than the segment that was cut. The parse
+    // gives up at the cut and hands back only the part before it, so
+    // `App\野𠮷` arrives as the bare `App` — which is not a shortened class
+    // name but a namespace head, and one a great many projects also declare a
+    // class under. Every node kind `extractFromPhp` collects a qualified name
+    // from is spelled out below — they all reach the guard through the same
+    // `pushTypeRef`, but an enumeration is what proves none was missed.
+    const php = `<?php
+class A extends App\\野𠮷 {}
+class B implements App\\野𠮷 {}
+class C { use App\\野𠮷; }
+class D { private App\\野𠮷 $r; }
+class E { public function __construct(private App\\野𠮷 $r) {} }
+function f(App\\野𠮷 $x): A\\B\\C\\野𠮷 {}
+function g() { return new \\App\\野𠮷(); }
+function h(App\\野𠮷 ...$v) {}
+$k = fn (): App\\野𠮷 => 1;
+class F extends App\\𠮷Doc {}
+`;
+    expect(refsIn(php)).toEqual([]);
+  });
+
+  it("still records the whole name when nothing is split off it", () => {
+    // The guard keys on an identifier character or a `\` touching the node,
+    // which a name the parse read whole never has: the `name` token takes the
+    // longest run it can, and a whole qualified name is one node with its
+    // separators inside it. Positive control for the tests above.
+    expect(namesOf("<?php\nclass A extends 野 {}\nclass B extends Doc {}\nclass C extends Café {}\n"))
+      .toEqual(["野", "Doc", "Café"]);
+    expect(namesOf("<?php\nclass A extends App\\Model\\Doc {}\nclass B extends \\App\\野 {}\n"))
+      .toEqual(["Doc", "野"]);
+  });
+
+  it("keeps a rooted name written tight against the `new` before it", () => {
+    // `new\App\Made()` is valid — PHP ends the keyword at the `\`, which is
+    // not an identifier character. A guard that asked only whether an
+    // identifier character touches the node would read the `w` of `new` as the
+    // name running on and drop an edge the parse got exactly right, so the
+    // left edge requires identifier characters meeting on both sides of the
+    // boundary. `extends\App\Foo` and the same tightening on `implements` and
+    // a trait `use` are *not* valid — PHP 8 lexes `extends\App\Foo` as one
+    // namespaced name — so `new` is the only spelling this can be tested on.
+    expect(refsIn("<?php\nfunction f() { return new\\App\\Made(); }\n"))
+      .toEqual([{ calleeName: "Made", kind: "call" }]);
+  });
+
+  it("keeps a rooted name whose own first character is past the BMP", () => {
+    // `\𠮷Doc` is valid PHP, and although the parse errors inside it, the
+    // `qualified_name` wrapper spans the `ERROR` fragment — so the node's text
+    // is the whole written name, nothing is split off *it*, and the reference
+    // stands. It names what the source writes; that no declaration can answer
+    // it is the parse's BMP limit on the other side, not a name this guard
+    // should invent or suppress.
+    expect(namesOf("<?php\nclass G extends \\𠮷Doc {}\n")).toEqual(["𠮷Doc"]);
+  });
+
   it("maps a non-ASCII alias through the same ASCII-only fold", () => {
     // `ÄRGER` folds to `Ärger` and names the import; `ärger` differs in a
     // non-ASCII letter, which PHP does not fold, so it names another class.

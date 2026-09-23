@@ -33,6 +33,8 @@ describe("PHP non-ASCII identifiers in a real graph", () => {
 
   const CALLER = "src/Report/Document.php";
   const DECOYS = "src/Helpers/decoys.php";
+  const SPLITTER = "src/Report/Split.php";
+  const SPLIT_DECOY = "src/Model/野.php";
 
   /** The single resolved edge under one name and kind, failing loudly if there is not exactly one. */
   const edge = (file: string, name: string, kind: SymbolEdge["kind"]): SymbolEdge => {
@@ -99,6 +101,27 @@ class Документ {}
 namespace App\\Model;
 
 class 報告 {}
+`);
+
+    // Reachable, and named exactly what the parse leaves behind when it splits
+    // `野𠮷`: if a partial name were emitted, this is the class it would
+    // resolve to, and the edge would claim a parent the source never names.
+    write(SPLIT_DECOY, `<?php
+
+namespace App\\Model;
+
+class 野 {}
+`);
+
+    write(SPLITTER, `<?php
+
+namespace App\\Report;
+
+require_once __DIR__ . '/../Model/野.php';
+
+class Split extends 野𠮷
+{
+}
 `);
 
     write(CALLER, `<?php
@@ -180,6 +203,27 @@ class Document
     const e = edge(CALLER, name, "type_reference");
     expect(e.calleeCandidates).toEqual([idOf(file, name)]);
     expect(e.confidence).toBe("unique");
+  });
+
+  it("has the split decoy inside the splitting file's dependency closure", () => {
+    // Same vacuity guard as above: the assertion below is only worth something
+    // while `野` is a class the scan would actually find.
+    expect(graph.edges.some((e) => e.source === SPLITTER && e.target === SPLIT_DECOY)).toBe(true);
+    // The other half of the same guard. The import edge above proves the file
+    // reached the import scan; only a symbol proves it reached the extractor,
+    // which is where an empty edge list would otherwise mean nothing at all.
+    expect(idOf(SPLITTER, "Split")).toBeTruthy();
+  });
+
+  it("emits no edge at all for a parent name the parse split", () => {
+    expect(graph.outgoingCallsByFile.get(SPLITTER) ?? []).toEqual([]);
+  });
+
+  it("resolves nothing to the class the split name would have named", () => {
+    const intoDecoy = [...graph.outgoingCallsByFile.values()]
+      .flat()
+      .filter((e) => (e.calleeCandidates ?? []).some((id) => id.startsWith(`${SPLIT_DECOY}::`)));
+    expect(intoDecoy).toEqual([]);
   });
 
   it("resolves `new` on a CJK class", () => {
