@@ -140,6 +140,22 @@ export interface SymbolNode {
   typeName?: string;
   /** True only for a GDScript `class_name` declaration, never an inner class. */
   isGdscriptClassName?: boolean;
+  /**
+   * PHP only: the fully qualified name of what declares this symbol, which a
+   * qualified PHP edge's `calleeQualifier` is matched against.
+   *
+   * A method's owner is its class, interface, trait or enum, written as that
+   * class's name: `\App\Models\Invoice`. A class, interface or trait is owned
+   * by its namespace, written as a namespace prefix with the trailing `\` PHP
+   * itself uses for one: `\App\Models\`, and `\` for the global namespace. The
+   * two forms cannot collide, so a qualifier naming a class answers only its
+   * methods and one naming a namespace only its classes.
+   *
+   * Absent for every other language, for a method of an anonymous class —
+   * which no qualified name can reach — and for every graph persisted before
+   * it existed. The symbol's `id` and `qualifiedName` are unchanged by it.
+   */
+  phpOwner?: string;
 }
 
 /** Kind of relationship an edge represents */
@@ -187,6 +203,14 @@ export interface SymbolEdge {
    * 191 symbols on tokio, so a qualified call matched by name would either
    * pick one arbitrarily or list them all. With the qualifier, resolution can
    * narrow to the scope the call actually names, or say it could not.
+   *
+   * PHP writes it already resolved under the file's namespace and `use`
+   * imports, in the two forms {@link SymbolNode.phpOwner} uses: the class a
+   * static call names (`\App\Models\Invoice` for `Invoice::capture()`), or the
+   * namespace a class reference names (`\App\Models\` for `extends Invoice`,
+   * a type hint or `new Invoice()`). Absent on every PHP call it cannot
+   * qualify statically — `$obj->m()`, `$class::m()`, `self::`, `static::`,
+   * `parent::` and bare function calls.
    */
   calleeQualifier?: string;
   callSite: { file: string; line: number };

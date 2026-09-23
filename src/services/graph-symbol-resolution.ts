@@ -28,6 +28,7 @@
 
 import { GODOT_BUILTIN_CLASSES, GODOT_BUILTIN_FUNCTIONS } from "../constants.js";
 import type { CodeGraph, SymbolEdge, SymbolNode } from "../types.js";
+import { phpFoldCase } from "./graph-php-case.js";
 import type { RustUseBinding } from "./graph-symbols.js";
 
 /** Symbol-resolution metadata isolated to one Godot project root. */
@@ -211,6 +212,28 @@ function resolveDepFile(callerFile: string, sourceModule: string, deps: string[]
 }
 
 /**
+ * The key a qualified PHP edge and the symbol it names meet on.
+ *
+ * Built from an owner in either of the two forms {@link SymbolNode.phpOwner}
+ * documents, and the name declared under it. A namespace prefix owns classes,
+ * so the key is the class's whole name — `\app\models\invoice` — folded
+ * throughout, since PHP matches class and namespace names
+ * ASCII-case-insensitively and `new \App\models\INVOICE()` names the class
+ * declared as `App\Models\Invoice`. A class owns methods, so the key is the
+ * folded class name, `::`, and the method name exactly as written, which is
+ * how every other call in this resolver is matched. The `::` keeps the two
+ * forms apart: a namespace qualifier can never reach a method, nor a class
+ * qualifier a class.
+ *
+ * @param owner A `phpOwner` or a PHP edge's `calleeQualifier`.
+ * @param name The symbol's name, or the edge's `calleeName`.
+ */
+function phpOwnedKey(owner: string, name: string): string {
+  const folded = phpFoldCase(owner);
+  return folded.endsWith("\\") ? `${folded}${phpFoldCase(name)}` : `${folded}::${name}`;
+}
+
+/**
  * Resolve all call sites for every file in `symbolsByFile`. Mutates the
  * passed-in `outgoingCallsByFile` edges in place.
  *
@@ -278,11 +301,26 @@ export function resolveCallSites(
   // other: `const Config` cannot qualify `Config::run()`, so the file that
   // declares it is not an answer.
   const kindOfSymbolId = new Map<string, SymbolNode["kind"]>();
+  // file → {@link phpOwnedKey} → the ids of the PHP symbols declared under
+  // that owner and name. Holds PHP symbols only, and only those that have an
+  // owner; a qualified PHP edge is answered from here and nowhere else.
+  const phpOwnedByFile = new Map<string, Map<string, string[]>>();
   for (const [file, syms] of symbolsByFile.entries()) {
     const idx = new Map<string, SymbolNode[]>();
     for (const s of syms) {
       fileOfSymbolId.set(s.id, file);
       kindOfSymbolId.set(s.id, s.kind);
+      if (s.phpOwner !== undefined) {
+        let owned = phpOwnedByFile.get(file);
+        if (!owned) {
+          owned = new Map();
+          phpOwnedByFile.set(file, owned);
+        }
+        const key = phpOwnedKey(s.phpOwner, s.name);
+        const ids = owned.get(key);
+        if (ids) ids.push(s.id);
+        else owned.set(key, [s.id]);
+      }
       if (s.name === "<module>") continue;
       const existing = idx.get(s.name);
       if (existing) existing.push(s);
@@ -1390,6 +1428,41 @@ export function resolveCallSites(
         else if (uniq.every((id) => fileOfSymbolId.get(id) === callerFile)) {
           edge.confidence = "local";
         } else if (uniq.length === 1) edge.confidence = "unique";
+        else edge.confidence = "multiple-candidates";
+        continue;
+      }
+
+      // A qualified PHP edge is answered by what its qualifier names, or not at
+      // all — the PHP counterpart of the Rust branch above, and gated on the
+      // caller's language for the same reason.
+      //
+      // The extractor has already resolved the qualifier under the file's
+      // namespace and `use` imports: the class a static call names, or the
+      // namespace a class reference names. A candidate must be declared under
+      // exactly that owner (`SymbolNode.phpOwner`), which is what stops
+      // `UserSchema::all()` inside `Schema::all()` from becoming a self-edge —
+      // the caller declares an `all` too, but its owner is `Schema` — and stops
+      // `Request::capture()` from reaching a same-named `Invoice::capture()`.
+      //
+      // The owner is required before the same-file branch and before the
+      // dependency scan, which are searched in that order as they are for
+      // every other edge. When neither holds a match the edge is left
+      // `unresolved` with no candidates: falling back to the method name alone
+      // is exactly how the wrong-class edges were drawn.
+      if (edge.calleeQualifier && callerLang === "php") {
+        const key = phpOwnedKey(edge.calleeQualifier, edge.calleeName);
+        const ownedIn = (file: string): readonly string[] => phpOwnedByFile.get(file)?.get(key) ?? [];
+        const local = ownedIn(callerFile);
+        if (local.length > 0) {
+          edge.calleeCandidates = [...local];
+          edge.confidence = "local";
+          continue;
+        }
+        for (const dep of deps) candidates.push(...ownedIn(dep));
+        const uniq = Array.from(new Set(candidates));
+        edge.calleeCandidates = uniq;
+        if (uniq.length === 0) edge.confidence = "unresolved";
+        else if (uniq.length === 1) edge.confidence = "unique";
         else edge.confidence = "multiple-candidates";
         continue;
       }
