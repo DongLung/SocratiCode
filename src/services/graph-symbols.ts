@@ -2936,8 +2936,13 @@ interface PhpNamespaceScope {
 // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
 function buildPhpNamespaceScopes(root: any): PhpNamespaceScope[] {
   const endOfFile = root.range().end.index;
+  // A namespace declaration is a top-level statement — PHP rejects one
+  // anywhere else — so the root's own children hold every one of them. Read
+  // from there rather than by searching the tree: every file that declares a
+  // class now asks for its namespace, and a full traversal to find a statement
+  // that can only sit at the top charged each of them for the whole file.
   // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
-  const defs: any[] = safeFindAll(root, "namespace_definition").sort(
+  const defs: any[] = root.children().filter((c: any) => c.kind() === "namespace_definition").sort(
     // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
     (a: any, b: any) => a.range().start.index - b.range().start.index,
   );
