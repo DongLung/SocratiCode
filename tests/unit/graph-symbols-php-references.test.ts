@@ -312,13 +312,16 @@ class C extends Базовый implements 可比较 {
   });
 
   it("emits nothing for `self`, `parent` and `static`", () => {
+    // `parent` is only valid PHP in a class that has one, so `C` extends `B`
+    // — and that `extends` is the one reference the class makes.
     const php = `<?php
-class C {
+class B {}
+class C extends B {
     public function a(self $s, parent $p): static {}
     public function b() { return new static(); }
     public function c() { return new self(); }
 }`;
-    expect(refsIn(php)).toEqual([]);
+    expect(refsIn(php).map((r) => r.calleeName)).toEqual(["B"]);
   });
 
   it("emits nothing for primitive and built-in type names", () => {
