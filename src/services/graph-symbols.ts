@@ -1607,6 +1607,82 @@ function extractCalleeNameJs(text: string): string | null {
   return extractCalleeInfoJs(text)?.calleeName ?? null;
 }
 
+/** The characters PHP admits first in an identifier, as a character-class body. */
+const PHP_IDENTIFIER_START = "A-Za-z_\\u0080-\\uffff";
+
+/** The characters PHP admits after the first: the same set plus the digits. */
+const PHP_IDENTIFIER_PART = `${PHP_IDENTIFIER_START}0-9`;
+
+/**
+ * PHP's identifier rule, as it reaches this code once the source is decoded.
+ *
+ * The language states the rule over bytes —
+ * `[a-zA-Z_\x80-\xff][a-zA-Z0-9_\x80-\xff]*` — and every byte of a UTF-8
+ * multibyte sequence is at least 0x80, so after decoding it reduces to "ASCII
+ * letters, digits and `_`, plus any non-ASCII character". `Café`, `Документ`
+ * and `文書` are all legal PHP names, and the grammar parses each as a `name`;
+ * a character class transliterated straight from the spec's `\x80-\xff` would
+ * still reject the last two. The same argument holds one level down, over
+ * UTF-16: every code unit of a non-ASCII character is at least 0x80, so
+ * `\u0080-\uffff`, matched code unit by code unit, admits every non-ASCII
+ * character — one outside the BMP by its two surrogate halves.
+ *
+ * That is why these patterns carry no `u` flag, and it is load-bearing: with
+ * it the range would end at U+FFFF, and `$o->𠮷Id()` would be cut down to its
+ * ASCII tail `Id`. The grammar's own `name` token does stop at the BMP, and it
+ * cuts there on both sides of a call — a limit of the parse, which the rule
+ * here cannot see past. A type name holding such a character usually arrives
+ * already cut short at it; `extractFromPhp` recognises the cut from the source
+ * around the node and emits nothing, rather than an edge to the shorter name.
+ * The exception is a `\`-rooted spelling, where the `qualified_name` wrapper
+ * spans the fragment and the node's text is the whole written name, so
+ * `extends \𠮷Doc` is read as `𠮷Doc` and simply answers nothing.
+ * A declaration's name carries no such guard, so `class 𠮷Doc {}` is still
+ * filed under `Doc` and `function 𠮷Id()` under `Id`. A callee name is read
+ * from the call node's own text, which the cut does not reach, so above the BMP
+ * the two no longer meet: `$o->𠮷Id()` is named `𠮷Id` and answers no
+ * declaration. The ASCII-only pattern truncated that call to `Id` and so agreed
+ * with the truncated declaration by coincidence — the same truncation that
+ * answered `$o->crée()` with an unrelated `e` — so the whole name is preferred
+ * to it. Inside the BMP, where every accented, Cyrillic and CJK name lives,
+ * both sides read the name whole and it resolves.
+ *
+ * Both PHP name guards in this file are built from this one source, so they
+ * cannot drift apart: {@link phpTypeRefName} tests a whole name against
+ * {@link PHP_IDENTIFIER}, and {@link extractCalleeNamePhp} takes the name a
+ * receiver ends with through {@link PHP_IDENTIFIER_TAIL}. `graph-resolution.ts`
+ * states the same rule again for the file-import graph, which reads PHP
+ * namespace and class declarations out of source text rather than a parse.
+ */
+const PHP_IDENTIFIER_SOURCE = `[${PHP_IDENTIFIER_START}][${PHP_IDENTIFIER_PART}]*`;
+
+/** A string that is exactly one PHP identifier. */
+const PHP_IDENTIFIER = new RegExp(`^${PHP_IDENTIFIER_SOURCE}$`);
+
+/** One character PHP admits inside an identifier, surrogate halves included. */
+const PHP_IDENTIFIER_CHAR = new RegExp(`^[${PHP_IDENTIFIER_PART}]$`);
+
+/**
+ * One character that carries a PHP type reference on past a node's right edge:
+ * an identifier character, which would make one longer name of the two runs, or
+ * the `\` that adds another segment to a qualified one.
+ */
+const PHP_TYPE_REF_CHAR = new RegExp(`^[${PHP_IDENTIFIER_PART}\\\\]$`);
+
+/**
+ * The PHP identifier a string ends with, as group 1.
+ *
+ * The lookbehind pins every attempt to the start of a run of identifier
+ * characters. Without it the engine retries from each character of a run and
+ * rescans to the end of it every time, which is quadratic in the run's length
+ * — and once non-ASCII is admitted, a CJK paragraph in an earlier argument of a
+ * fluent chain is a single run, its punctuation included. Leading digits are
+ * skipped rather than rejected, as the ASCII-only pattern skipped them.
+ */
+const PHP_IDENTIFIER_TAIL = new RegExp(
+  `(?<![${PHP_IDENTIFIER_PART}])[0-9]*(${PHP_IDENTIFIER_SOURCE})$`,
+);
+
 /**
  * Callee name for a PHP call expression.
  *
@@ -1629,11 +1705,17 @@ function extractCalleeNameJs(text: string): string | null {
  * Quoted sections are skipped so a parenthesis inside a string literal —
  * `where('a)b')` — cannot unbalance the scan.
  *
+ * The name is read by PHP's own identifier rule, {@link PHP_IDENTIFIER_TAIL}.
+ * The match is anchored at the end of the receiver, so an ASCII-only pattern
+ * did worse than miss a non-ASCII name: `$o->crée()` matched the ASCII tail
+ * alone and recorded a call to `e`, which then resolved like any real name.
+ *
  *   foo(…)                                 → "foo"
  *   Cls::make(…)                           → "make"
  *   $this->svc->blacklist(…)               → "blacklist"
  *   Acme\Support\Cls::of(…)                → "of"
  *   Model::where(…)->orderBy(…)->get()     → "get"   (outermost node)
+ *   $o->crée(…)                            → "crée"
  */
 function extractCalleeNamePhp(text: string): string | null {
   let depth = 0;
@@ -1660,7 +1742,7 @@ function extractCalleeNamePhp(text: string): string | null {
 
   if (lastTopLevelOpen <= 0) return null;
   const receiver = text.slice(0, lastTopLevelOpen).trimEnd();
-  const m = receiver.match(/([A-Za-z_]\w*)$/);
+  const m = receiver.match(PHP_IDENTIFIER_TAIL);
   return m ? m[1] : null;
 }
 
@@ -2695,15 +2777,10 @@ function phpTypeRefName(
   const fullyQualified = trimmed.startsWith("\\");
   const segments = trimmed.replace(/^\\+/, "").split("\\");
   const terminal = segments[segments.length - 1]?.trim() ?? "";
-  // Deliberately ASCII-only, and narrower than the language: PHP states its
-  // identifier rule over bytes — `[a-zA-Z_\x80-\xff][a-zA-Z0-9_\x80-\xff]*` —
-  // and every byte of a UTF-8 multibyte sequence is at least 0x80, so `class X
-  // extends Café` is legal and the grammar parses `Café` as a `name`. This
-  // guard drops it, and the reference gets no edge. The same ASCII assumption
-  // is made by `extractCalleeNamePhp`, so widening it belongs in one change
-  // covering both guards rather than here, where it would be a behaviour
-  // change riding along with an unrelated fix.
-  if (!/^[A-Za-z_]\w*$/.test(terminal)) return null;
+  // PHP's own identifier rule, non-ASCII names included — see
+  // {@link PHP_IDENTIFIER}. Matched whole, so a name it does not admit gets no
+  // edge rather than a shortened one.
+  if (!PHP_IDENTIFIER.test(terminal)) return null;
   if (PHP_NON_SYMBOL_TYPES.has(terminal.toLowerCase())) return null;
   // Only a bare name can carry an alias: a written-out path names its own
   // terminal segment, and a fully-qualified one names the global namespace —
@@ -3012,6 +3089,50 @@ function extractFromPhp(
     return aliasResolver(local, offset);
   };
   const typeRefs: ExtractedSymbols["rawCalls"] = [];
+  /**
+   * Whether the parse handed back part of a type reference rather than all of it.
+   *
+   * The grammar's `name` token stops at the BMP, so `class X extends 野𠮷`
+   * arrives as the name `野` with the rest beside it as an `ERROR` fragment,
+   * and `extends 𠮷Doc` as `Doc` with the fragment in front. A qualified name
+   * loses more than the segment that was cut: the parse gives up at the cut and
+   * hands back only what precedes it, so `extends App\野𠮷` arrives as `App` —
+   * a namespace head, and one that plenty of projects also declare a class
+   * under. A reference emitted from any of those parts names a class the source
+   * never writes, and if a class of that name is reachable it resolves to it,
+   * confidently — the truncation this file's callee scan was widened to stop,
+   * arriving from the other side.
+   *
+   * Read from the source rather than from the tree, because the question is
+   * not what the parser made of the remainder but whether there is one: a
+   * character that carries the reference on, touching either end of the node,
+   * means it runs past what the parse returned.
+   *
+   * A name the parse read whole is never touched that way, because the
+   * grammar's `name` token, like PHP's own tokenizer, takes the longest run it
+   * can, and a whole qualified name is one node with its separators inside it.
+   * The two runs differ only where the grammar stops early: past the BMP, and
+   * at the handful of characters below it that its `name` token treats as
+   * whitespace although PHP admits them inside an identifier — U+00A0, U+200B
+   * and U+FEFF. A name spelled with one of those is valid PHP and does lose its
+   * edge here, exactly as `野𠮷` does. That is the same trade rather than a
+   * false positive: the parse had already cut the name short, so the choice is
+   * between no edge and an edge to whatever class the surviving part names.
+   *
+   * The two ends do not ask the same question. On the right, either an
+   * identifier character or a `\` carries on. On the left, only two identifier
+   * characters meeting do, because that alone is what would have made the runs
+   * one *name*: a `\` starts a fresh segment instead, so a fragment cut from in
+   * front of a `\`-rooted node costs a leading segment — and
+   * {@link phpTypeRefName} keeps only the terminal one, which is the same
+   * either way — while `new\App\Made()`, valid PHP since `\` ends the keyword
+   * there, must keep its edge rather than lose it to the `w` of `new`.
+   */
+  const isSplitName = (range: { start: { index: number }; end: { index: number } }): boolean =>
+    (PHP_IDENTIFIER_CHAR.test(source[range.start.index - 1] ?? "")
+      && PHP_IDENTIFIER_CHAR.test(source[range.start.index] ?? ""))
+    || PHP_TYPE_REF_CHAR.test(source[range.end.index] ?? "");
+
   // Takes the node rather than its text and line so the alias lookup can use
   // the reference's own source offset — two braced namespace blocks fit on one
   // line, a line number could not tell their references apart, and an alias
@@ -3020,6 +3141,7 @@ function extractFromPhp(
   const pushTypeRef = (node: any, kind: EdgeKind): void => {
     const range = node.range();
     const line = range.start.line + 1;
+    if (isSplitName(range)) return;
     const ref = phpTypeRefName(node.text(), range.start.index, aliasAt);
     if (!ref) return;
     typeRefs.push({
