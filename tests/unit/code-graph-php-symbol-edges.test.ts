@@ -223,18 +223,19 @@ class Ambiguous
     expect(e.confidence).toBe("unique");
   });
 
-  it("reports both classes when two dependencies declare the same short name", async () => {
-    // PHP symbols are indexed under their declared short name, and both files
-    // declare `Base`, so the two spellings in this signature are one edge with
-    // two honest candidates. Answering `unique` here would name a class this
-    // file does not use half the time — worse than saying it does not know.
+  it("resolves two classes that share a short name each to the one it names", async () => {
+    // Both files declare `Base`, and this signature names both — one bare
+    // through `use App\Base\Base`, one through `use App\Dup\Base as DupBase`.
+    // By short name alone they were one edge with two candidates, and the
+    // best it could say was `multiple-candidates`. Qualified by namespace
+    // they are two edges to two classes, and each answers `unique`.
     const found = edgesOf("src/Ambiguous/Ambiguous.php", "Base", "type_reference");
-    expect(found).toHaveLength(1);
-    expect(found[0].calleeCandidates.slice().sort()).toEqual([
-      "src/Base/Base.php::Base#5",
-      "src/Dup/Base.php::Base#5",
-    ]);
-    expect(found[0].confidence).toBe("multiple-candidates");
+    expect(found).toHaveLength(2);
+    const byQualifier = new Map(found.map((e) => [e.calleeQualifier, e]));
+    expect(byQualifier.get("\\App\\Base\\")?.calleeCandidates).toEqual(["src/Base/Base.php::Base#5"]);
+    expect(byQualifier.get("\\App\\Dup\\")?.calleeCandidates).toEqual(["src/Dup/Base.php::Base#5"]);
+    expect(byQualifier.get("\\App\\Dup\\")?.localAlias).toBe("DupBase");
+    for (const e of found) expect(e.confidence).toBe("unique");
   });
 
   it("does not let the duplicate short name turn a single-candidate edge ambiguous", async () => {

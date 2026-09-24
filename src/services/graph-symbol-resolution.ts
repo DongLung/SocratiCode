@@ -28,6 +28,7 @@
 
 import { GODOT_BUILTIN_CLASSES, GODOT_BUILTIN_FUNCTIONS } from "../constants.js";
 import type { CodeGraph, SymbolEdge, SymbolNode } from "../types.js";
+import { phpFoldCase } from "./graph-php-case.js";
 import type { RustUseBinding } from "./graph-symbols.js";
 
 /** Symbol-resolution metadata isolated to one Godot project root. */
@@ -211,6 +212,72 @@ function resolveDepFile(callerFile: string, sourceModule: string, deps: string[]
 }
 
 /**
+ * The key a qualified PHP edge and the symbol it names meet on.
+ *
+ * Built from an owner in either of the two forms {@link SymbolNode.phpOwner}
+ * documents, and the name declared under it. A namespace prefix owns classes,
+ * so the key is the class's whole name — `\app\models\invoice` — folded
+ * throughout, since PHP matches class and namespace names
+ * ASCII-case-insensitively and `new \App\models\INVOICE()` names the class
+ * declared as `App\Models\Invoice`. A class owns methods, so the key is the
+ * folded class name, `::`, and the method name exactly as written, which is
+ * how every other call in this resolver is matched. The `::` keeps the two
+ * forms apart: a namespace qualifier can never reach a method, nor a class
+ * qualifier a class.
+ *
+ * @param owner A `phpOwner` or a PHP edge's `calleeQualifier`.
+ * @param name The symbol's name, or the edge's `calleeName`.
+ */
+function phpOwnedKey(owner: string, name: string): string {
+  const folded = phpFoldCase(owner);
+  return folded.endsWith("\\") ? `${folded}${phpFoldCase(name)}` : `${folded}::${name}`;
+}
+
+/**
+ * The static method a call on `cls` runs, found where PHP looks for it.
+ *
+ * The class's own methods first. Failing those, the traits it uses — each
+ * trait's own methods, then the traits that trait uses — since a trait's method
+ * overrides an inherited one; then the class it extends, searched the same way.
+ * Only inheritance the index can verify is followed: a class or trait's
+ * ancestors are searched only when exactly one declaration of it is found
+ * under its exact qualified name, nearest first. So an ancestor outside the
+ * project ends the search rather than widening it; a class declared twice at
+ * the same reach — the same name in two packages of one repository — is not
+ * guessed between, since the two can inherit from different classes; and a
+ * method no ancestor declares is not found at all. An `abstract`
+ * declaration has no owner, so the search passes it by for the implementation
+ * PHP runs. Two traits that both declare the method are both returned, since
+ * which one PHP runs depends on an `insteadof` the index does not read.
+ *
+ * @param cls The class the call names, in the form `SymbolNode.phpOwner` uses for one.
+ * @param method The method name, matched exactly.
+ * @param found The ids declared under a {@link phpOwnedKey}, nearest first.
+ * @param classLikeById The PHP classes and traits by id.
+ */
+function phpInheritedFrom(
+  cls: string,
+  method: string,
+  found: (key: string) => readonly string[],
+  classLikeById: ReadonlyMap<string, SymbolNode>,
+  seen: Set<string> = new Set(),
+): string[] {
+  const folded = phpFoldCase(cls);
+  if (seen.has(folded)) return [];
+  seen.add(folded);
+  const own = found(phpOwnedKey(cls, method));
+  if (own.length > 0) return [...own];
+  const cut = cls.lastIndexOf("\\") + 1;
+  const declarations = found(phpOwnedKey(cls.slice(0, cut), cls.slice(cut)));
+  const declared = declarations.length === 1 ? classLikeById.get(declarations[0]) : undefined;
+  if (!declared) return [];
+  const viaTraits = (declared.phpTraits ?? [])
+    .flatMap((t) => phpInheritedFrom(t, method, found, classLikeById, seen));
+  if (viaTraits.length > 0) return viaTraits;
+  return declared.phpExtends ? phpInheritedFrom(declared.phpExtends, method, found, classLikeById, seen) : [];
+}
+
+/**
  * Resolve all call sites for every file in `symbolsByFile`. Mutates the
  * passed-in `outgoingCallsByFile` edges in place.
  *
@@ -278,11 +345,27 @@ export function resolveCallSites(
   // other: `const Config` cannot qualify `Config::run()`, so the file that
   // declares it is not an answer.
   const kindOfSymbolId = new Map<string, SymbolNode["kind"]>();
+  // {@link phpOwnedKey} → the ids of the PHP symbols declared under that
+  // owner and name, project-wide. Holds PHP symbols only, and only those that
+  // have an owner; a qualified PHP edge is answered from here and nowhere
+  // else. The key is a whole qualified name, so it nearly always has one
+  // declaration, and narrowing that to the caller's file or dependencies is a
+  // filter over it rather than an index of its own. The classes and traits
+  // among them are kept by id too, for what they inherit from.
+  const phpOwnedAnywhere = new Map<string, string[]>();
+  const phpClassLikeById = new Map<string, SymbolNode>();
   for (const [file, syms] of symbolsByFile.entries()) {
     const idx = new Map<string, SymbolNode[]>();
     for (const s of syms) {
       fileOfSymbolId.set(s.id, file);
       kindOfSymbolId.set(s.id, s.kind);
+      if (s.phpOwner !== undefined) {
+        const key = phpOwnedKey(s.phpOwner, s.name);
+        const anywhere = phpOwnedAnywhere.get(key);
+        if (anywhere) anywhere.push(s.id);
+        else phpOwnedAnywhere.set(key, [s.id]);
+        if (s.kind === "class" || s.kind === "trait") phpClassLikeById.set(s.id, s);
+      }
       if (s.name === "<module>") continue;
       const existing = idx.get(s.name);
       if (existing) existing.push(s);
@@ -1251,6 +1334,21 @@ export function resolveCallSites(
       cachedCallerSceneEntries ??= sceneEntriesForCaller(callerFile, callerGodotRoot);
       return cachedCallerSceneEntries;
     };
+    // The ids declared under a {@link phpOwnedKey}, nearest first: those in the
+    // caller's own file, else those in its dependencies, else every one in the
+    // project. A key the project does not declare at all — the common case for
+    // a vendor class (`DB::table()`) — is answered by the first lookup.
+    let callerDeps: Set<string> | undefined;
+    const phpFound = (key: string): readonly string[] => {
+      const anywhere = phpOwnedAnywhere.get(key);
+      if (!anywhere) return [];
+      const local = anywhere.filter((id) => fileOfSymbolId.get(id) === callerFile);
+      if (local.length > 0) return local;
+      callerDeps ??= new Set(deps);
+      const depFiles = callerDeps;
+      const inDeps = anywhere.filter((id) => depFiles.has(fileOfSymbolId.get(id) ?? ""));
+      return inDeps.length > 0 ? inDeps : anywhere;
+    };
 
     for (const edge of edges) {
       const callLine = edge.callSite.line;
@@ -1390,6 +1488,42 @@ export function resolveCallSites(
         else if (uniq.every((id) => fileOfSymbolId.get(id) === callerFile)) {
           edge.confidence = "local";
         } else if (uniq.length === 1) edge.confidence = "unique";
+        else edge.confidence = "multiple-candidates";
+        continue;
+      }
+
+      // A qualified PHP edge is answered by what its qualifier names, or not at
+      // all — the PHP counterpart of the Rust branch above, and gated on the
+      // caller's language for the same reason.
+      //
+      // The extractor has already resolved the qualifier under the file's
+      // namespace and `use` imports: the class a static call names, or the
+      // namespace a class reference names. A candidate must be declared under
+      // exactly that owner (`SymbolNode.phpOwner`), which is what stops
+      // `UserSchema::all()` inside `Schema::all()` from becoming a self-edge —
+      // the caller declares an `all` too, but its owner is `Schema` — and stops
+      // `Request::capture()` from reaching a same-named `Invoice::capture()`.
+      //
+      // The caller's own file is searched first, then its dependencies, as for
+      // every other edge, and then the rest of the project. That last step is
+      // not the name guessing this branch exists to stop: the key is the whole
+      // qualified name, so it can only reach the class the source names. It is
+      // what finds a sibling class in the caller's own namespace, which PHP
+      // needs no `use` for and the file graph therefore draws no edge to.
+      //
+      // A static method the named class does not declare is looked for where
+      // PHP looks for it ({@link phpInheritedFrom}). When nothing is found the
+      // edge is left `unresolved` with no candidates: falling back to the
+      // method name alone is exactly how the wrong-class edges were drawn.
+      if (edge.calleeQualifier && callerLang === "php") {
+        const ids = edge.calleeQualifier.endsWith("\\")
+          ? phpFound(phpOwnedKey(edge.calleeQualifier, edge.calleeName))
+          : phpInheritedFrom(edge.calleeQualifier, edge.calleeName, phpFound, phpClassLikeById);
+        const uniq = Array.from(new Set(ids));
+        edge.calleeCandidates = uniq;
+        if (uniq.length === 0) edge.confidence = "unresolved";
+        else if (uniq.every((id) => fileOfSymbolId.get(id) === callerFile)) edge.confidence = "local";
+        else if (uniq.length === 1) edge.confidence = "unique";
         else edge.confidence = "multiple-candidates";
         continue;
       }

@@ -312,13 +312,16 @@ class C extends Базовый implements 可比较 {
   });
 
   it("emits nothing for `self`, `parent` and `static`", () => {
+    // `parent` is only valid PHP in a class that has one, so `C` extends `B`
+    // — and that `extends` is the one reference the class makes.
     const php = `<?php
-class C {
+class B {}
+class C extends B {
     public function a(self $s, parent $p): static {}
     public function b() { return new static(); }
     public function c() { return new self(); }
 }`;
-    expect(refsIn(php)).toEqual([]);
+    expect(refsIn(php).map((r) => r.calleeName)).toEqual(["B"]);
   });
 
   it("emits nothing for primitive and built-in type names", () => {
@@ -492,12 +495,17 @@ class C {
     expect(namesOf(php)).toEqual(["Base", "Base"]);
   });
 
-  it("does not add a second edge for `new Foo()` beside a `Foo()` call", () => {
-    // Same caller, same name, same kind — one edge, and the pre-existing call
-    // edge is the one that survives.
-    const calls = refsIn("<?php\nfunction f() { Foo(); return new Foo(); }\n")
-      .filter((r) => r.calleeName === "Foo");
-    expect(calls).toEqual([{ calleeName: "Foo", kind: "call" }]);
+  it("keeps `new Foo()` beside a `Foo()` call as its own, qualified edge", () => {
+    // Same caller, same name, same kind, but not the same thing: `Foo()` calls
+    // a function, and `new Foo()` names a class, which is qualified by its
+    // namespace. Merged, the class reference was dropped for the function call.
+    // The function call is left exactly as it was — unqualified, and first.
+    const { rawCalls } = extractSymbolsAndCalls(
+      "<?php\nnamespace App;\nfunction f() { Foo(); return new Foo(); }\n",
+      "php", ".php", "t.php",
+    );
+    expect(rawCalls.filter((c) => c.calleeName === "Foo").map((c) => [c.kind, c.calleeQualifier]))
+      .toEqual([["call", undefined], ["call", "\\App\\"]]);
   });
 
   it("emits no structural edge for a file that has none", () => {

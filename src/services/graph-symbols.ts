@@ -11,6 +11,7 @@ import { Lang, parse } from "@ast-grep/napi";
 import { getLanguageFromExtension } from "../constants.js";
 import type { EdgeKind, SymbolEdge, SymbolKind, SymbolNode } from "../types.js";
 import { analyzeElixirTemplate, isElixirTemplateExtension } from "./elixir-templates.js";
+import { phpFoldCase } from "./graph-php-case.js";
 import { logger } from "./logger.js";
 import { gdscriptParserAvailable } from "./parser-availability.js";
 
@@ -1648,7 +1649,7 @@ const PHP_IDENTIFIER_PART = `${PHP_IDENTIFIER_START}0-9`;
  * both sides read the name whole and it resolves.
  *
  * Both PHP name guards in this file are built from this one source, so they
- * cannot drift apart: {@link phpTypeRefName} tests a whole name against
+ * cannot drift apart: {@link phpClassRef} tests a whole name against
  * {@link PHP_IDENTIFIER}, and {@link extractCalleeNamePhp} takes the name a
  * receiver ends with through {@link PHP_IDENTIFIER_TAIL}. `graph-resolution.ts`
  * states the same rule again for the file-import graph, which reads PHP
@@ -2670,6 +2671,13 @@ interface PhpAliasEntry {
   readonly offset: number;
   /** Imported short name. */
   readonly imported: string;
+  /**
+   * The whole imported name, unrooted: `Illuminate\Http\Request`. A grouped
+   * `use A\B\{C, D}` carries its `A\B` prefix on the declaration rather than
+   * the clause, and it is folded in here, so every entry spells its target in
+   * full however the `use` was written.
+   */
+  readonly path: string;
 }
 
 /**
@@ -2690,23 +2698,21 @@ interface PhpAliasEntry {
 type PhpAliasTable = Map<string, PhpAliasEntry[]>;
 
 /**
- * (local spelling, reference offset) → the imported short name in force there,
- * or undefined where nothing imports that spelling.
+ * What a PHP file's namespace declarations and `use` imports say a name means
+ * at a given position — the two things PHP's name resolution reads.
  */
-type PhpAliasLookup = (local: string, offset: number) => string | undefined;
-
-/**
- * PHP's own identifier case folding, which is ASCII-only.
- *
- * `String.prototype.toLowerCase` is Unicode-aware and PHP is not: `class É {}`
- * followed by `new é()` fails with `Class "é" not found`, while `Widget` and
- * `WIDGET` are the same class. The difference is not academic here, because a
- * non-ASCII character can fold INTO ASCII — `toLowerCase("\u212a")` (KELVIN SIGN) is `"k"` —
- * so a Unicode fold would let an ordinary ASCII reference match an alias
- * declared with a character PHP considers unrelated, drawing an edge the
- * runtime never would.
- */
-const phpFoldCase = (name: string): string => name.replace(/[A-Z]+/g, (m) => m.toLowerCase());
+interface PhpNames {
+  /**
+   * (local spelling, reference offset) → the import in force there, or
+   * undefined where nothing imports that spelling.
+   */
+  importAt(local: string, offset: number): PhpAliasEntry | undefined;
+  /**
+   * The namespace in force at an offset, unrooted and without a trailing `\`
+   * (`App\Http`), and `""` outside every namespace — the global one.
+   */
+  namespaceAt(offset: number): string;
+}
 
 /** Record one `use` clause's import under its local spelling, case-folded. */
 function phpAliasAdd(table: PhpAliasTable, local: string, entry: PhpAliasEntry): void {
@@ -2728,7 +2734,7 @@ function phpAliasAt(
   table: PhpAliasTable,
   local: string,
   offset: number,
-): string | undefined {
+): PhpAliasEntry | undefined {
   const entries = table.get(phpFoldCase(local));
   if (!entries) return undefined;
   let best: PhpAliasEntry | undefined;
@@ -2737,59 +2743,92 @@ function phpAliasAt(
       best = entry;
     }
   }
-  return best?.imported;
+  return best;
 }
 
 /**
- * The short name a PHP type reference names, plus the local spelling it was
- * written with when the two differ.
+ * A PHP class reference, resolved the way the runtime resolves it.
  *
- * A reference is written as an FQCN (`\App\Base\Base`), a namespace-relative
- * path (`Base\Base`) or a bare name (`Base`) that a `use` statement may have
- * aliased. Only the terminal segment can match a declared symbol — PHP symbols
- * are indexed under the short name they were declared with — so every form
- * reduces to it. A bare name is then mapped through the `use` aliases in force
- * where it is written, which is what makes
+ * `calleeName` is the short name the class is declared under, which is what
+ * PHP symbols are indexed by; `localAlias` is the spelling written, when a
+ * `use` made the two differ; `fqcn` is the whole name, unrooted
+ * (`App\Base\Base`), which the edge carries so resolution can tell apart two
+ * classes that share a short name.
+ */
+interface PhpClassRef {
+  calleeName: string;
+  localAlias?: string;
+  fqcn: string;
+}
+
+/**
+ * The class a PHP class reference names.
+ *
+ * PHP writes a class name four ways and resolves each differently:
+ *
+ *   - fully qualified, `\App\Base\Base` — exactly that, whatever the file
+ *     imports;
+ *   - namespace-relative, `namespace\Base` — under the current namespace;
+ *   - qualified, `Base\Base` — its first segment through a `use` in force for
+ *     it, and otherwise under the current namespace;
+ *   - unqualified, `Base` — through a `use` in force for it, and otherwise
+ *     under the current namespace. A class name never falls back to the global
+ *     namespace the way an unqualified function or constant name does.
+ *
+ * Only the terminal segment can match a declared symbol, so `calleeName` is
+ * that segment — or, for an unqualified name a `use` renamed, the name the
+ * `use` imported, which is what makes
  * `use App\Base\Base as Ancestor; class X extends Ancestor` an edge to `Base`.
  *
- * @param raw Type spelling exactly as written, leading `\` included.
- * @param offset Source offset of the reference. Which `use` statements are in
- *               force is a question about position, not just about the file.
- * @param aliasAt Resolver for the imports in force at an offset.
- * @returns The name to resolve and the local alias, or null for a spelling no
- *          project symbol can answer (a pseudo-type, a built-in, or a form the
- *          guard below does not admit as an identifier).
+ * A leading `\` is read before it is stripped. Under `use X\Other as Foo;`,
+ * `extends Foo` resolves to `X\Other` while `extends \Foo` fatals with
+ * `Class "Foo" not found` — the alias is not consulted at all — so stripping
+ * the slash first would name a different class from the one written.
+ *
+ * @param raw Class spelling exactly as written, leading `\` included.
+ * @param offset Source offset of the reference. Which namespace and which
+ *               `use` statements are in force is a question about position,
+ *               not just about the file.
+ * @param names The file's namespaces and imports.
+ * @returns The reference, or null for a spelling no project symbol can answer
+ *          (a pseudo-type, a built-in, or a form {@link PHP_IDENTIFIER} does
+ *          not admit as an identifier).
  */
-function phpTypeRefName(
-  raw: string,
-  offset: number,
-  aliasAt: PhpAliasLookup,
-): { calleeName: string; localAlias?: string } | null {
+function phpClassRef(raw: string, offset: number, names: PhpNames): PhpClassRef | null {
   const trimmed = raw.trim();
-  // A leading `\` roots the name at the global namespace, and that is decided
-  // before the slash is stripped, because stripping it makes `\Foo` look
-  // exactly like the bare `Foo` that a `use` may alias. PHP draws the
-  // opposite conclusion from the same two spellings: under
-  // `use X\Other as Foo;`, `extends Foo` resolves to `X\Other` while
-  // `extends \Foo` fatals with `Class "Foo" not found` — the alias is not
-  // consulted at all. Treating `\Foo` as the alias named an entirely
-  // different class from the one written.
   const fullyQualified = trimmed.startsWith("\\");
-  const segments = trimmed.replace(/^\\+/, "").split("\\");
-  const terminal = segments[segments.length - 1]?.trim() ?? "";
+  const segments = trimmed.replace(/^\\+/, "").split("\\").map((s) => s.trim());
+  const terminal = segments[segments.length - 1] ?? "";
   // PHP's own identifier rule, non-ASCII names included — see
   // {@link PHP_IDENTIFIER}. Matched whole, so a name it does not admit gets no
   // edge rather than a shortened one.
   if (!PHP_IDENTIFIER.test(terminal)) return null;
   if (PHP_NON_SYMBOL_TYPES.has(terminal.toLowerCase())) return null;
-  // Only a bare name can carry an alias: a written-out path names its own
-  // terminal segment, and a fully-qualified one names the global namespace —
-  // no `use` statement renames either.
-  if (fullyQualified || segments.length > 1) return { calleeName: terminal };
-  const imported = aliasAt(terminal, offset);
-  return imported && imported !== terminal
-    ? { calleeName: imported, localAlias: terminal }
-    : { calleeName: terminal };
+  const underCurrentNamespace = (path: string[]): string => {
+    const ns = names.namespaceAt(offset);
+    return (ns ? [ns, ...path] : path).join("\\");
+  };
+  if (fullyQualified) return { calleeName: terminal, fqcn: segments.join("\\") };
+  // `namespace` is a keyword, not a segment: `namespace\Base` is the current
+  // namespace's `Base`, spelled explicitly, and no `use` can rename it.
+  if (segments.length > 1 && phpFoldCase(segments[0]) === "namespace") {
+    return { calleeName: terminal, fqcn: underCurrentNamespace(segments.slice(1)) };
+  }
+  // A qualified name's first segment is what an import can answer — `use
+  // App\Models as M;` makes `M\User` into `App\Models\User` — and the rest is
+  // read beneath it. The short name is the terminal segment either way.
+  if (segments.length > 1) {
+    const head = names.importAt(segments[0], offset);
+    return {
+      calleeName: terminal,
+      fqcn: head ? [head.path, ...segments.slice(1)].join("\\") : underCurrentNamespace(segments),
+    };
+  }
+  const imported = names.importAt(terminal, offset);
+  if (!imported) return { calleeName: terminal, fqcn: underCurrentNamespace(segments) };
+  return imported.imported !== terminal
+    ? { calleeName: imported.imported, localAlias: terminal, fqcn: imported.path }
+    : { calleeName: terminal, fqcn: imported.path };
 }
 
 /**
@@ -2826,24 +2865,36 @@ function phpUseImportsNonType(node: any): boolean {
  * than a type yields null; see {@link phpUseImportsNonType} for why its
  * caller has to make the same check of the enclosing declaration.
  *
+ * A grouped clause names only the tail of its path — `User` in
+ * `use App\Models\{User, Post}` — and the shared `App\Models` prefix sits on
+ * the enclosing declaration, so the full path is read from there.
+ *
  * @param clause A `namespace_use_clause` node.
- * @returns `[local spelling, imported short name]`, or null for a clause that
- *          imports no type.
+ * @returns `[local spelling, imported short name, full imported path]`, or null
+ *          for a clause that imports no type.
  */
 // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
-function phpUseClauseAlias(clause: any): [string, string] | null {
+function phpUseClauseAlias(clause: any): [string, string, string] | null {
   if (phpUseImportsNonType(clause)) return null;
   // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
   const kids: any[] = clause.children();
   const names = kids.filter((c) => c.kind() === "name" || c.kind() === "qualified_name");
   if (names.length === 0) return null;
-  const importedPath = names[0].text().trim().replace(/^\\+/, "").split("\\");
+  const clausePath = names[0].text().trim().replace(/^\\+/, "");
+  const importedPath = clausePath.split("\\");
   const imported = importedPath[importedPath.length - 1]?.trim() ?? "";
   if (!imported) return null;
   const aliased = names.length > 1 && kids.some((c) => c.kind() === "as");
   const local = aliased ? names[names.length - 1].text().trim() : imported;
   if (!local) return null;
-  return [local, imported];
+  const group = clause.parent();
+  const prefix = group?.kind() === "namespace_use_group"
+    ? group.parent()?.children()
+      // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+      .find((c: any) => c.kind() === "namespace_name")
+      ?.text().trim().replace(/^\\+/, "")
+    : undefined;
+  return [local, imported, prefix ? `${prefix}\\${clausePath}` : clausePath];
 }
 
 /** One namespace's extent in the source, and the `use` aliases declared in it. */
@@ -2852,12 +2903,17 @@ interface PhpNamespaceScope {
   readonly start: number;
   /** Source offset one past the last character in scope. */
   readonly end: number;
+  /**
+   * The namespace's name, unrooted: `App\Http`. Empty for a braced
+   * `namespace { … }` block, which is PHP's spelling of the global namespace.
+   */
+  readonly name: string;
   /** The `use` imports declared in this namespace alone, with their offsets. */
   readonly aliases: PhpAliasTable;
 }
 
 /**
- * Every namespace a PHP file declares, as a source extent, shortest first.
+ * Every namespace a PHP file declares, as a source extent, in source order.
  *
  * PHP writes a namespace in two forms and scopes them differently:
  *
@@ -2869,33 +2925,38 @@ interface PhpNamespaceScope {
  *
  * The grammar gives an unbraced `namespace_definition` a range covering only
  * `namespace A;` itself, so its extent has to be computed from its successor —
- * hence the two branches. Sorting shortest-first makes a lookup's first hit the
- * innermost scope, which keeps a malformed or nested tree from resolving
- * against an outer namespace when an inner one also contains the reference.
+ * hence the two branches. Only the root's own children are read, so no extent
+ * can enclose another: siblings do not overlap, and an unbraced extent stops
+ * where the next declaration starts. At most one extent contains any offset.
  *
  * @param root Parsed root of a PHP file.
- * @returns Extents with empty alias tables, shortest extent first; empty for a
- *          file that declares no namespace.
+ * @returns Extents with empty alias tables, in source order; empty for a file
+ *          that declares no namespace.
  */
 // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
 function buildPhpNamespaceScopes(root: any): PhpNamespaceScope[] {
   const endOfFile = root.range().end.index;
+  // A namespace declaration is a top-level statement — PHP rejects one
+  // anywhere else — so the root's own children hold every one of them. Read
+  // from there rather than by searching the tree: every file that declares a
+  // class now asks for its namespace, and a full traversal to find a statement
+  // that can only sit at the top charged each of them for the whole file.
   // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
-  const defs: any[] = safeFindAll(root, "namespace_definition").sort(
+  const defs: any[] = root.children().filter((c: any) => c.kind() === "namespace_definition").sort(
     // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
     (a: any, b: any) => a.range().start.index - b.range().start.index,
   );
-  const scopes: PhpNamespaceScope[] = defs.map((def, i) => {
+  return defs.map((def, i) => {
     const range = def.range();
     // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
     const braced = def.children().some((c: any) => c.kind() === "compound_statement");
     return {
       start: range.start.index,
       end: braced ? range.end.index : (defs[i + 1]?.range().start.index ?? endOfFile),
+      name: def.field("name")?.text().trim().replace(/^\\+/, "") ?? "",
       aliases: new Map() as PhpAliasTable,
     };
   });
-  return scopes.sort((a, b) => a.end - a.start - (b.end - b.start));
 }
 
 /**
@@ -2928,36 +2989,56 @@ function buildPhpNamespaceScopes(root: any): PhpNamespaceScope[] {
  * it must also have been declared above the reference. See
  * {@link PhpAliasEntry}.
  *
+ * The namespace in force comes from the same scopes: a reference inside a
+ * namespace's extent is in that namespace, and one outside every extent is in
+ * the global namespace.
+ *
  * @param root Parsed root of a PHP file.
- * @returns (local spelling, offset) → the import in force there.
+ * @returns The imports and the namespace in force at any offset.
  */
 // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
-function buildPhpAliasResolver(root: any): PhpAliasLookup {
+function buildPhpNames(root: any): PhpNames {
   const scopes = buildPhpNamespaceScopes(root);
   const scopeAt = (offset: number): PhpNamespaceScope | undefined =>
     scopes.find((s) => offset >= s.start && offset < s.end);
-  const fileAliases: PhpAliasTable = new Map();
-  // Walked declaration-first rather than straight to the clauses, because a
-  // `use function A\{B as C};` carries its qualifier on the declaration and
-  // its clauses look exactly like type imports from below. The per-clause
-  // check inside `phpUseClauseAlias` still has to run: a mixed group,
-  // `use A\{B, function c};`, qualifies its members individually.
-  for (const decl of safeFindAll(root, "namespace_use_declaration")) {
-    if (phpUseImportsNonType(decl)) continue;
-    for (const clause of safeFindAll(decl, "namespace_use_clause")) {
-      const alias = phpUseClauseAlias(clause);
-      if (!alias) continue;
-      const entry: PhpAliasEntry = {
-        offset: clause.range().start.index,
-        imported: alias[1],
-      };
-      phpAliasAdd(fileAliases, alias[0], entry);
-      const scope = scopeAt(entry.offset);
-      if (scope) phpAliasAdd(scope.aliases, alias[0], entry);
+  // The imports are read on the first lookup, not up front. Every file that
+  // declares a class asks for its namespace, but many never resolve a class
+  // name at all, and the walk below is a second pass over the whole tree.
+  let fileAliases: PhpAliasTable | undefined;
+  const imports = (): PhpAliasTable => {
+    if (fileAliases) return fileAliases;
+    const table: PhpAliasTable = new Map();
+    // Walked declaration-first rather than straight to the clauses, because a
+    // `use function A\{B as C};` carries its qualifier on the declaration and
+    // its clauses look exactly like type imports from below. The per-clause
+    // check inside `phpUseClauseAlias` still has to run: a mixed group,
+    // `use A\{B, function c};`, qualifies its members individually.
+    for (const decl of safeFindAll(root, "namespace_use_declaration")) {
+      if (phpUseImportsNonType(decl)) continue;
+      for (const clause of safeFindAll(decl, "namespace_use_clause")) {
+        const alias = phpUseClauseAlias(clause);
+        if (!alias) continue;
+        const entry: PhpAliasEntry = {
+          offset: clause.range().start.index,
+          imported: alias[1],
+          path: alias[2],
+        };
+        phpAliasAdd(table, alias[0], entry);
+        const scope = scopeAt(entry.offset);
+        if (scope) phpAliasAdd(scope.aliases, alias[0], entry);
+      }
     }
-  }
-  return (local, offset) =>
-    phpAliasAt(scopeAt(offset)?.aliases ?? fileAliases, local, offset);
+    fileAliases = table;
+    return table;
+  };
+  return {
+    importAt: (local, offset) => {
+      // First, so a namespace's own table is filled before it is read.
+      const file = imports();
+      return phpAliasAt(scopeAt(offset)?.aliases ?? file, local, offset);
+    },
+    namespaceAt: (offset) => scopeAt(offset)?.name ?? "",
+  };
 }
 
 /**
@@ -2981,114 +3062,42 @@ function extractFromPhp(
   const symbols: SymbolNode[] = [moduleSym];
   const scopes: ScopeFrame[] = [];
 
-  for (const k of ["class_declaration", "interface_declaration", "trait_declaration"]) {
-    for (const cls of safeFindAll(root, k)) {
-      const nameNode = safeFind(cls, "name");
-      if (!nameNode) continue;
-      const name = nameNode.text();
-      const r = cls.range();
-      const startLine = r.start.line + 1;
-      const endLine = r.end.line + 1;
-      const sym: SymbolNode = {
-        id: makeId(file, name, startLine),
-        name, qualifiedName: name,
-        kind: k.includes("interface") ? "interface" : k.includes("trait") ? "trait" : "class",
-        file, line: startLine, endLine, language,
-      };
-      symbols.push(sym);
-      scopes.push({ name, startLine, endLine, symbolId: sym.id });
-    }
-  }
-  // Each declaration's `return_type`, stashed by node kind as the symbols are
-  // read. These two kinds are walked here anyway, so asking `safeFindAll` for
-  // them again below re-walked the whole tree twice per file for nodes already
-  // in hand. Stashed rather than emitted: `pushTypeRef` attributes a reference
-  // to its innermost caller and so needs `scopes` complete, and the emission
-  // order — parameters and properties first, then methods, then functions —
-  // decides which of two same-key edges survives the dedupe, so it is kept
-  // exactly as it was. Collected above the name guard, because a declaration
-  // the guard skips still contributed its return type before.
-  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
-  const returnTypes = new Map<string, any[]>();
-  for (const k of ["function_definition", "method_declaration"]) {
-    // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
-    const forKind: any[] = [];
-    returnTypes.set(k, forKind);
-    for (const m of safeFindAll(root, k)) {
-      const returnType = m.field("return_type");
-      if (returnType) forKind.push(returnType);
-      const nameNode = safeFind(m, "name");
-      if (!nameNode) continue;
-      const name = nameNode.text();
-      const r = m.range();
-      const startLine = r.start.line + 1;
-      const endLine = r.end.line + 1;
-      const sym: SymbolNode = {
-        id: makeId(file, name, startLine),
-        name, qualifiedName: name,
-        kind: k === "function_definition" ? "function" : "method",
-        file, line: startLine, endLine, language,
-      };
-      symbols.push(sym);
-      scopes.push({ name, startLine, endLine, symbolId: sym.id });
-    }
-  }
-
-  const rawCalls: ExtractedSymbols["rawCalls"] = [];
-  for (const k of ["function_call_expression", "member_call_expression", "scoped_call_expression"]) {
-    for (const node of safeFindAll(root, k)) {
-      const calleeName = extractCalleeNamePhp(node.text());
-      if (!calleeName) continue;
-      const r = node.range();
-      const callLine = r.start.line + 1;
-      rawCalls.push({
-        callerId: findCallerId(scopes, callLine, moduleSym.id),
-        calleeName,
-        kind: "call",
-        callSite: { file, line: callLine },
-      });
-    }
-  }
-
-  // ── Structural type references ──────────────────────────────────────
-  // `extends`, `implements`, a trait `use`, `new`, and parameter, property and
-  // return types — including a closure's and an arrow function's return type.
-  // Without these a class reached only by inheritance or a type hint
-  // has no symbol edge at all, so file-mode `codebase_impact` — which derives
-  // its reverse index from resolved symbol edges — reports no dependents for
-  // a base class every subclass names.
-  //
-  // Neither `sourceModule` nor `importedName` is set on these edges, and that
-  // is deliberate. Resolution's module-targeted branch matches `sourceModule`
-  // as a *path*; a PHP FQCN is not one, so handing it a backslashed name
-  // strands the edge as `unresolved` and additionally suppresses the same-file
-  // branch, which is guarded on `!edge.sourceModule`. Left undefined, each
-  // edge takes the untargeted scan, which searches only the caller's resolved
-  // file-import dependencies — for PHP exactly what the `use`/require, PSR-4
-  // and FQCN machinery produced. The search is therefore confined to this
-  // file's own import closure by construction, rather than guessing a short
-  // name repository-wide.
-  //
-  // Known limitation, not a bug to fix here: an inline FQCN with no matching
-  // `use` or require produces no file-import dependency, so the scan cannot
-  // reach it and the edge stays `unresolved`. That is the honest outcome —
-  // the only alternative is the repository-wide short-name guessing this is
-  // built to avoid.
-  // Aliases are resolved per namespace, not per file: see
-  // {@link buildPhpAliasResolver} for why a file-wide table fabricates an edge
-  // in a file that opens more than one namespace.
-  // Built on first use, not per file. The resolver walks the tree twice — for
-  // `namespace_definition` and `namespace_use_declaration`, then the clauses
-  // inside each declaration — and most PHP files hold no structural type
-  // reference at all, so building it eagerly charged every one of them for a
-  // table nothing would read. Memoised on the first lookup,
-  // since a file that has one reference usually has many.
-  let aliasResolver: PhpAliasLookup | undefined;
-  const aliasAt: PhpAliasLookup = (local, offset) => {
-    if (aliasResolver === undefined) aliasResolver = buildPhpAliasResolver(root);
-    return aliasResolver(local, offset);
+  // Namespaces and imports, read on first use. A file that declares no class,
+  // makes no static call and names no type never asks, and pays nothing.
+  let phpNames: PhpNames | undefined;
+  const names = (): PhpNames => {
+    phpNames ??= buildPhpNames(root);
+    return phpNames;
   };
-  const typeRefs: ExtractedSymbols["rawCalls"] = [];
+  // The owner forms `SymbolNode.phpOwner` documents: a namespace as a prefix,
+  // with PHP's trailing `\` (`\App\Models\`, `\` for the global namespace), and
+  // a class as a name (`\App\Models\Invoice`).
+  const namespacePrefixAt = (offset: number): string => {
+    const ns = names().namespaceAt(offset);
+    return ns ? `\\${ns}\\` : "\\";
+  };
+  // The class, interface, trait or enum a method is declared in, as its fully
+  // qualified name. Read from the declaration's `name` field, not its first
+  // `name` descendant: an attribute list comes before the name inside the
+  // declaration, and `#[Entity] class User` would otherwise own its methods as
+  // `Entity`. A method of an anonymous class has no name to be reached by, so
+  // it has no owner, and nothing qualified can resolve to it.
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const ownerClassOf = (method: any): string | undefined => {
+    for (let node = method.parent(); node; node = node.parent()) {
+      const kind = node.kind();
+      if (kind === "anonymous_class") return undefined;
+      if (
+        kind === "class_declaration" || kind === "interface_declaration"
+        || kind === "trait_declaration" || kind === "enum_declaration"
+      ) {
+        const name = node.field("name")?.text();
+        return name ? `${namespacePrefixAt(node.range().start.index)}${name}` : undefined;
+      }
+    }
+    return undefined;
+  };
+
   /**
    * Whether the parse handed back part of a type reference rather than all of it.
    *
@@ -3120,18 +3129,204 @@ function extractFromPhp(
    * between no edge and an edge to whatever class the surviving part names.
    *
    * The two ends do not ask the same question. On the right, either an
-   * identifier character or a `\` carries on. On the left, only two identifier
-   * characters meeting do, because that alone is what would have made the runs
-   * one *name*: a `\` starts a fresh segment instead, so a fragment cut from in
-   * front of a `\`-rooted node costs a leading segment — and
-   * {@link phpTypeRefName} keeps only the terminal one, which is the same
-   * either way — while `new\App\Made()`, valid PHP since `\` ends the keyword
-   * there, must keep its edge rather than lose it to the `w` of `new`.
+   * identifier character or a `\` carries on. On the left, two identifier
+   * characters meeting always do. A `\` behind an identifier run is harder:
+   * `new\App\Made()` is valid PHP, since `\` ends the keyword there, and must
+   * keep its edge rather than lose it to the `w` of `new`; but a fragment cut
+   * from in front of a `\`-rooted node costs a leading segment, and
+   * {@link phpClassRef} reads every segment into the qualifier, so
+   * `new 𠮷\App\Made()` would name `\App\Made` rather than the class written.
+   * Every keyword that can stand there is ASCII and every fragment the grammar
+   * cuts is not, so a run holding a non-ASCII character is a fragment.
    */
-  const isSplitName = (range: { start: { index: number }; end: { index: number } }): boolean =>
-    (PHP_IDENTIFIER_CHAR.test(source[range.start.index - 1] ?? "")
-      && PHP_IDENTIFIER_CHAR.test(source[range.start.index] ?? ""))
-    || PHP_TYPE_REF_CHAR.test(source[range.end.index] ?? "");
+  const isSplitName = (range: { start: { index: number }; end: { index: number } }): boolean => {
+    const start = range.start.index;
+    if (PHP_TYPE_REF_CHAR.test(source[range.end.index] ?? "")) return true;
+    if (!PHP_IDENTIFIER_CHAR.test(source[start - 1] ?? "")) return false;
+    if (source[start] !== "\\") return PHP_IDENTIFIER_CHAR.test(source[start] ?? "");
+    for (let i = start - 1; i >= 0 && PHP_IDENTIFIER_CHAR.test(source[i]); i--) {
+      if (source.charCodeAt(i) > 0x7f) return true;
+    }
+    return false;
+  };
+
+  // The class a node spells, read at its own offset, or null for a name the
+  // parse cut short ({@link isSplitName}) — qualified by the part that
+  // survived, it would name a class the source never writes — or one that
+  // names no class ({@link phpClassRef}).
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const classRefOf = (node: any): PhpClassRef | null => {
+    const range = node.range();
+    return isSplitName(range) ? null : phpClassRef(node.text(), range.start.index, names());
+  };
+
+  // A class written as a name, as the fully qualified name it resolves to
+  // under the file's namespace and imports: `Invoice`, `Models\Invoice`,
+  // `\App\Models\Invoice` or `namespace\Invoice`, each in the class form
+  // `SymbolNode.phpOwner` documents (`\App\Models\Invoice`). Anything else —
+  // a variable, an expression, or `self`, `static` and `parent`, which are a
+  // `relative_scope` rather than a name — has no such name, and neither does
+  // a name {@link classRefOf} refuses.
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const classNameOf = (node: any): string | undefined => {
+    const kind = node?.kind();
+    if (kind !== "name" && kind !== "qualified_name" && kind !== "relative_name") return undefined;
+    const ref = classRefOf(node);
+    return ref ? `\\${ref.fqcn}` : undefined;
+  };
+
+  // A static call's class, when it is written as a name: `Invoice::capture()`
+  // carries the class it names as its qualifier. Everything else is left
+  // unqualified and resolves as it always has — `$class::m()`, and `self::`,
+  // `static::` and `parent::`, which are answered by the class the call sits
+  // in and are outside this change. So is a method written as a variable:
+  // `Invoice::$m()` runs whatever method `$m` holds, and qualified, the name
+  // the callee scan reads from it would resolve with confidence to a method
+  // that happens to be called `m`.
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const staticCallQualifier = (node: any): string | undefined =>
+    node.field("name")?.kind() === "name" ? classNameOf(node.field("scope")) : undefined;
+
+  // What a class or trait inherits static methods from, read from its own
+  // declaration: the class a class `extends`, and the traits a class or trait
+  // `use`s in its body. Resolution follows these when the class a static call
+  // names does not declare the method itself, as PHP does. Only the body's
+  // direct `use_declaration`s are read, so a nested anonymous class's traits
+  // are not taken for its container's, and a `use T { a as b; }` alias list,
+  // filed under its own `use_list`, is not read as a trait. An interface
+  // declares no method a static call can run, so its `extends` is not read.
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const inheritanceOf = (cls: any): Pick<SymbolNode, "phpExtends" | "phpTraits"> => {
+    const out: Pick<SymbolNode, "phpExtends" | "phpTraits"> = {};
+    if (cls.kind() === "class_declaration") {
+      // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+      const base = cls.children().find((c: any) => c.kind() === "base_clause");
+      // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+      const parent = base?.children().map((c: any) => classNameOf(c)).find(Boolean);
+      if (parent) out.phpExtends = parent;
+    }
+    const traits: string[] = [];
+    for (const child of cls.field("body")?.children() ?? []) {
+      if (child.kind() !== "use_declaration") continue;
+      for (const named of child.children()) {
+        const trait = classNameOf(named);
+        if (trait) traits.push(trait);
+      }
+    }
+    if (traits.length > 0) out.phpTraits = traits;
+    return out;
+  };
+
+  for (const k of ["class_declaration", "interface_declaration", "trait_declaration"]) {
+    for (const cls of safeFindAll(root, k)) {
+      const nameNode = safeFind(cls, "name");
+      if (!nameNode) continue;
+      const name = nameNode.text();
+      const r = cls.range();
+      const startLine = r.start.line + 1;
+      const endLine = r.end.line + 1;
+      const sym: SymbolNode = {
+        id: makeId(file, name, startLine),
+        name, qualifiedName: name,
+        kind: k.includes("interface") ? "interface" : k.includes("trait") ? "trait" : "class",
+        file, line: startLine, endLine, language,
+        phpOwner: namespacePrefixAt(r.start.index),
+        ...inheritanceOf(cls),
+      };
+      symbols.push(sym);
+      scopes.push({ name, startLine, endLine, symbolId: sym.id });
+    }
+  }
+  // Each declaration's `return_type`, stashed by node kind as the symbols are
+  // read. These two kinds are walked here anyway, so asking `safeFindAll` for
+  // them again below re-walked the whole tree twice per file for nodes already
+  // in hand. Stashed rather than emitted: `pushTypeRef` attributes a reference
+  // to its innermost caller and so needs `scopes` complete, and the emission
+  // order — parameters and properties first, then methods, then functions —
+  // decides which of two same-key edges survives the dedupe, so it is kept
+  // exactly as it was. Collected above the name guard, because a declaration
+  // the guard skips still contributed its return type before.
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const returnTypes = new Map<string, any[]>();
+  for (const k of ["function_definition", "method_declaration"]) {
+    // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+    const forKind: any[] = [];
+    returnTypes.set(k, forKind);
+    for (const m of safeFindAll(root, k)) {
+      const returnType = m.field("return_type");
+      if (returnType) forKind.push(returnType);
+      const nameNode = safeFind(m, "name");
+      if (!nameNode) continue;
+      const name = nameNode.text();
+      const r = m.range();
+      const startLine = r.start.line + 1;
+      const endLine = r.end.line + 1;
+      // An `abstract` method has no body for a call to run, so it is left
+      // unowned, as an anonymous class's methods are, and no qualified edge
+      // can reach it. PHP answers the call with the implementation instead: a
+      // trait's `abstract public static function make()` does not shadow the
+      // `make()` its class inherits, and calling an abstract method by name is
+      // an error. Owned, the declaration was found first and resolution
+      // stopped there, with the method PHP actually runs one level further up.
+      const owner = k === "method_declaration"
+        // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+        && !m.children().some((c: any) => c.kind() === "abstract_modifier")
+        ? ownerClassOf(m)
+        : undefined;
+      const sym: SymbolNode = {
+        id: makeId(file, name, startLine),
+        name, qualifiedName: name,
+        kind: k === "function_definition" ? "function" : "method",
+        file, line: startLine, endLine, language,
+        ...(owner ? { phpOwner: owner } : {}),
+      };
+      symbols.push(sym);
+      scopes.push({ name, startLine, endLine, symbolId: sym.id });
+    }
+  }
+
+  const rawCalls: ExtractedSymbols["rawCalls"] = [];
+  for (const k of ["function_call_expression", "member_call_expression", "scoped_call_expression"]) {
+    for (const node of safeFindAll(root, k)) {
+      const calleeName = extractCalleeNamePhp(node.text());
+      if (!calleeName) continue;
+      const r = node.range();
+      const callLine = r.start.line + 1;
+      const calleeQualifier = k === "scoped_call_expression" ? staticCallQualifier(node) : undefined;
+      rawCalls.push({
+        callerId: findCallerId(scopes, callLine, moduleSym.id),
+        calleeName,
+        kind: "call",
+        ...(calleeQualifier ? { calleeQualifier } : {}),
+        callSite: { file, line: callLine },
+      });
+    }
+  }
+
+  // ── Structural type references ──────────────────────────────────────
+  // `extends`, `implements`, a trait `use`, `new`, and parameter, property and
+  // return types — including a closure's and an arrow function's return type.
+  // Without these a class reached only by inheritance or a type hint
+  // has no symbol edge at all, so file-mode `codebase_impact` — which derives
+  // its reverse index from resolved symbol edges — reports no dependents for
+  // a base class every subclass names.
+  //
+  // Neither `sourceModule` nor `importedName` is set on these edges, and that
+  // is deliberate. Resolution's module-targeted branch matches `sourceModule`
+  // as a *path*; a PHP FQCN is not one, so handing it a backslashed name
+  // strands the edge as `unresolved`. Each edge carries its namespace as
+  // `calleeQualifier` instead, and resolution's PHP branch matches the whole
+  // qualified class against the owners declared in the caller's own file, its
+  // resolved file-import dependencies, and then the rest of the project. That
+  // last step is what reaches an inline FQCN, or a sibling in the caller's own
+  // namespace, that no `use` or require puts in the file graph; it cannot
+  // guess, because it matches the qualified name rather than a short one.
+  //
+  // Aliases are resolved per namespace, not per file: see
+  // {@link buildPhpNames} for why a file-wide table fabricates an edge in a
+  // file that opens more than one namespace. The same `names()` the symbols
+  // above were owned through, so a file's namespaces are read once.
+  const typeRefs: ExtractedSymbols["rawCalls"] = [];
 
   // Takes the node rather than its text and line so the alias lookup can use
   // the reference's own source offset — two braced namespace blocks fit on one
@@ -3139,16 +3334,20 @@ function extractFromPhp(
   // declared later on the same line must not reach back to it.
   // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
   const pushTypeRef = (node: any, kind: EdgeKind): void => {
-    const range = node.range();
-    const line = range.start.line + 1;
-    if (isSplitName(range)) return;
-    const ref = phpTypeRefName(node.text(), range.start.index, aliasAt);
+    const ref = classRefOf(node);
     if (!ref) return;
+    const line = node.range().start.line + 1;
+    // The namespace the class is declared in, as the prefix its class symbol is
+    // owned under — `\App\Models\` for `App\Models\Invoice`, `\` for a class in
+    // the global namespace. Resolution matches the class name inside it.
+    const cut = ref.fqcn.lastIndexOf("\\");
+    const calleeQualifier = cut < 0 ? "\\" : `\\${ref.fqcn.slice(0, cut)}\\`;
     typeRefs.push({
       callerId: findCallerId(scopes, line, moduleSym.id),
       calleeName: ref.calleeName,
       kind,
       localAlias: ref.localAlias,
+      calleeQualifier,
       callSite: { file, line },
     });
   };
@@ -3164,7 +3363,7 @@ function extractFromPhp(
     for (const clause of safeFindAll(root, k)) {
       for (const child of clause.children()) {
         const kind = child.kind();
-        if (kind !== "name" && kind !== "qualified_name") continue;
+        if (kind !== "name" && kind !== "qualified_name" && kind !== "relative_name") continue;
         pushTypeRef(child, "type_reference");
       }
     }
@@ -3177,7 +3376,7 @@ function extractFromPhp(
   for (const node of safeFindAll(root, "object_creation_expression")) {
     for (const child of node.children()) {
       const kind = child.kind();
-      if (kind !== "name" && kind !== "qualified_name") continue;
+      if (kind !== "name" && kind !== "qualified_name" && kind !== "relative_name") continue;
       pushTypeRef(child, "call");
       break; // the class name is the only such child; `arguments` is its own node
     }
@@ -3243,16 +3442,19 @@ function extractFromPhp(
     for (const typeNode of returnTypes.get(k) ?? []) pushNamedTypes(typeNode);
   }
 
-  // Deduplicate on (callerId, calleeName, kind), as the TypeScript extractor
-  // does: a class named in both a parameter and the return type of one method
-  // is one edge, not two. The seen-set starts from the call edges already
-  // collected so a `new Foo()` beside a `Foo()` adds nothing — existing call
+  // Deduplicate on (callerId, qualifier, calleeName, kind), as the TypeScript
+  // extractor does on everything but the qualifier: a class named in both a
+  // parameter and the return type of one method is one edge, not two. The
+  // qualifier is part of the key because it is part of what the edge names —
+  // `new A\Foo()` and `new B\Foo()` in one method are two classes, and a
+  // `new Foo()` is not the same edge as a bare `Foo()` function call beside it.
+  // The seen-set starts from the call edges already collected, so existing call
   // edges are never dropped, only matched against.
-  const seenTypeRefs = new Set(
-    rawCalls.map((c) => `${c.callerId}::${c.calleeName}::${c.kind}`),
-  );
+  const dedupeKey = (c: ExtractedSymbols["rawCalls"][number]): string =>
+    `${c.callerId}::${c.calleeQualifier ?? ""}::${c.calleeName}::${c.kind}`;
+  const seenTypeRefs = new Set(rawCalls.map(dedupeKey));
   for (const ref of typeRefs) {
-    const key = `${ref.callerId}::${ref.calleeName}::${ref.kind}`;
+    const key = dedupeKey(ref);
     if (seenTypeRefs.has(key)) continue;
     seenTypeRefs.add(key);
     rawCalls.push(ref);
