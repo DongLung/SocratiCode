@@ -102,7 +102,7 @@ For one recommended setup path per host and short practical scenarios, use the [
 }
 ```
 
-Configuration schemas are host-specific. Continue, VS Code, Zed, OpenCode, Gemini CLI, Cline, and Roo Code have dedicated examples in [Plugins and host integrations](#plugins-and-host-integrations).
+Configuration schemas are host-specific. Continue, VS Code, Zed, OpenCode, Gemini CLI, and Cline have dedicated examples in [Plugins and host integrations](#plugins-and-host-integrations).
 
 ### Keeping SocratiCode up to date
 
@@ -153,7 +153,6 @@ The SocratiCode engine requires Node.js 18.17 or newer with `npx` on `PATH`; som
 | Gemini CLI | Direct MCP | User |
 | Continue | Direct MCP | Project or user config |
 | Cline | Direct MCP | Project or user config |
-| Roo Code | Direct MCP | Project or user config |
 | Zed | Direct MCP | User or project settings |
 | OpenCode | Direct MCP | Project or user config |
 
@@ -322,7 +321,7 @@ Start a new Chat and use **MCP: List Servers** to confirm that only `socraticode
 
 The separately published editor extension adds the SocratiCode sidebar, status item, commands, walkthrough, and interactive graph webview. Install **SocratiCode** from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=giancarloerra.socraticode) in the current VS Code profile.
 
-On Microsoft VS Code 1.99+ and compatible editors that implement the VS Code MCP provider API, the extension registers SocratiCode with the editor's native MCP registry. It does not configure independent clients such as Cline, Continue, or Roo Code.
+On Microsoft VS Code 1.99+ and compatible editors that implement the VS Code MCP provider API, the extension registers SocratiCode with the editor's native MCP registry. It does not configure independent clients such as Cline or Continue.
 
 Reload the window and start a new Chat session after installation. Run **MCP: List Servers** to confirm that `SocratiCode` is running, and open the SocratiCode sidebar to verify the editor UI. Update it through the Extensions view or **Extensions: Check for Extension Updates**.
 
@@ -459,24 +458,6 @@ For project scope, save this complete object as `.cline/mcp.json`. For user scop
 ```
 
 Start a new Cline task and verify that `socraticode` and its tools appear in the MCP Servers view. Reconnect the server after a release. See the [Cline MCP documentation](https://docs.cline.bot/mcp/mcp-overview).
-
-### Roo Code
-
-For project scope, save this complete object as `.roo/mcp.json`. For user scope, open Roo Code's MCP Servers view and select **Edit Global MCP**:
-
-```json
-{
-  "mcpServers": {
-    "socraticode": {
-      "command": "npx",
-      "args": ["-y", "--prefer-online", "socraticode@latest"],
-      "disabled": false
-    }
-  }
-}
-```
-
-Start a new Roo Code task and verify that `socraticode` is connected in the MCP Servers view. Restart the server after a release. Project configuration takes precedence over a global server with the same name. See [Using MCP in Roo Code](https://github.com/RooCodeInc/Roo-Code-Docs/blob/main/docs/features/mcp/using-mcp-in-roo.mdx).
 
 ### Zed
 
@@ -702,7 +683,7 @@ For best results, add instructions like the following to your AI assistant's pro
 | VS Code Copilot | `.github/copilot-instructions.md`, or a custom instructions file in your VS Code User prompts folder |
 | Zed | `AGENTS.md` at project root, or `~/.config/zed/AGENTS.md` for personal instructions. Zed uses the first matching supported project instruction file. |
 | Windsurf | `.windsurfrules` at project root |
-| Claude Desktop / Cline / Roo Code | Add directly to your system prompt configuration |
+| Claude Desktop / Cline | Add directly to your system prompt configuration |
 
 > **Why this matters**: Installing the MCP server alone gives your agent access to SocratiCode tools, but the agent still decides when to use them. Adding these instructions to your project ensures the agent consistently prefers SocratiCode search over raw file reads, uses the graph for dependency-aware tasks, and follows the search-before-reading workflow.
 
@@ -1461,7 +1442,7 @@ Operational settings apply to the new process. Settings that define stored vecto
 |------|-------------|---------|
 | Claude Code native plugin | `~/.claude/settings.json` | Top-level `"env": { "KEY": "value" }` |
 | Claude Code MCP-only | User or project MCP configuration | `claude mcp add --env KEY=value ...` or an `env` object in the stored server definition |
-| Claude Desktop, Windsurf, Cline, and Roo Code | Host MCP JSON | `"env": { "KEY": "value" }` inside the server definition |
+| Claude Desktop, Windsurf, and Cline | Host MCP JSON | `"env": { "KEY": "value" }` inside the server definition |
 | OpenAI Codex native plugin | `~/.codex/config.toml` | [Disable its bundled server and add one top-level configured server](#openai-codex-plugin) |
 | OpenAI Codex MCP-only | `~/.codex/config.toml` | `codex mcp add --env KEY=value`, inline TOML `env = { ... }`, or `[mcp_servers.NAME.env]` |
 | VS Code Agent Plugin | VS Code MCP server state plus user MCP configuration | [Keep the plugin, disable its bundled server, and add a direct server](#vs-code-agent-plugin) using `env` or `envFile` |
@@ -1476,7 +1457,7 @@ Operational settings apply to the new process. Settings that define stored vecto
 
 Worked examples with a few env vars set:
 
-**MCP JSON hosts** such as Claude Desktop, Windsurf, Cline, Roo Code, and Cursor:
+**MCP JSON hosts** such as Claude Desktop, Windsurf, Cline, and Cursor:
 
 ```json
 {

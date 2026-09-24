@@ -11,7 +11,6 @@ Choose the host you use, then index one project and try one search. Each setup p
 - [Gemini CLI](gemini-cli.md)
 - [Continue](continue.md)
 - [Cline](cline.md)
-- [Roo Code](roo-code.md)
 - [Zed](zed.md)
 - [OpenCode](opencode.md)
 
