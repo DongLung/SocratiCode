@@ -1,6 +1,6 @@
 # VS Code: first index and search
 
-Have Microsoft VS Code 1.99+, Node.js 18.17+ with `npx`, and running Docker available. [Enable VS Code's AI features and sign in to GitHub Copilot](https://code.visualstudio.com/docs/setup/copilot) to use native Agent Chat with MCP tools.
+Have Microsoft VS Code 1.99+, Node.js 18.17+ with `npx`, and running Docker available. Enable VS Code's AI features, then [sign in to GitHub Copilot](https://code.visualstudio.com/docs/setup/copilot) or [configure a BYOK model with tool calling](https://code.visualstudio.com/docs/agent-customization/language-models) for native Agent Chat.
 
 1. Install the [SocratiCode editor extension](https://marketplace.visualstudio.com/items?itemName=giancarloerra.socraticode) from the Visual Studio Marketplace. Reload the window and start a new Chat session.
 2. Run **MCP: List Servers** and confirm **SocratiCode** is running. Open the SocratiCode sidebar to confirm the editor integration loaded.
