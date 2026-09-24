@@ -117,7 +117,7 @@ Native plugins and extensions also contain **skills, instructions, manifests, or
 | VS Code Agent Plugin | Leave `extensions.autoUpdate` enabled for daily checks, or run **Extensions: Check for Extension Updates**, then start a new Chat |
 | VS Code editor extension | Update it through the Extensions view or **Extensions: Check for Extension Updates**, then reload the window |
 | Cursor local plugin | Update to the latest GitHub release tag using the commands in the [Cursor section](#cursor), then reload Cursor |
-| Gemini CLI extension | Install with `--auto-update`, or run `gemini extensions update socraticode`, then restart Gemini |
+| Gemini CLI direct MCP | Restart Gemini to reconnect the server and resolve the current npm release |
 | Direct MCP only | No separate plugin files are installed; restart or reconnect the MCP server to resolve the current npm release |
 
 `@latest` refers to npm's published `latest` distribution tag; it does not refer to a Git branch. `--prefer-online` forces npm to check for updated package metadata even when its cache is still fresh. If the same registry is temporarily unavailable, npm can still use an already populated cache; a first installation still requires registry access. See the [npm exec cache documentation](https://docs.npmjs.com/cli/npm-exec/#a-note-on-caching) and [npm distribution-tag documentation](https://docs.npmjs.com/adding-dist-tags-to-packages/).
@@ -140,9 +140,9 @@ Restart your host. With the default local configuration, first use pulls the req
 
 ## Plugins and host integrations
 
-SocratiCode can be installed as a native agent plugin, a VS Code editor extension, a Gemini CLI extension, or a directly configured local stdio MCP server. These are separate integration types and use different configuration and update paths.
+SocratiCode can be installed as a native agent plugin, a VS Code editor extension, or a directly configured local stdio MCP server. These are separate integration types and use different configuration and update paths.
 
-Every path below requires Node.js 18.17 or newer with `npx` on `PATH`. The default local stack also requires Docker to be running. Docker is optional when Qdrant is external and embeddings use either a detected native Ollama instance or a cloud or external provider.
+The SocratiCode engine requires Node.js 18.17 or newer with `npx` on `PATH`; some hosts require a newer Node.js version. The default local stack also requires Docker to be running. Docker is optional when Qdrant is external and embeddings use either a detected native Ollama instance or a cloud or external provider.
 
 | Host | Recommended integration | Scope |
 |:-----|:------------------------|:------|
@@ -150,7 +150,7 @@ Every path below requires Node.js 18.17 or newer with `npx` on `PATH`. The defau
 | OpenAI Codex | Native plugin | User |
 | VS Code | Agent Plugin or editor extension | Current VS Code profile |
 | Cursor | Local Cursor plugin or direct MCP | User or project |
-| Gemini CLI | Gemini extension | User |
+| Gemini CLI | Direct MCP | User |
 | Continue | Direct MCP | Project or user config |
 | Cline | Direct MCP | Project or user config |
 | Roo Code | Direct MCP | Project or user config |
@@ -388,23 +388,18 @@ Reload Cursor and verify under **Customize** that only `socraticode-configured` 
 
 The SocratiCode package on Open VSX is a VS Code-style editor extension, not a Cursor plugin. Installing that extension does not establish that Cursor implements VS Code's native MCP provider API. Use the local plugin or direct MCP path when MCP availability is required.
 
-### Gemini CLI extension
+<a id="gemini-cli-extension"></a>
 
-Install the user-scoped Gemini extension with automatic updates, verify it, then restart any active Gemini CLI session:
+### Gemini CLI
 
-```bash
-gemini extensions install https://github.com/giancarloerra/socraticode --auto-update
-gemini extensions list
-```
-
-If it was installed without `--auto-update`, update it manually and restart Gemini:
+Add the user-scoped MCP server, verify it, then restart any active Gemini CLI session:
 
 ```bash
-gemini extensions update socraticode
-gemini extensions list
+gemini mcp add --scope user socraticode npx -y --prefer-online socraticode@latest
+gemini mcp list
 ```
 
-Gemini limits which inherited environment variables are passed to extension MCP servers. For advanced configuration, define a server with the same name in user scope (`~/.gemini/settings.json`) or workspace scope (`.gemini/settings.json`). That definition overrides the extension server and explicitly forwards only the variables named in `env`:
+For advanced configuration, edit the server in user scope (`~/.gemini/settings.json`) or define it in workspace scope (`.gemini/settings.json`) and explicitly forward the variables named in `env`:
 
 ```json
 {
@@ -424,7 +419,7 @@ Gemini limits which inherited environment variables are passed to extension MCP 
 }
 ```
 
-Keep secret values in the process environment rather than committing them. Restart Gemini and run `gemini mcp list` to verify the overridden server. See the [Gemini extension reference](https://geminicli.com/docs/extensions/reference/) and [Gemini MCP configuration](https://geminicli.com/docs/tools/mcp-server/).
+Keep secret values in the process environment rather than committing them. Restart Gemini and run `gemini mcp list` to verify the configured server. See [Gemini MCP configuration](https://geminicli.com/docs/tools/mcp-server/).
 
 ### Continue
 
@@ -1476,7 +1471,7 @@ Operational settings apply to the new process. Settings that define stored vecto
 | Cursor direct MCP | User or project `mcp.json` | `"env": { "KEY": "value" }` inside the server definition |
 | Continue | YAML config | `env:` map inside the `mcpServers` list item |
 | Zed | `context_servers` JSON | `"env": { "KEY": "value" }` |
-| Gemini CLI extension override | `~/.gemini/settings.json` or `.gemini/settings.json` | Explicit `"env"` entries; the extension does not inherit every process variable |
+| Gemini CLI direct MCP | `~/.gemini/settings.json` or `.gemini/settings.json` | Explicit `"env"` entries for the server |
 | OpenCode 1.x / V2 | `opencode.json` / `opencode.jsonc` ([schema](https://opencode.ai/config.json)) | `"environment": { "KEY": "value" }`, not `"env"`; V2 nests the server under `mcp.servers` |
 
 Worked examples with a few env vars set:

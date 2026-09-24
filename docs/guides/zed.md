@@ -16,7 +16,7 @@ Have Zed, Node.js 18.17+ with `npx`, and running Docker available. Zed's Agent P
    }
    ```
 
-2. In **Settings → AI → MCP Servers**, confirm SocratiCode's indicator says the server is active. Start a new Agent conversation and request `codebase_status`.
+2. If Zed opens the project in Restricted Mode, trust the project so it can start MCP servers from `.zed/settings.json`. In **Settings → AI → MCP Servers**, confirm SocratiCode's indicator says the server is active. Start a new Agent conversation and request `codebase_status`.
 3. Ask Agent to run `codebase_index` for this project. Check `codebase_status` until complete, then use `codebase_search` for a known function or feature.
 
 The default watcher handles subsequent file changes. After a SocratiCode release, restart the server from Zed's MCP Servers page and start a new conversation.
