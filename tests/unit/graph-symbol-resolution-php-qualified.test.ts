@@ -10,8 +10,9 @@ import type { CodeGraph, SymbolEdge, SymbolNode } from "../../src/types.js";
  * A qualified PHP edge carries the class a static call names, or the namespace
  * a class reference names, and every PHP class and method carries what
  * declares it. Resolution requires the two to match — in the caller's own file
- * first, then across its dependencies — and leaves the edge `unresolved` when
- * they do not, rather than falling back to the name.
+ * first, then across its dependencies, then anywhere in the project — and
+ * leaves the edge `unresolved` when they do not, rather than falling back to
+ * the name.
  */
 describe("PHP qualified edges at the resolver", () => {
   const CALLER = "src/Schema/Schema.php";
@@ -173,12 +174,18 @@ describe("PHP qualified edges at the resolver", () => {
     expect(edge.confidence).toBe("unresolved");
   });
 
-  it("searches only the caller's own file and dependencies, as every edge does", () => {
-    // `Report::build()` names a real class, but not one the caller reaches.
-    // The qualifier narrows the search; it does not widen it.
+  it("finds a class outside the caller's dependencies by its exact qualified name", () => {
+    // `Report` is not among the caller's dependencies — a sibling in its own
+    // namespace needs no `use`, so the file graph may draw no edge to it — but
+    // the whole qualified name can only reach the class the source names.
     const edge = resolve("build", "\\App\\Elsewhere\\Report");
-    expect(edge.calleeCandidates).toEqual([]);
-    expect(edge.confidence).toBe("unresolved");
+    expect(edge.calleeCandidates).toEqual([`${UNREACHED}::build#7`]);
+    expect(edge.confidence).toBe("unique");
+  });
+
+  it("still leaves a method name alone unmatched outside the dependencies", () => {
+    // Unqualified, `build()` is answered by name, and only within reach.
+    expect(resolve("build").confidence).toBe("unresolved");
   });
 
   it("resolves an unqualified PHP call exactly as before", () => {

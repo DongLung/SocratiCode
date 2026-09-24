@@ -301,25 +301,23 @@ export function resolveCallSites(
   // other: `const Config` cannot qualify `Config::run()`, so the file that
   // declares it is not an answer.
   const kindOfSymbolId = new Map<string, SymbolNode["kind"]>();
-  // file → {@link phpOwnedKey} → the ids of the PHP symbols declared under
-  // that owner and name. Holds PHP symbols only, and only those that have an
-  // owner; a qualified PHP edge is answered from here and nowhere else.
-  const phpOwnedByFile = new Map<string, Map<string, string[]>>();
+  // {@link phpOwnedKey} → the ids of the PHP symbols declared under that
+  // owner and name, project-wide. Holds PHP symbols only, and only those that
+  // have an owner; a qualified PHP edge is answered from here and nowhere
+  // else. The key is a whole qualified name, so it nearly always has one
+  // declaration, and narrowing that to the caller's file or dependencies is a
+  // filter over it rather than an index of its own.
+  const phpOwnedAnywhere = new Map<string, string[]>();
   for (const [file, syms] of symbolsByFile.entries()) {
     const idx = new Map<string, SymbolNode[]>();
     for (const s of syms) {
       fileOfSymbolId.set(s.id, file);
       kindOfSymbolId.set(s.id, s.kind);
       if (s.phpOwner !== undefined) {
-        let owned = phpOwnedByFile.get(file);
-        if (!owned) {
-          owned = new Map();
-          phpOwnedByFile.set(file, owned);
-        }
         const key = phpOwnedKey(s.phpOwner, s.name);
-        const ids = owned.get(key);
-        if (ids) ids.push(s.id);
-        else owned.set(key, [s.id]);
+        const anywhere = phpOwnedAnywhere.get(key);
+        if (anywhere) anywhere.push(s.id);
+        else phpOwnedAnywhere.set(key, [s.id]);
       }
       if (s.name === "<module>") continue;
       const existing = idx.get(s.name);
@@ -1289,6 +1287,21 @@ export function resolveCallSites(
       cachedCallerSceneEntries ??= sceneEntriesForCaller(callerFile, callerGodotRoot);
       return cachedCallerSceneEntries;
     };
+    // The ids declared under a {@link phpOwnedKey}, nearest first: those in the
+    // caller's own file, else those in its dependencies, else every one in the
+    // project. A key the project does not declare at all — the common case for
+    // a vendor class (`DB::table()`) — is answered by the first lookup.
+    let callerDeps: Set<string> | undefined;
+    const phpFound = (key: string): readonly string[] => {
+      const anywhere = phpOwnedAnywhere.get(key);
+      if (!anywhere) return [];
+      const local = anywhere.filter((id) => fileOfSymbolId.get(id) === callerFile);
+      if (local.length > 0) return local;
+      callerDeps ??= new Set(deps);
+      const depFiles = callerDeps;
+      const inDeps = anywhere.filter((id) => depFiles.has(fileOfSymbolId.get(id) ?? ""));
+      return inDeps.length > 0 ? inDeps : anywhere;
+    };
 
     for (const edge of edges) {
       const callLine = edge.callSite.line;
@@ -1444,24 +1457,22 @@ export function resolveCallSites(
       // the caller declares an `all` too, but its owner is `Schema` — and stops
       // `Request::capture()` from reaching a same-named `Invoice::capture()`.
       //
-      // The owner is required before the same-file branch and before the
-      // dependency scan, which are searched in that order as they are for
-      // every other edge. When neither holds a match the edge is left
-      // `unresolved` with no candidates: falling back to the method name alone
-      // is exactly how the wrong-class edges were drawn.
+      // The caller's own file is searched first, then its dependencies, as for
+      // every other edge, and then the rest of the project. That last step is
+      // not the name guessing this branch exists to stop: the key is the whole
+      // qualified name, so it can only reach the class the source names. It is
+      // what finds a sibling class in the caller's own namespace, which PHP
+      // needs no `use` for and the file graph therefore draws no edge to.
+      //
+      // When nothing is found the edge is left `unresolved` with no
+      // candidates: falling back to the method name alone is exactly how the
+      // wrong-class edges were drawn.
       if (edge.calleeQualifier && callerLang === "php") {
-        const key = phpOwnedKey(edge.calleeQualifier, edge.calleeName);
-        const ownedIn = (file: string): readonly string[] => phpOwnedByFile.get(file)?.get(key) ?? [];
-        const local = ownedIn(callerFile);
-        if (local.length > 0) {
-          edge.calleeCandidates = [...local];
-          edge.confidence = "local";
-          continue;
-        }
-        for (const dep of deps) candidates.push(...ownedIn(dep));
-        const uniq = Array.from(new Set(candidates));
+        const ids = phpFound(phpOwnedKey(edge.calleeQualifier, edge.calleeName));
+        const uniq = Array.from(new Set(ids));
         edge.calleeCandidates = uniq;
         if (uniq.length === 0) edge.confidence = "unresolved";
+        else if (uniq.every((id) => fileOfSymbolId.get(id) === callerFile)) edge.confidence = "local";
         else if (uniq.length === 1) edge.confidence = "unique";
         else edge.confidence = "multiple-candidates";
         continue;

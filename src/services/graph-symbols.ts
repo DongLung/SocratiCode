@@ -3258,18 +3258,13 @@ function extractFromPhp(
   // is deliberate. Resolution's module-targeted branch matches `sourceModule`
   // as a *path*; a PHP FQCN is not one, so handing it a backslashed name
   // strands the edge as `unresolved`. Each edge carries its namespace as
-  // `calleeQualifier` instead, and resolution's PHP branch matches it against
-  // the owners declared in the caller's own file and then its resolved
-  // file-import dependencies — for PHP exactly what the `use`/require, PSR-4
-  // and FQCN machinery produced. The search is therefore confined to this
-  // file's own import closure by construction, rather than guessing a short
-  // name repository-wide.
+  // `calleeQualifier` instead, and resolution's PHP branch matches the whole
+  // qualified class against the owners declared in the caller's own file, its
+  // resolved file-import dependencies, and then the rest of the project. That
+  // last step is what reaches an inline FQCN, or a sibling in the caller's own
+  // namespace, that no `use` or require puts in the file graph; it cannot
+  // guess, because it matches the qualified name rather than a short one.
   //
-  // Known limitation, not a bug to fix here: an inline FQCN with no matching
-  // `use` or require produces no file-import dependency, so the scan cannot
-  // reach it and the edge stays `unresolved`. That is the honest outcome —
-  // the only alternative is the repository-wide short-name guessing this is
-  // built to avoid.
   // Aliases are resolved per namespace, not per file: see
   // {@link buildPhpNames} for why a file-wide table fabricates an edge in a
   // file that opens more than one namespace. The same `names()` the symbols

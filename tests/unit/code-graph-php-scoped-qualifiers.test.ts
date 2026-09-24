@@ -167,40 +167,6 @@ class Schema
 }
 `);
 
-    // The same schemas, imported, so the dependency scan reaches them.
-    for (const cls of ["UserSchema", "OrderSchema"]) {
-      write(`src/Imported/${cls}.php`, `<?php
-
-namespace App\\Imported;
-
-class ${cls}
-{
-    public static function all(): array
-    {
-        return [];
-    }
-}
-`);
-    }
-    write("src/Imported/Schema.php", `<?php
-
-namespace App\\Imported;
-
-use App\\Imported\\OrderSchema;
-use App\\Imported\\UserSchema;
-
-class Schema
-{
-    public static function all(): array
-    {
-        return array_merge(
-            UserSchema::all(),
-            OrderSchema::all(),
-        );
-    }
-}
-`);
-
     graph = await buildCodeGraph(root);
     resolveCallSites(
       graph,
@@ -272,20 +238,15 @@ class Schema
       expect(edge[0].confidence).not.toBe("local");
     });
 
-    it("leaves both unresolved, since nothing puts the sibling schemas in reach", () => {
-      // Same namespace and no `use`, so the file graph draws no edge to them.
-      // `unresolved` is the honest answer; the self-edge was a wrong one.
+    it.each(["UserSchema", "OrderSchema"])("resolves `%s::all()` to its own class's `all()`", (cls) => {
+      // Same namespace and no `use`, so PHP needs no import and the file graph
+      // draws no edge to the siblings. The qualified class is found by its
+      // exact name all the same.
       expect(graph.edges.filter((e) => e.source === SCHEMA)).toEqual([]);
-      for (const e of graph.outgoingCallsByFile.get(SCHEMA) ?? []) {
-        if (e.calleeName === "all") expect(e.confidence).toBe("unresolved");
-      }
-    });
-
-    it.each(["UserSchema", "OrderSchema"])("resolves `%s::all()` to its own class once it is imported", (cls) => {
-      const edge = (graph.outgoingCallsByFile.get("src/Imported/Schema.php") ?? [])
-        .filter((e) => e.calleeName === "all" && e.calleeQualifier === `\\App\\Imported\\${cls}`);
+      const edge = (graph.outgoingCallsByFile.get(SCHEMA) ?? [])
+        .filter((e) => e.calleeName === "all" && e.calleeQualifier === `\\App\\Schema\\${cls}`);
       expect(edge).toHaveLength(1);
-      expect(edge[0].calleeCandidates).toEqual([idOf(`src/Imported/${cls}.php`, "all", `\\App\\Imported\\${cls}`)]);
+      expect(edge[0].calleeCandidates).toEqual([idOf(`src/Schema/${cls}.php`, "all", `\\App\\Schema\\${cls}`)]);
       expect(edge[0].confidence).toBe("unique");
     });
   });
