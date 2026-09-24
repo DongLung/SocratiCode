@@ -4,7 +4,7 @@ Have Microsoft VS Code 1.99+, Node.js 18.17+ with `npx`, and running Docker avai
 
 1. Install the [SocratiCode editor extension](https://marketplace.visualstudio.com/items?itemName=giancarloerra.socraticode) from the Visual Studio Marketplace. Reload the window and start a new Chat session.
 2. Run **MCP: List Servers** and confirm **SocratiCode** is running. Open the SocratiCode sidebar to confirm the editor integration loaded.
-3. Open your project and select **Index this workspace** in the sidebar. Check `codebase_status` in Agent Chat until indexing completes, then ask Agent Chat to use `codebase_search` for a known function or feature.
+3. Open your project, select **Index this workspace** in the sidebar, and paste the copied prompt into Agent Chat to start indexing. Check `codebase_status` until indexing completes, then ask Agent Chat to use `codebase_search` for a known function or feature.
 
 The default watcher handles subsequent file changes. Update the extension through VS Code's Extensions view, reload the window, and start a new Chat session.
 
