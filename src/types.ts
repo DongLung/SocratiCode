@@ -225,8 +225,8 @@ export interface SymbolEdge {
    * static call names (`\App\Models\Invoice` for `Invoice::capture()`), or the
    * namespace a class reference names (`\App\Models\` for `extends Invoice`,
    * a type hint or `new Invoice()`). Absent on every PHP call it cannot
-   * qualify statically — `$obj->m()`, `$class::m()`, `self::`, `static::`,
-   * `parent::` and bare function calls.
+   * qualify statically — `$obj->m()`, `$class::m()`, `Cls::$m()`, `self::`,
+   * `static::`, `parent::` and bare function calls.
    */
   calleeQualifier?: string;
   callSite: { file: string; line: number };

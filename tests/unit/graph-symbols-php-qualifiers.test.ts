@@ -120,6 +120,9 @@ namespace B { class Two { function f() { Tool::run(); } } }
       ["`static::`", "class C { function f() { static::m(); } }"],
       ["`parent::`", "class C extends B { function f() { parent::m(); } }"],
       ["a class held in a variable", "function f($cls) { $cls::m(); }"],
+      // The callee scan reads `$m` as `m`, as it did before; only the
+      // qualifier, which would make that guess confident, is withheld.
+      ["a method held in a variable", "function f($m) { Invoice::$m(); }"],
       ["an instance call", "function f($o) { $o->m(); }"],
       ["a bare function call", "function f() { m(); }"],
       ["a qualified function call", "function f() { \\App\\m(); }"],

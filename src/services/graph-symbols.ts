@@ -3180,9 +3180,13 @@ function extractFromPhp(
   // carries the class it names as its qualifier. Everything else is left
   // unqualified and resolves as it always has — `$class::m()`, and `self::`,
   // `static::` and `parent::`, which are answered by the class the call sits
-  // in and are outside this change.
+  // in and are outside this change. So is a method written as a variable:
+  // `Invoice::$m()` runs whatever method `$m` holds, and qualified, the name
+  // the callee scan reads from it would resolve with confidence to a method
+  // that happens to be called `m`.
   // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
-  const staticCallQualifier = (node: any): string | undefined => classNameOf(node.field("scope"));
+  const staticCallQualifier = (node: any): string | undefined =>
+    node.field("name")?.kind() === "name" ? classNameOf(node.field("scope")) : undefined;
 
   // What a class or trait inherits static methods from, read from its own
   // declaration: the class a class `extends`, and the traits a class or trait
