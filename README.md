@@ -56,6 +56,7 @@ The first Qdrant‑based MCP/Claude Plugin/Skill that pairs auto‑managed, zero
 ## Contents
 
 - [Quick Start](#quick-start)
+- [Quick guides](docs/guides/README.md)
 - [Plugins and host integrations](#plugins-and-host-integrations)
 - [Why SocratiCode](#why-socraticode)
 - [Features](#features)
@@ -81,6 +82,8 @@ The first Qdrant‑based MCP/Claude Plugin/Skill that pairs auto‑managed, zero
 
 > **Requirements:** [Node.js 18.17 or newer](https://nodejs.org/) with `npx` on `PATH`, plus [Docker](https://www.docker.com/products/docker-desktop/) running for the default local Qdrant and Ollama stack.
 
+For one recommended setup path per host and short practical scenarios, use the [quick guides](docs/guides/README.md). This README has the other installation paths and full configuration.
+
 **Quick install guidance for Claude Code, VS Code, and Cursor:**
 
 [![Install Claude Code Plugin](https://img.shields.io/badge/Claude_Code-Install_Plugin-CC785C?style=flat-square&logoColor=white)](#claude-code-plugin-recommended-for-claude-code-users)
@@ -99,7 +102,7 @@ The first Qdrant‑based MCP/Claude Plugin/Skill that pairs auto‑managed, zero
 }
 ```
 
-Configuration schemas are host-specific. Continue, VS Code, Zed, OpenCode, Gemini CLI, Cline, and Roo Code have dedicated examples in [Plugins and host integrations](#plugins-and-host-integrations).
+Configuration schemas are host-specific. Continue, VS Code, Zed, OpenCode, Gemini CLI, and Cline have dedicated examples in [Plugins and host integrations](#plugins-and-host-integrations).
 
 ### Keeping SocratiCode up to date
 
@@ -114,7 +117,7 @@ Native plugins and extensions also contain **skills, instructions, manifests, or
 | VS Code Agent Plugin | Leave `extensions.autoUpdate` enabled for daily checks, or run **Extensions: Check for Extension Updates**, then start a new Chat |
 | VS Code editor extension | Update it through the Extensions view or **Extensions: Check for Extension Updates**, then reload the window |
 | Cursor local plugin | Update to the latest GitHub release tag using the commands in the [Cursor section](#cursor), then reload Cursor |
-| Gemini CLI extension | Install with `--auto-update`, or run `gemini extensions update socraticode`, then restart Gemini |
+| Gemini CLI direct MCP | Restart Gemini to reconnect the server and resolve the current npm release |
 | Direct MCP only | No separate plugin files are installed; restart or reconnect the MCP server to resolve the current npm release |
 
 `@latest` refers to npm's published `latest` distribution tag; it does not refer to a Git branch. `--prefer-online` forces npm to check for updated package metadata even when its cache is still fresh. If the same registry is temporarily unavailable, npm can still use an already populated cache; a first installation still requires registry access. See the [npm exec cache documentation](https://docs.npmjs.com/cli/npm-exec/#a-note-on-caching) and [npm distribution-tag documentation](https://docs.npmjs.com/adding-dist-tags-to-packages/).
@@ -137,9 +140,9 @@ Restart your host. With the default local configuration, first use pulls the req
 
 ## Plugins and host integrations
 
-SocratiCode can be installed as a native agent plugin, a VS Code editor extension, a Gemini CLI extension, or a directly configured local stdio MCP server. These are separate integration types and use different configuration and update paths.
+SocratiCode can be installed as a native agent plugin, a VS Code editor extension, or a directly configured local stdio MCP server. These are separate integration types and use different configuration and update paths.
 
-Every path below requires Node.js 18.17 or newer with `npx` on `PATH`. The default local stack also requires Docker to be running. Docker is optional when Qdrant is external and embeddings use either a detected native Ollama instance or a cloud or external provider.
+The SocratiCode engine requires Node.js 18.17 or newer with `npx` on `PATH`; some hosts require a newer Node.js version. The default local stack also requires Docker to be running. Docker is optional when Qdrant is external and embeddings use either a detected native Ollama instance or a cloud or external provider.
 
 | Host | Recommended integration | Scope |
 |:-----|:------------------------|:------|
@@ -147,10 +150,9 @@ Every path below requires Node.js 18.17 or newer with `npx` on `PATH`. The defau
 | OpenAI Codex | Native plugin | User |
 | VS Code | Agent Plugin or editor extension | Current VS Code profile |
 | Cursor | Local Cursor plugin or direct MCP | User or project |
-| Gemini CLI | Gemini extension | User |
+| Gemini CLI | Direct MCP | User |
 | Continue | Direct MCP | Project or user config |
 | Cline | Direct MCP | Project or user config |
-| Roo Code | Direct MCP | Project or user config |
 | Zed | Direct MCP | User or project settings |
 | OpenCode | Direct MCP | Project or user config |
 
@@ -319,9 +321,9 @@ Start a new Chat and use **MCP: List Servers** to confirm that only `socraticode
 
 The separately published editor extension adds the SocratiCode sidebar, status item, commands, walkthrough, and interactive graph webview. Install **SocratiCode** from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=giancarloerra.socraticode) in the current VS Code profile.
 
-On Microsoft VS Code 1.99+ and compatible editors that implement the VS Code MCP provider API, the extension registers SocratiCode with the editor's native MCP registry. It does not configure independent clients such as Cline, Continue, or Roo Code.
+On Microsoft VS Code 1.99+ and compatible editors that implement the VS Code MCP provider API, the extension registers SocratiCode with the editor's native MCP registry. It does not configure independent clients such as Cline or Continue.
 
-Reload the window and start a new Chat session after installation. Run **MCP: List Servers** to confirm that `SocratiCode` is running, and open the SocratiCode sidebar to verify the editor UI. Update it through the Extensions view or **Extensions: Check for Extension Updates**.
+Enable VS Code's AI features and sign in to GitHub Copilot for native Agent Chat. On [VS Code 1.122+](https://code.visualstudio.com/updates/v1_122), a BYOK model with tool calling also works without GitHub sign-in. Reload the window and start a new Chat session after installation. Run **MCP: List Servers** to confirm that `SocratiCode` is running, and open the SocratiCode sidebar to verify the editor UI. Update it through the Extensions view or **Extensions: Check for Extension Updates**.
 
 The [Open VSX package](https://open-vsx.org/extension/giancarloerra/socraticode) can be installed in VS Code-derived editors, but native MCP registration requires that editor to implement `vscode.lm.registerMcpServerDefinitionProvider`. See the [VS Code MCP extension API](https://code.visualstudio.com/api/extension-guides/ai/mcp).
 
@@ -362,7 +364,7 @@ git -C ~/.cursor/plugins/local/socraticode checkout <latest-release-tag>
 
 Reload Cursor after updating. These commands intentionally follow release tags rather than unreleased commits on `main`. See [Cursor plugins](https://prod.cursor.com/docs/plugins).
 
-For direct MCP configuration, use the Cursor badge above and select the intended user or project scope in Cursor. Start a new Agent chat, then verify `socraticode` under **Cursor Settings → Tools & MCP**. The installation link already uses the latest-release engine command. See [Cursor MCP install links](https://prod.cursor.com/docs/mcp/install-links).
+For direct MCP configuration, use the Cursor badge above and select the intended user or project scope in Cursor. Start a new Agent chat, then verify `socraticode` under **Customize → MCPs**. The installation link already uses the latest-release engine command. See [Cursor MCP install links](https://prod.cursor.com/docs/mcp/install-links).
 
 The current local plugin does not declare user-configurable variables. To keep its skills while applying custom variables, open **Customize**, disable the plugin-provided SocratiCode MCP server, and add one direct server to the user or project `mcp.json`:
 
@@ -385,23 +387,18 @@ Reload Cursor and verify under **Customize** that only `socraticode-configured` 
 
 The SocratiCode package on Open VSX is a VS Code-style editor extension, not a Cursor plugin. Installing that extension does not establish that Cursor implements VS Code's native MCP provider API. Use the local plugin or direct MCP path when MCP availability is required.
 
-### Gemini CLI extension
+<a id="gemini-cli-extension"></a>
 
-Install the user-scoped Gemini extension with automatic updates, verify it, then restart any active Gemini CLI session:
+### Gemini CLI
 
-```bash
-gemini extensions install https://github.com/giancarloerra/socraticode --auto-update
-gemini extensions list
-```
-
-If it was installed without `--auto-update`, update it manually and restart Gemini:
+Add the user-scoped MCP server, verify it, then restart any active Gemini CLI session:
 
 ```bash
-gemini extensions update socraticode
-gemini extensions list
+gemini mcp add --scope user socraticode npx -y --prefer-online socraticode@latest
+gemini mcp list
 ```
 
-Gemini limits which inherited environment variables are passed to extension MCP servers. For advanced configuration, define a server with the same name in user scope (`~/.gemini/settings.json`) or workspace scope (`.gemini/settings.json`). That definition overrides the extension server and explicitly forwards only the variables named in `env`:
+For advanced configuration, edit the server in user scope (`~/.gemini/settings.json`) or define it in workspace scope (`.gemini/settings.json`) and explicitly forward the variables named in `env`:
 
 ```json
 {
@@ -421,7 +418,7 @@ Gemini limits which inherited environment variables are passed to extension MCP 
 }
 ```
 
-Keep secret values in the process environment rather than committing them. Restart Gemini and run `gemini mcp list` to verify the overridden server. See the [Gemini extension reference](https://geminicli.com/docs/extensions/reference/) and [Gemini MCP configuration](https://geminicli.com/docs/tools/mcp-server/).
+Keep secret values in the process environment rather than committing them. Restart Gemini and run `gemini mcp list` to verify the configured server. See [Gemini MCP configuration](https://geminicli.com/docs/tools/mcp-server/).
 
 ### Continue
 
@@ -461,24 +458,6 @@ For project scope, save this complete object as `.cline/mcp.json`. For user scop
 ```
 
 Start a new Cline task and verify that `socraticode` and its tools appear in the MCP Servers view. Reconnect the server after a release. See the [Cline MCP documentation](https://docs.cline.bot/mcp/mcp-overview).
-
-### Roo Code
-
-For project scope, save this complete object as `.roo/mcp.json`. For user scope, open Roo Code's MCP Servers view and select **Edit Global MCP**:
-
-```json
-{
-  "mcpServers": {
-    "socraticode": {
-      "command": "npx",
-      "args": ["-y", "--prefer-online", "socraticode@latest"],
-      "disabled": false
-    }
-  }
-}
-```
-
-Start a new Roo Code task and verify that `socraticode` is connected in the MCP Servers view. Restart the server after a release. Project configuration takes precedence over a global server with the same name. See [Using MCP in Roo Code](https://github.com/RooCodeInc/Roo-Code-Docs/blob/main/docs/features/mcp/using-mcp-in-roo.mdx).
 
 ### Zed
 
@@ -704,7 +683,7 @@ For best results, add instructions like the following to your AI assistant's pro
 | VS Code Copilot | `.github/copilot-instructions.md`, or a custom instructions file in your VS Code User prompts folder |
 | Zed | `AGENTS.md` at project root, or `~/.config/zed/AGENTS.md` for personal instructions. Zed uses the first matching supported project instruction file. |
 | Windsurf | `.windsurfrules` at project root |
-| Claude Desktop / Cline / Roo Code | Add directly to your system prompt configuration |
+| Claude Desktop / Cline | Add directly to your system prompt configuration |
 
 > **Why this matters**: Installing the MCP server alone gives your agent access to SocratiCode tools, but the agent still decides when to use them. Adding these instructions to your project ensures the agent consistently prefers SocratiCode search over raw file reads, uses the graph for dependency-aware tasks, and follows the search-before-reading workflow.
 
@@ -1463,7 +1442,7 @@ Operational settings apply to the new process. Settings that define stored vecto
 |------|-------------|---------|
 | Claude Code native plugin | `~/.claude/settings.json` | Top-level `"env": { "KEY": "value" }` |
 | Claude Code MCP-only | User or project MCP configuration | `claude mcp add --env KEY=value ...` or an `env` object in the stored server definition |
-| Claude Desktop, Windsurf, Cline, and Roo Code | Host MCP JSON | `"env": { "KEY": "value" }` inside the server definition |
+| Claude Desktop, Windsurf, and Cline | Host MCP JSON | `"env": { "KEY": "value" }` inside the server definition |
 | OpenAI Codex native plugin | `~/.codex/config.toml` | [Disable its bundled server and add one top-level configured server](#openai-codex-plugin) |
 | OpenAI Codex MCP-only | `~/.codex/config.toml` | `codex mcp add --env KEY=value`, inline TOML `env = { ... }`, or `[mcp_servers.NAME.env]` |
 | VS Code Agent Plugin | VS Code MCP server state plus user MCP configuration | [Keep the plugin, disable its bundled server, and add a direct server](#vs-code-agent-plugin) using `env` or `envFile` |
@@ -1473,12 +1452,12 @@ Operational settings apply to the new process. Settings that define stored vecto
 | Cursor direct MCP | User or project `mcp.json` | `"env": { "KEY": "value" }` inside the server definition |
 | Continue | YAML config | `env:` map inside the `mcpServers` list item |
 | Zed | `context_servers` JSON | `"env": { "KEY": "value" }` |
-| Gemini CLI extension override | `~/.gemini/settings.json` or `.gemini/settings.json` | Explicit `"env"` entries; the extension does not inherit every process variable |
+| Gemini CLI direct MCP | `~/.gemini/settings.json` or `.gemini/settings.json` | Explicit `"env"` entries for the server |
 | OpenCode 1.x / V2 | `opencode.json` / `opencode.jsonc` ([schema](https://opencode.ai/config.json)) | `"environment": { "KEY": "value" }`, not `"env"`; V2 nests the server under `mcp.servers` |
 
 Worked examples with a few env vars set:
 
-**MCP JSON hosts** such as Claude Desktop, Windsurf, Cline, Roo Code, and Cursor:
+**MCP JSON hosts** such as Claude Desktop, Windsurf, Cline, and Cursor:
 
 ```json
 {
