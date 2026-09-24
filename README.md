@@ -56,6 +56,7 @@ The first Qdrant‑based MCP/Claude Plugin/Skill that pairs auto‑managed, zero
 ## Contents
 
 - [Quick Start](#quick-start)
+- [Quick guides](https://github.com/giancarloerra/SocratiCode/blob/main/docs/guides/README.md)
 - [Plugins and host integrations](#plugins-and-host-integrations)
 - [Why SocratiCode](#why-socraticode)
 - [Features](#features)
@@ -80,6 +81,8 @@ The first Qdrant‑based MCP/Claude Plugin/Skill that pairs auto‑managed, zero
 ## Quick Start
 
 > **Requirements:** [Node.js 18.17 or newer](https://nodejs.org/) with `npx` on `PATH`, plus [Docker](https://www.docker.com/products/docker-desktop/) running for the default local Qdrant and Ollama stack.
+
+For one recommended setup path per host and short practical scenarios, use the [quick guides](https://github.com/giancarloerra/SocratiCode/blob/main/docs/guides/README.md). This README has the other installation paths and full configuration.
 
 **Quick install guidance for Claude Code, VS Code, and Cursor:**
 
