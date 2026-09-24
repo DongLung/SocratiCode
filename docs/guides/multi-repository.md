@@ -1,6 +1,6 @@
 # Search a system spread across repositories
 
-Use this when, for example, a frontend repository calls an API maintained in a sibling backend repository. Keep each repository's index independent, then link them for search. Have both repositories checked out locally and configured to use the same embedding provider and model.
+Use this when, for example, a frontend repository calls an API maintained in a sibling backend repository. Keep each repository's index independent, then link them for search. Have both repositories checked out locally and configured to use the same embedding provider, model, and `EMBEDDING_DIMENSIONS`.
 
 1. From each repository, run `codebase_index` with that repository as `projectPath`. Wait for each `codebase_status` to complete before searching across them.
 2. In the frontend repository, add a link to its sibling:
