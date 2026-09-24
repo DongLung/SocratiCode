@@ -2913,7 +2913,7 @@ interface PhpNamespaceScope {
 }
 
 /**
- * Every namespace a PHP file declares, as a source extent, shortest first.
+ * Every namespace a PHP file declares, as a source extent, in source order.
  *
  * PHP writes a namespace in two forms and scopes them differently:
  *
@@ -2925,13 +2925,13 @@ interface PhpNamespaceScope {
  *
  * The grammar gives an unbraced `namespace_definition` a range covering only
  * `namespace A;` itself, so its extent has to be computed from its successor —
- * hence the two branches. Sorting shortest-first makes a lookup's first hit the
- * innermost scope, which keeps a malformed or nested tree from resolving
- * against an outer namespace when an inner one also contains the reference.
+ * hence the two branches. Only the root's own children are read, so no extent
+ * can enclose another: siblings do not overlap, and an unbraced extent stops
+ * where the next declaration starts. At most one extent contains any offset.
  *
  * @param root Parsed root of a PHP file.
- * @returns Extents with empty alias tables, shortest extent first; empty for a
- *          file that declares no namespace.
+ * @returns Extents with empty alias tables, in source order; empty for a file
+ *          that declares no namespace.
  */
 // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
 function buildPhpNamespaceScopes(root: any): PhpNamespaceScope[] {
@@ -2946,7 +2946,7 @@ function buildPhpNamespaceScopes(root: any): PhpNamespaceScope[] {
     // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
     (a: any, b: any) => a.range().start.index - b.range().start.index,
   );
-  const scopes: PhpNamespaceScope[] = defs.map((def, i) => {
+  return defs.map((def, i) => {
     const range = def.range();
     // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
     const braced = def.children().some((c: any) => c.kind() === "compound_statement");
@@ -2957,7 +2957,6 @@ function buildPhpNamespaceScopes(root: any): PhpNamespaceScope[] {
       aliases: new Map() as PhpAliasTable,
     };
   });
-  return scopes.sort((a, b) => a.end - a.start - (b.end - b.start));
 }
 
 /**
