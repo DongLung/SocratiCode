@@ -4,6 +4,58 @@ All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
 
+## [1.15.0](https://github.com/giancarloerra/socraticode/compare/v1.14.0...v1.15.0) (2026-09-24)
+
+### Features
+
+* allow the Claude Code plugin engine specification to be pinned ([0c33776](https://github.com/giancarloerra/socraticode/commit/0c337761eef8f19502b12990c25795cbbba77d06)), closes [#149](https://github.com/giancarloerra/socraticode/issues/149)
+* **graph:** read PHP typed property declarations as type references ([9afedae](https://github.com/giancarloerra/socraticode/commit/9afedae8f8c10f51dec0edab5a6c2139f67b8879))
+
+### Bug Fixes
+
+* **graph:** apply a PHP `use` alias only below the `use` that declares it ([7433a53](https://github.com/giancarloerra/socraticode/commit/7433a5349ace780c276349fbf07ed6e7d35dee50))
+* **graph:** capture PHP extends, implements, trait use, new and type-hint edges ([68b2eca](https://github.com/giancarloerra/socraticode/commit/68b2ecaa95e9df4f847b413b3d8711f2535f8542))
+* **graph:** correct five PHP alias and type-reference gaps ([5d1f225](https://github.com/giancarloerra/socraticode/commit/5d1f225ff36c8e99fd6ed110be11d03d652054e2))
+* **graph:** drop a type reference the parse split off an identifier ([b8cf848](https://github.com/giancarloerra/socraticode/commit/b8cf848d5da04623cab6ad2abe3071ded31dfe5e))
+* **graph:** find a qualified PHP class by its exact name outside the caller's dependencies ([258fe80](https://github.com/giancarloerra/socraticode/commit/258fe80213e4f9d6ae55df5e6e1f52d62f51a891))
+* **graph:** fold PHP alias case over ASCII only, as the language does ([93d614b](https://github.com/giancarloerra/socraticode/commit/93d614bf4e943ac8bfe263f2face7bf159f01889))
+* **graph:** follow verified PHP inheritance for static calls ([7749032](https://github.com/giancarloerra/socraticode/commit/77490323b60ee31399fb535b754e939882fe4229))
+* **graph:** leave a PHP static call on a variable method unqualified ([0b97f46](https://github.com/giancarloerra/socraticode/commit/0b97f46a387fbe34230f265addb3338aac50d359))
+* **graph:** read a PHP variadic parameter's type as a type reference ([4aadb27](https://github.com/giancarloerra/socraticode/commit/4aadb2716dfc56f43427f89751cb1df636da4d29))
+* **graph:** read PHP names by the language's identifier rule, non-ASCII included ([78154d2](https://github.com/giancarloerra/socraticode/commit/78154d20e84663473118e0d9d89d699d7901d7e8))
+* **graph:** resolve PHP static calls and class references by the class they name ([2522c49](https://github.com/giancarloerra/socraticode/commit/2522c49f0cf7cc71d92f7894fb314bf411f71943)), closes [#183](https://github.com/giancarloerra/socraticode/issues/183)
+* **graph:** scope PHP `use` aliases to their namespace, not the file ([6dcbd68](https://github.com/giancarloerra/socraticode/commit/6dcbd688dc746730930de41c36e9908ef75b91ae))
+* keep Qdrant's error reason and deliver MCP log notifications ([9f65b50](https://github.com/giancarloerra/socraticode/commit/9f65b5063b4928ab6c713665b3660f383511f286)), closes [#178](https://github.com/giancarloerra/socraticode/issues/178)
+* **qdrant:** wait for this process's collection create before reading it ([5b8eb16](https://github.com/giancarloerra/socraticode/commit/5b8eb16e739eafe871c695e23dcc23a6de5448d5)), closes [#176](https://github.com/giancarloerra/socraticode/issues/176)
+
+### Performance
+
+* **graph:** read both anonymous function forms in one traversal ([ad7a045](https://github.com/giancarloerra/socraticode/commit/ad7a045ba8725080d143e8fef1a8cd529b403000))
+* **graph:** read PHP namespace declarations from the top level only ([2f41a20](https://github.com/giancarloerra/socraticode/commit/2f41a20238f2c4c445d21e512b7a851812466322))
+* **graph:** stop the PHP extractor re-walking the tree for what it holds ([254ff18](https://github.com/giancarloerra/socraticode/commit/254ff1860b58557643dcd608c8a1aee8d1c36ff8))
+
+### Refactors
+
+* **graph:** drop the PHP namespace scopes' shortest-first sort ([3eb0707](https://github.com/giancarloerra/socraticode/commit/3eb07079f307eea03291e087a2b84d656fd1f5c0))
+* **graph:** name the anonymous return-type bucket for what it is ([9dd1744](https://github.com/giancarloerra/socraticode/commit/9dd1744aa347cf2128e6784c426c8c107888f6b6))
+
+### Documentation
+
+* **graph:** consolidate the anonymous return-type comment ([a008a5d](https://github.com/giancarloerra/socraticode/commit/a008a5d94be36a81b26a9b172716ddb7fa3dad6b))
+* **graph:** fold the built-in list's exclusion note into its doc comment ([22697ba](https://github.com/giancarloerra/socraticode/commit/22697baa5d1fe4a673451b518f334d2bec201f4d))
+* **graph:** list every reference the structural pass now reads ([74fac31](https://github.com/giancarloerra/socraticode/commit/74fac3111e1810191a065328bb8daf15ef787239))
+* **graph:** name the node the alias resolver actually walks ([aa5d102](https://github.com/giancarloerra/socraticode/commit/aa5d10274d803fad5d839cfecb5972fb9010eb91))
+* **graph:** record the PHP type-name guard's ASCII restriction ([13cfe2c](https://github.com/giancarloerra/socraticode/commit/13cfe2cac9049330a52eeb9b2df2840b0d57ed7f))
+* **graph:** spell the KELVIN SIGN as an escape, not as a character ([d9ff91c](https://github.com/giancarloerra/socraticode/commit/d9ff91c038435cbd0cbec1766447022f50ae0680))
+
+### Tests
+
+* **graph:** cover PHP structural edges at the extractor and at a real build ([3b42f3f](https://github.com/giancarloerra/socraticode/commit/3b42f3f37f6f17e5e591d50c0721c6aba5dc131a))
+* **graph:** give the `parent` type-hint fixture a parent class ([9135992](https://github.com/giancarloerra/socraticode/commit/9135992fe978f23f571e0e87c5e57aa798d761db))
+* **graph:** give the shared-line braced-namespace test valid PHP ([1a5be0f](https://github.com/giancarloerra/socraticode/commit/1a5be0f8ad536f2b60b680102c75f0e5f638df95))
+* **graph:** resolve non-ASCII PHP names through a real graph build ([e197a7e](https://github.com/giancarloerra/socraticode/commit/e197a7e6a2614be2133850d4a3f41ba5b6ac6be1))
+* **graph:** resolve PHP qualified edges through a real graph build ([bf09caf](https://github.com/giancarloerra/socraticode/commit/bf09caf1a8793e43c0e64c3eb27b169077d21f8e))
+
 ## [1.14.0](https://github.com/giancarloerra/socraticode/compare/v1.13.3...v1.14.0) (2026-09-16)
 
 ### Features
