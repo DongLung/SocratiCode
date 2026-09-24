@@ -323,7 +323,7 @@ The separately published editor extension adds the SocratiCode sidebar, status i
 
 On Microsoft VS Code 1.99+ and compatible editors that implement the VS Code MCP provider API, the extension registers SocratiCode with the editor's native MCP registry. It does not configure independent clients such as Cline or Continue.
 
-Reload the window and start a new Chat session after installation. Run **MCP: List Servers** to confirm that `SocratiCode` is running, and open the SocratiCode sidebar to verify the editor UI. Update it through the Extensions view or **Extensions: Check for Extension Updates**.
+Enable VS Code's AI features and sign in to GitHub Copilot for native Agent Chat. Reload the window and start a new Chat session after installation. Run **MCP: List Servers** to confirm that `SocratiCode` is running, and open the SocratiCode sidebar to verify the editor UI. Update it through the Extensions view or **Extensions: Check for Extension Updates**.
 
 The [Open VSX package](https://open-vsx.org/extension/giancarloerra/socraticode) can be installed in VS Code-derived editors, but native MCP registration requires that editor to implement `vscode.lm.registerMcpServerDefinitionProvider`. See the [VS Code MCP extension API](https://code.visualstudio.com/api/extension-guides/ai/mcp).
 
@@ -364,7 +364,7 @@ git -C ~/.cursor/plugins/local/socraticode checkout <latest-release-tag>
 
 Reload Cursor after updating. These commands intentionally follow release tags rather than unreleased commits on `main`. See [Cursor plugins](https://prod.cursor.com/docs/plugins).
 
-For direct MCP configuration, use the Cursor badge above and select the intended user or project scope in Cursor. Start a new Agent chat, then verify `socraticode` under **Cursor Settings → Tools & MCP**. The installation link already uses the latest-release engine command. See [Cursor MCP install links](https://prod.cursor.com/docs/mcp/install-links).
+For direct MCP configuration, use the Cursor badge above and select the intended user or project scope in Cursor. Start a new Agent chat, then verify `socraticode` under **Customize → MCPs**. The installation link already uses the latest-release engine command. See [Cursor MCP install links](https://prod.cursor.com/docs/mcp/install-links).
 
 The current local plugin does not declare user-configurable variables. To keep its skills while applying custom variables, open **Customize**, disable the plugin-provided SocratiCode MCP server, and add one direct server to the user or project `mcp.json`:
 
