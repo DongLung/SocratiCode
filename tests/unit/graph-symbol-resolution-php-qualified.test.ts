@@ -196,3 +196,154 @@ describe("PHP qualified edges at the resolver", () => {
     expect(edge.confidence).toBe("local");
   });
 });
+
+/**
+ * A static method the named class inherits rather than declares, at the
+ * resolver. The class's own methods first, then its traits', then its
+ * parent's, and only through declarations the index holds.
+ */
+describe("PHP inherited static methods at the resolver", () => {
+  const CALLER = "src/Http/Caller.php";
+  const ENTITY = "src/Models/Entity.php";
+  const MODEL = "src/Models/Model.php";
+  const USER = "src/Models/User.php";
+  const POST = "src/Models/Post.php";
+  const TRAITS = "src/Models/Traits.php";
+  const LOOP = "src/Models/Loop.php";
+  const OTHER = "src/Other/Other.php";
+  const TWIN_A = "packages/a/Twin.php";
+  const TWIN_B = "packages/b/Twin.php";
+
+  const sym = (file: string, name: string, line: number, kind: SymbolNode["kind"], phpOwner: string, extra: Partial<SymbolNode> = {}): SymbolNode => ({
+    id: `${file}::${name}#${line}`,
+    name,
+    qualifiedName: name,
+    kind,
+    file,
+    line,
+    endLine: line + 3,
+    language: "php",
+    phpOwner,
+    ...extra,
+  });
+
+  const node = (relativePath: string, dependencies: string[]) => ({
+    relativePath,
+    imports: [],
+    exports: [],
+    dependencies,
+    dependents: [],
+  });
+
+  const graph: CodeGraph = {
+    nodes: [CALLER, ENTITY, MODEL, USER, POST, TRAITS, LOOP, OTHER, TWIN_A, TWIN_B].map((f) => node(f, f === CALLER ? [USER, POST, OTHER] : [])),
+    edges: [],
+  };
+
+  const NS = "\\App\\Models\\";
+  const symbols = (): Map<string, SymbolNode[]> => new Map([
+    [CALLER, [sym(CALLER, "Caller", 3, "class", "\\App\\Http\\"), sym(CALLER, "run", 5, "method", "\\App\\Http\\Caller")]],
+    [ENTITY, [sym(ENTITY, "Entity", 3, "class", NS), sym(ENTITY, "boot", 5, "method", `${NS}Entity`)]],
+    [MODEL, [
+      sym(MODEL, "Model", 3, "class", NS, { phpExtends: `${NS}Entity` }),
+      sym(MODEL, "create", 5, "method", `${NS}Model`),
+      sym(MODEL, "tag", 9, "method", `${NS}Model`),
+    ]],
+    [USER, [sym(USER, "User", 3, "class", NS, { phpExtends: `${NS}Model` })]],
+    [POST, [
+      sym(POST, "Post", 3, "class", NS, { phpExtends: `${NS}Model`, phpTraits: [`${NS}HasTag`, `${NS}HasSlug`] }),
+      sym(POST, "create", 5, "method", `${NS}Post`),
+    ]],
+    [TRAITS, [
+      sym(TRAITS, "HasTag", 3, "trait", NS, { phpTraits: [`${NS}Nested`] }),
+      sym(TRAITS, "tag", 5, "method", `${NS}HasTag`),
+      sym(TRAITS, "HasSlug", 10, "trait", NS),
+      sym(TRAITS, "tag", 12, "method", `${NS}HasSlug`),
+      sym(TRAITS, "Nested", 17, "trait", NS),
+      sym(TRAITS, "deep", 19, "method", `${NS}Nested`),
+    ]],
+    [LOOP, [
+      sym(LOOP, "Ping", 3, "class", NS, { phpExtends: `${NS}Pong` }),
+      sym(LOOP, "Pong", 8, "class", NS, { phpExtends: `${NS}Ping` }),
+    ]],
+    [OTHER, [
+      sym(OTHER, "Other", 3, "class", "\\App\\Other\\", { phpExtends: "\\Vendor\\Model" }),
+      sym(OTHER, "Unrelated", 8, "class", "\\App\\Other\\"),
+      sym(OTHER, "find", 10, "method", "\\App\\Other\\Unrelated"),
+    ]],
+    // One class name in two packages of the same repository, neither in the
+    // caller's reach. Only one inherits a `create`.
+    [TWIN_A, [sym(TWIN_A, "Twin", 3, "class", NS, { phpExtends: `${NS}Model` })]],
+    [TWIN_B, [sym(TWIN_B, "Twin", 3, "class", NS)]],
+  ]);
+
+  const resolve = (calleeName: string, calleeQualifier: string): SymbolEdge => {
+    const edge: SymbolEdge = {
+      callerId: `${CALLER}::run#5`,
+      calleeName,
+      calleeCandidates: [],
+      confidence: "unresolved",
+      kind: "call",
+      calleeQualifier,
+      callSite: { file: CALLER, line: 6 },
+    };
+    resolveCallSites(graph, symbols(), new Map([[CALLER, [edge]]]));
+    return edge;
+  };
+
+  it("resolves a method the class inherits to the parent that declares it", () => {
+    const edge = resolve("create", `${NS}User`);
+    expect(edge.calleeCandidates).toEqual([`${MODEL}::create#5`]);
+    expect(edge.confidence).toBe("unique");
+  });
+
+  it("follows the chain past the parent", () => {
+    expect(resolve("boot", `${NS}User`).calleeCandidates).toEqual([`${ENTITY}::boot#5`]);
+  });
+
+  it("answers with the class's own method before an inherited one", () => {
+    expect(resolve("create", `${NS}Post`).calleeCandidates).toEqual([`${POST}::create#5`]);
+  });
+
+  it("takes a trait's method over the parent's, and returns both when two traits declare it", () => {
+    // `Model::tag()` is inherited too, but a trait's method overrides it. Which
+    // of the two traits PHP runs rests on an `insteadof` the index does not read.
+    const edge = resolve("tag", `${NS}Post`);
+    expect(edge.calleeCandidates).toEqual([`${TRAITS}::tag#5`, `${TRAITS}::tag#12`]);
+    expect(edge.confidence).toBe("multiple-candidates");
+  });
+
+  it("follows a trait's own traits", () => {
+    expect(resolve("deep", `${NS}Post`).calleeCandidates).toEqual([`${TRAITS}::deep#19`]);
+  });
+
+  it("stops at a parent the project does not declare", () => {
+    // `Other` extends `\Vendor\Model`, not `App\Models\Model`, whose `create`
+    // is right there in the index.
+    const edge = resolve("create", "\\App\\Other\\Other");
+    expect(edge.calleeCandidates).toEqual([]);
+    expect(edge.confidence).toBe("unresolved");
+  });
+
+  it("does not walk from a class the project does not declare", () => {
+    expect(resolve("create", `${NS}Missing`).confidence).toBe("unresolved");
+  });
+
+  it("leaves a method no ancestor declares unresolved, though an unrelated class declares it", () => {
+    const edge = resolve("find", `${NS}User`);
+    expect(edge.calleeCandidates).toEqual([]);
+    expect(edge.confidence).toBe("unresolved");
+  });
+
+  it("does not follow inheritance from a class declared twice at the same reach", () => {
+    // Which `Twin` the call means is not known, and only one of them inherits
+    // `Model::create()`, so answering with it would be a guess.
+    const edge = resolve("create", `${NS}Twin`);
+    expect(edge.calleeCandidates).toEqual([]);
+    expect(edge.confidence).toBe("unresolved");
+  });
+
+  it("ends on an inheritance cycle", () => {
+    expect(resolve("missing", `${NS}Ping`).confidence).toBe("unresolved");
+  });
+});

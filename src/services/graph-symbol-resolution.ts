@@ -234,6 +234,50 @@ function phpOwnedKey(owner: string, name: string): string {
 }
 
 /**
+ * The static method a call on `cls` runs, found where PHP looks for it.
+ *
+ * The class's own methods first. Failing those, the traits it uses — each
+ * trait's own methods, then the traits that trait uses — since a trait's method
+ * overrides an inherited one; then the class it extends, searched the same way.
+ * Only inheritance the index can verify is followed: a class or trait's
+ * ancestors are searched only when exactly one declaration of it is found
+ * under its exact qualified name, nearest first. So an ancestor outside the
+ * project ends the search rather than widening it; a class declared twice at
+ * the same reach — the same name in two packages of one repository — is not
+ * guessed between, since the two can inherit from different classes; and a
+ * method no ancestor declares is not found at all. An `abstract`
+ * declaration has no owner, so the search passes it by for the implementation
+ * PHP runs. Two traits that both declare the method are both returned, since
+ * which one PHP runs depends on an `insteadof` the index does not read.
+ *
+ * @param cls The class the call names, in the form `SymbolNode.phpOwner` uses for one.
+ * @param method The method name, matched exactly.
+ * @param found The ids declared under a {@link phpOwnedKey}, nearest first.
+ * @param classLikeById The PHP classes and traits by id.
+ */
+function phpInheritedFrom(
+  cls: string,
+  method: string,
+  found: (key: string) => readonly string[],
+  classLikeById: ReadonlyMap<string, SymbolNode>,
+  seen: Set<string> = new Set(),
+): string[] {
+  const folded = phpFoldCase(cls);
+  if (seen.has(folded)) return [];
+  seen.add(folded);
+  const own = found(phpOwnedKey(cls, method));
+  if (own.length > 0) return [...own];
+  const cut = cls.lastIndexOf("\\") + 1;
+  const declarations = found(phpOwnedKey(cls.slice(0, cut), cls.slice(cut)));
+  const declared = declarations.length === 1 ? classLikeById.get(declarations[0]) : undefined;
+  if (!declared) return [];
+  const viaTraits = (declared.phpTraits ?? [])
+    .flatMap((t) => phpInheritedFrom(t, method, found, classLikeById, seen));
+  if (viaTraits.length > 0) return viaTraits;
+  return declared.phpExtends ? phpInheritedFrom(declared.phpExtends, method, found, classLikeById, seen) : [];
+}
+
+/**
  * Resolve all call sites for every file in `symbolsByFile`. Mutates the
  * passed-in `outgoingCallsByFile` edges in place.
  *
@@ -306,8 +350,10 @@ export function resolveCallSites(
   // have an owner; a qualified PHP edge is answered from here and nowhere
   // else. The key is a whole qualified name, so it nearly always has one
   // declaration, and narrowing that to the caller's file or dependencies is a
-  // filter over it rather than an index of its own.
+  // filter over it rather than an index of its own. The classes and traits
+  // among them are kept by id too, for what they inherit from.
   const phpOwnedAnywhere = new Map<string, string[]>();
+  const phpClassLikeById = new Map<string, SymbolNode>();
   for (const [file, syms] of symbolsByFile.entries()) {
     const idx = new Map<string, SymbolNode[]>();
     for (const s of syms) {
@@ -318,6 +364,7 @@ export function resolveCallSites(
         const anywhere = phpOwnedAnywhere.get(key);
         if (anywhere) anywhere.push(s.id);
         else phpOwnedAnywhere.set(key, [s.id]);
+        if (s.kind === "class" || s.kind === "trait") phpClassLikeById.set(s.id, s);
       }
       if (s.name === "<module>") continue;
       const existing = idx.get(s.name);
@@ -1464,11 +1511,14 @@ export function resolveCallSites(
       // what finds a sibling class in the caller's own namespace, which PHP
       // needs no `use` for and the file graph therefore draws no edge to.
       //
-      // When nothing is found the edge is left `unresolved` with no
-      // candidates: falling back to the method name alone is exactly how the
-      // wrong-class edges were drawn.
+      // A static method the named class does not declare is looked for where
+      // PHP looks for it ({@link phpInheritedFrom}). When nothing is found the
+      // edge is left `unresolved` with no candidates: falling back to the
+      // method name alone is exactly how the wrong-class edges were drawn.
       if (edge.calleeQualifier && callerLang === "php") {
-        const ids = phpFound(phpOwnedKey(edge.calleeQualifier, edge.calleeName));
+        const ids = edge.calleeQualifier.endsWith("\\")
+          ? phpFound(phpOwnedKey(edge.calleeQualifier, edge.calleeName))
+          : phpInheritedFrom(edge.calleeQualifier, edge.calleeName, phpFound, phpClassLikeById);
         const uniq = Array.from(new Set(ids));
         edge.calleeCandidates = uniq;
         if (uniq.length === 0) edge.confidence = "unresolved";

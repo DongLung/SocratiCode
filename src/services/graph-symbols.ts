@@ -3099,62 +3099,6 @@ function extractFromPhp(
     return undefined;
   };
 
-  for (const k of ["class_declaration", "interface_declaration", "trait_declaration"]) {
-    for (const cls of safeFindAll(root, k)) {
-      const nameNode = safeFind(cls, "name");
-      if (!nameNode) continue;
-      const name = nameNode.text();
-      const r = cls.range();
-      const startLine = r.start.line + 1;
-      const endLine = r.end.line + 1;
-      const sym: SymbolNode = {
-        id: makeId(file, name, startLine),
-        name, qualifiedName: name,
-        kind: k.includes("interface") ? "interface" : k.includes("trait") ? "trait" : "class",
-        file, line: startLine, endLine, language,
-        phpOwner: namespacePrefixAt(r.start.index),
-      };
-      symbols.push(sym);
-      scopes.push({ name, startLine, endLine, symbolId: sym.id });
-    }
-  }
-  // Each declaration's `return_type`, stashed by node kind as the symbols are
-  // read. These two kinds are walked here anyway, so asking `safeFindAll` for
-  // them again below re-walked the whole tree twice per file for nodes already
-  // in hand. Stashed rather than emitted: `pushTypeRef` attributes a reference
-  // to its innermost caller and so needs `scopes` complete, and the emission
-  // order — parameters and properties first, then methods, then functions —
-  // decides which of two same-key edges survives the dedupe, so it is kept
-  // exactly as it was. Collected above the name guard, because a declaration
-  // the guard skips still contributed its return type before.
-  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
-  const returnTypes = new Map<string, any[]>();
-  for (const k of ["function_definition", "method_declaration"]) {
-    // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
-    const forKind: any[] = [];
-    returnTypes.set(k, forKind);
-    for (const m of safeFindAll(root, k)) {
-      const returnType = m.field("return_type");
-      if (returnType) forKind.push(returnType);
-      const nameNode = safeFind(m, "name");
-      if (!nameNode) continue;
-      const name = nameNode.text();
-      const r = m.range();
-      const startLine = r.start.line + 1;
-      const endLine = r.end.line + 1;
-      const owner = k === "method_declaration" ? ownerClassOf(m) : undefined;
-      const sym: SymbolNode = {
-        id: makeId(file, name, startLine),
-        name, qualifiedName: name,
-        kind: k === "function_definition" ? "function" : "method",
-        file, line: startLine, endLine, language,
-        ...(owner ? { phpOwner: owner } : {}),
-      };
-      symbols.push(sym);
-      scopes.push({ name, startLine, endLine, symbolId: sym.id });
-    }
-  }
-
   /**
    * Whether the parse handed back part of a type reference rather than all of it.
    *
@@ -3207,26 +3151,136 @@ function extractFromPhp(
     return false;
   };
 
-  // A static call's class, when it is written as a name: `Invoice::capture()`,
-  // `Models\Invoice::capture()`, `\App\Models\Invoice::capture()` or
-  // `namespace\Invoice::capture()`. Resolved under the file's namespace and
-  // imports into the class it names, which the edge carries as its qualifier.
-  //
-  // Everything else is left unqualified and resolves as it always has: a
-  // variable (`$class::m()`) or an expression names no class statically, and
-  // `self`, `static` and `parent` — a `relative_scope`, not a name — are
-  // answered by the class the call sits in, which is outside this change. So
-  // is a class name the parse cut short ({@link isSplitName}): qualified by
-  // the part that survived, it would name a class the source never writes.
+  // The class a node spells, read at its own offset, or null for a name the
+  // parse cut short ({@link isSplitName}) — qualified by the part that
+  // survived, it would name a class the source never writes — or one that
+  // names no class ({@link phpClassRef}).
   // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
-  const staticCallQualifier = (node: any): string | undefined => {
-    const scope = node.field("scope");
-    const kind = scope?.kind();
+  const classRefOf = (node: any): PhpClassRef | null => {
+    const range = node.range();
+    return isSplitName(range) ? null : phpClassRef(node.text(), range.start.index, names());
+  };
+
+  // A class written as a name, as the fully qualified name it resolves to
+  // under the file's namespace and imports: `Invoice`, `Models\Invoice`,
+  // `\App\Models\Invoice` or `namespace\Invoice`, each in the class form
+  // `SymbolNode.phpOwner` documents (`\App\Models\Invoice`). Anything else —
+  // a variable, an expression, or `self`, `static` and `parent`, which are a
+  // `relative_scope` rather than a name — has no such name, and neither does
+  // a name {@link classRefOf} refuses.
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const classNameOf = (node: any): string | undefined => {
+    const kind = node?.kind();
     if (kind !== "name" && kind !== "qualified_name" && kind !== "relative_name") return undefined;
-    if (isSplitName(scope.range())) return undefined;
-    const ref = phpClassRef(scope.text(), scope.range().start.index, names());
+    const ref = classRefOf(node);
     return ref ? `\\${ref.fqcn}` : undefined;
   };
+
+  // A static call's class, when it is written as a name: `Invoice::capture()`
+  // carries the class it names as its qualifier. Everything else is left
+  // unqualified and resolves as it always has — `$class::m()`, and `self::`,
+  // `static::` and `parent::`, which are answered by the class the call sits
+  // in and are outside this change.
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const staticCallQualifier = (node: any): string | undefined => classNameOf(node.field("scope"));
+
+  // What a class or trait inherits static methods from, read from its own
+  // declaration: the class a class `extends`, and the traits a class or trait
+  // `use`s in its body. Resolution follows these when the class a static call
+  // names does not declare the method itself, as PHP does. Only the body's
+  // direct `use_declaration`s are read, so a nested anonymous class's traits
+  // are not taken for its container's, and a `use T { a as b; }` alias list,
+  // filed under its own `use_list`, is not read as a trait. An interface
+  // declares no method a static call can run, so its `extends` is not read.
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const inheritanceOf = (cls: any): Pick<SymbolNode, "phpExtends" | "phpTraits"> => {
+    const out: Pick<SymbolNode, "phpExtends" | "phpTraits"> = {};
+    if (cls.kind() === "class_declaration") {
+      // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+      const base = cls.children().find((c: any) => c.kind() === "base_clause");
+      // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+      const parent = base?.children().map((c: any) => classNameOf(c)).find(Boolean);
+      if (parent) out.phpExtends = parent;
+    }
+    const traits: string[] = [];
+    for (const child of cls.field("body")?.children() ?? []) {
+      if (child.kind() !== "use_declaration") continue;
+      for (const named of child.children()) {
+        const trait = classNameOf(named);
+        if (trait) traits.push(trait);
+      }
+    }
+    if (traits.length > 0) out.phpTraits = traits;
+    return out;
+  };
+
+  for (const k of ["class_declaration", "interface_declaration", "trait_declaration"]) {
+    for (const cls of safeFindAll(root, k)) {
+      const nameNode = safeFind(cls, "name");
+      if (!nameNode) continue;
+      const name = nameNode.text();
+      const r = cls.range();
+      const startLine = r.start.line + 1;
+      const endLine = r.end.line + 1;
+      const sym: SymbolNode = {
+        id: makeId(file, name, startLine),
+        name, qualifiedName: name,
+        kind: k.includes("interface") ? "interface" : k.includes("trait") ? "trait" : "class",
+        file, line: startLine, endLine, language,
+        phpOwner: namespacePrefixAt(r.start.index),
+        ...inheritanceOf(cls),
+      };
+      symbols.push(sym);
+      scopes.push({ name, startLine, endLine, symbolId: sym.id });
+    }
+  }
+  // Each declaration's `return_type`, stashed by node kind as the symbols are
+  // read. These two kinds are walked here anyway, so asking `safeFindAll` for
+  // them again below re-walked the whole tree twice per file for nodes already
+  // in hand. Stashed rather than emitted: `pushTypeRef` attributes a reference
+  // to its innermost caller and so needs `scopes` complete, and the emission
+  // order — parameters and properties first, then methods, then functions —
+  // decides which of two same-key edges survives the dedupe, so it is kept
+  // exactly as it was. Collected above the name guard, because a declaration
+  // the guard skips still contributed its return type before.
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const returnTypes = new Map<string, any[]>();
+  for (const k of ["function_definition", "method_declaration"]) {
+    // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+    const forKind: any[] = [];
+    returnTypes.set(k, forKind);
+    for (const m of safeFindAll(root, k)) {
+      const returnType = m.field("return_type");
+      if (returnType) forKind.push(returnType);
+      const nameNode = safeFind(m, "name");
+      if (!nameNode) continue;
+      const name = nameNode.text();
+      const r = m.range();
+      const startLine = r.start.line + 1;
+      const endLine = r.end.line + 1;
+      // An `abstract` method has no body for a call to run, so it is left
+      // unowned, as an anonymous class's methods are, and no qualified edge
+      // can reach it. PHP answers the call with the implementation instead: a
+      // trait's `abstract public static function make()` does not shadow the
+      // `make()` its class inherits, and calling an abstract method by name is
+      // an error. Owned, the declaration was found first and resolution
+      // stopped there, with the method PHP actually runs one level further up.
+      const owner = k === "method_declaration"
+        // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+        && !m.children().some((c: any) => c.kind() === "abstract_modifier")
+        ? ownerClassOf(m)
+        : undefined;
+      const sym: SymbolNode = {
+        id: makeId(file, name, startLine),
+        name, qualifiedName: name,
+        kind: k === "function_definition" ? "function" : "method",
+        file, line: startLine, endLine, language,
+        ...(owner ? { phpOwner: owner } : {}),
+      };
+      symbols.push(sym);
+      scopes.push({ name, startLine, endLine, symbolId: sym.id });
+    }
+  }
 
   const rawCalls: ExtractedSymbols["rawCalls"] = [];
   for (const k of ["function_call_expression", "member_call_expression", "scoped_call_expression"]) {
@@ -3277,11 +3331,9 @@ function extractFromPhp(
   // declared later on the same line must not reach back to it.
   // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
   const pushTypeRef = (node: any, kind: EdgeKind): void => {
-    const range = node.range();
-    const line = range.start.line + 1;
-    if (isSplitName(range)) return;
-    const ref = phpClassRef(node.text(), range.start.index, names());
+    const ref = classRefOf(node);
     if (!ref) return;
+    const line = node.range().start.line + 1;
     // The namespace the class is declared in, as the prefix its class symbol is
     // owned under — `\App\Models\` for `App\Models\Invoice`, `\` for a class in
     // the global namespace. Resolution matches the class name inside it.

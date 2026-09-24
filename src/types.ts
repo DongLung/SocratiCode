@@ -152,10 +152,26 @@ export interface SymbolNode {
    * methods and one naming a namespace only its classes.
    *
    * Absent for every other language, for a method of an anonymous class —
-   * which no qualified name can reach — and for every graph persisted before
-   * it existed. The symbol's `id` and `qualifiedName` are unchanged by it.
+   * which no qualified name can reach — for an `abstract` method, which no
+   * call runs, and for every graph persisted before it existed. The symbol's
+   * `id` and `qualifiedName` are unchanged by it.
    */
   phpOwner?: string;
+  /**
+   * PHP classes only: the class this one `extends`, as a fully qualified class
+   * name in the form {@link phpOwner} uses for one (`\App\Models\Model`).
+   * Resolution follows it when a static call names this class and the class
+   * does not declare the method itself. Absent when the class extends nothing,
+   * or names its parent in a way the extractor cannot read statically.
+   */
+  phpExtends?: string;
+  /**
+   * PHP classes and traits only: the traits this one `use`s in its body, as
+   * fully qualified class names, in the order they are written. Followed
+   * before {@link phpExtends}, since a trait's method overrides an inherited
+   * one. Absent when there are none.
+   */
+  phpTraits?: string[];
 }
 
 /** Kind of relationship an edge represents */

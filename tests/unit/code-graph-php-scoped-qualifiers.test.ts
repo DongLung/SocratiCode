@@ -17,7 +17,8 @@ import type { SymbolEdge } from "../../src/types.js";
  * extraction produces, with the dependencies the file graph actually draws.
  * The two reproductions from the issue are here as filed, and a controller
  * that declares a `capture()` of its own calls four other `capture()`s — one
- * of them on a class the project does not have.
+ * of them on a class the project does not have. A small model hierarchy covers
+ * static methods a class inherits rather than declares.
  */
 describe("PHP qualified edges in a real graph", () => {
   let root: string;
@@ -30,6 +31,8 @@ describe("PHP qualified edges in a real graph", () => {
   };
 
   const CONTROLLER = "src/Http/Controller.php";
+  const ACCOUNTS = "src/Http/Accounts.php";
+  const POSTS = "src/Http/Posts.php";
 
   /** The single edge `caller` emits under one name and kind, failing loudly if there is not exactly one. */
   const edgeFrom = (file: string, caller: string, name: string, kind: SymbolEdge["kind"] = "call"): SymbolEdge => {
@@ -167,6 +170,164 @@ class Schema
 }
 `);
 
+    // A model hierarchy. `User` declares nothing and inherits `create()` from
+    // `Model` and `boot()` from `Entity` above it; `Post` overrides `create()`
+    // and takes `slug()` from a trait. `Guarded` uses a trait that only
+    // requires the `create()` it inherits. `Legacy` extends a `Model` from
+    // outside the project, and `Report` is unrelated but declares a `find()`.
+    write("src/Inherit/Entity.php", `<?php
+
+namespace App\\Inherit;
+
+class Entity
+{
+    public static function boot(): void
+    {
+    }
+}
+`);
+    write("src/Inherit/Model.php", `<?php
+
+namespace App\\Inherit;
+
+class Model extends Entity
+{
+    public static function create(): void
+    {
+    }
+}
+`);
+    write("src/Inherit/User.php", `<?php
+
+namespace App\\Inherit;
+
+class User extends Model
+{
+}
+`);
+    write("src/Inherit/HasSlug.php", `<?php
+
+namespace App\\Inherit;
+
+trait HasSlug
+{
+    public static function slug(): string
+    {
+        return '';
+    }
+}
+`);
+    write("src/Inherit/Post.php", `<?php
+
+namespace App\\Inherit;
+
+class Post extends Model
+{
+    use HasSlug;
+
+    public static function create(): void
+    {
+    }
+}
+`);
+    write("src/Inherit/RequiresCreate.php", `<?php
+
+namespace App\\Inherit;
+
+trait RequiresCreate
+{
+    abstract public static function create(): void;
+}
+`);
+    write("src/Inherit/Guarded.php", `<?php
+
+namespace App\\Inherit;
+
+class Guarded extends Model
+{
+    use RequiresCreate;
+}
+`);
+    write("src/Inherit/Legacy.php", `<?php
+
+namespace App\\Inherit;
+
+class Legacy extends \\Illuminate\\Database\\Eloquent\\Model
+{
+}
+`);
+    write("src/Inherit/Report.php", `<?php
+
+namespace App\\Inherit;
+
+class Report
+{
+    public static function find(): void
+    {
+    }
+}
+`);
+    // The caller imports the parent as well as the child, so `main`'s name
+    // match reached `Model::create()` through the dependency scan: the one
+    // inherited call it answered correctly, and the case to keep.
+    write(ACCOUNTS, `<?php
+
+namespace App\\Http;
+
+use App\\Inherit\\Guarded;
+use App\\Inherit\\Legacy;
+use App\\Inherit\\Model;
+use App\\Inherit\\Report;
+use App\\Inherit\\User;
+
+class Accounts
+{
+    public function make(): void
+    {
+        User::create();
+    }
+
+    public function guarded(): void
+    {
+        Guarded::create();
+    }
+
+    public function boot(): void
+    {
+        User::boot();
+    }
+
+    public function lookup(): void
+    {
+        User::find();
+    }
+
+    public function legacy(): void
+    {
+        Legacy::create();
+    }
+}
+`);
+    write(POSTS, `<?php
+
+namespace App\\Http;
+
+use App\\Inherit\\Post;
+
+class Posts
+{
+    public function make(): void
+    {
+        Post::create();
+    }
+
+    public function slug(): string
+    {
+        return Post::slug();
+    }
+}
+`);
+
     graph = await buildCodeGraph(root);
     resolveCallSites(
       graph,
@@ -248,6 +409,59 @@ class Schema
       expect(edge).toHaveLength(1);
       expect(edge[0].calleeCandidates).toEqual([idOf(`src/Schema/${cls}.php`, "all", `\\App\\Schema\\${cls}`)]);
       expect(edge[0].confidence).toBe("unique");
+    });
+  });
+
+  describe("inherited static methods", () => {
+    const MODEL = "src/Inherit/Model.php";
+
+    it("resolves a method the named class inherits to the parent that declares it", () => {
+      // The call `main` answered correctly by name, since the caller imports
+      // `Model` too.
+      const edge = edgeFrom(ACCOUNTS, "make", "create");
+      expect(edge.calleeQualifier).toBe("\\App\\Inherit\\User");
+      expect(edge.calleeCandidates).toEqual([idOf(MODEL, "create", "\\App\\Inherit\\Model")]);
+      expect(edge.confidence).toBe("unique");
+    });
+
+    it("follows the chain past the parent, to a class the caller does not import", () => {
+      const edge = edgeFrom(ACCOUNTS, "boot", "boot");
+      expect(edge.calleeCandidates).toEqual([idOf("src/Inherit/Entity.php", "boot", "\\App\\Inherit\\Entity")]);
+      expect(edge.confidence).toBe("unique");
+    });
+
+    it("answers with the class's own method, not the one it overrides", () => {
+      const edge = edgeFrom(POSTS, "make", "create");
+      expect(edge.calleeCandidates).toEqual([idOf("src/Inherit/Post.php", "create", "\\App\\Inherit\\Post")]);
+    });
+
+    it("passes over a trait's abstract declaration for the implementation the class inherits", () => {
+      // PHP runs `Model::create()`: an abstract trait method does not override
+      // an inherited one. Owned, the declaration answered first, and `unique`.
+      const edge = edgeFrom(ACCOUNTS, "guarded", "create");
+      expect(edge.calleeCandidates).toEqual([idOf(MODEL, "create", "\\App\\Inherit\\Model")]);
+      expect(edge.confidence).toBe("unique");
+    });
+
+    it("resolves a method the class takes from a trait", () => {
+      const edge = edgeFrom(POSTS, "slug", "slug");
+      expect(edge.calleeCandidates).toEqual([idOf("src/Inherit/HasSlug.php", "slug", "\\App\\Inherit\\HasSlug")]);
+      expect(edge.confidence).toBe("unique");
+    });
+
+    it("leaves a method no ancestor declares unresolved, though an unrelated class does", () => {
+      // `Report::find()` is in the caller's dependencies; `User` has no `find`.
+      const edge = edgeFrom(ACCOUNTS, "lookup", "find");
+      expect(edge.calleeCandidates).toEqual([]);
+      expect(edge.confidence).toBe("unresolved");
+    });
+
+    it("stops at a parent outside the project rather than taking a same-named one inside it", () => {
+      // `Legacy` extends Eloquent's `Model`, not `App\Inherit\Model`, whose
+      // `create()` the caller reaches.
+      const edge = edgeFrom(ACCOUNTS, "legacy", "create");
+      expect(edge.calleeCandidates).toEqual([]);
+      expect(edge.confidence).toBe("unresolved");
     });
   });
 

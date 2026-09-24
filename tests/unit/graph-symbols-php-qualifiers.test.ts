@@ -221,6 +221,25 @@ function helper() {}
       expect(ownersIn(php)).toEqual([["m", undefined]]);
     });
 
+    it("gives an abstract method no owner, since no call runs it", () => {
+      // A trait's `abstract` method only requires one; PHP runs the class's
+      // own or inherited implementation, so a qualified edge must not stop at
+      // the declaration. The concrete method beside it is owned as usual.
+      const php = [
+        "<?php",
+        "namespace App;",
+        "trait T { abstract public static function make(): static; }",
+        "abstract class A { abstract protected function g(); public function h() {} }",
+      ].join("\n");
+      expect(ownersIn(php)).toEqual([
+        ["A", "\\App\\"],
+        ["T", "\\App\\"],
+        ["make", undefined],
+        ["g", undefined],
+        ["h", "\\App\\A"],
+      ]);
+    });
+
     it("owns a method by its class's real name, not an attribute's", () => {
       // An attribute list sits inside the declaration ahead of the name, so
       // reading the first `name` descendant would own `m` by `Entity`.
@@ -234,6 +253,58 @@ function helper() {}
         ["t.php::Invoice#3", "Invoice"],
         ["t.php::capture#4", "capture"],
       ]);
+    });
+  });
+
+  describe("a class records what it inherits static methods from", () => {
+    /** Each class-like's `[name, phpExtends, phpTraits]`. */
+    const inheritanceIn = (php: string): Array<[string, string | undefined, string[] | undefined]> =>
+      extract(php).symbols
+        .filter((s) => s.kind === "class" || s.kind === "interface" || s.kind === "trait")
+        .map((s) => [s.name, s.phpExtends, s.phpTraits]);
+
+    it("records the parent and traits, each resolved under the namespace and imports", () => {
+      const php = [
+        "<?php",
+        "namespace App\\Models;",
+        "use Vendor\\Orm\\Model as Base;",
+        "use Vendor\\Concerns;",
+        "class User extends Base {",
+        "    use HasSlug, Concerns\\HasTag;",
+        "    use \\Vendor\\Loud;",
+        "}",
+      ].join("\n");
+      expect(inheritanceIn(php)).toEqual([
+        ["User", "\\Vendor\\Orm\\Model", ["\\App\\Models\\HasSlug", "\\Vendor\\Concerns\\HasTag", "\\Vendor\\Loud"]],
+      ]);
+    });
+
+    it("records a trait's own traits, and neither field where there is nothing to record", () => {
+      const php = "<?php\nnamespace App;\ntrait T { use U; }\ntrait U {}\nclass C {}\n";
+      expect(inheritanceIn(php)).toEqual([
+        ["C", undefined, undefined],
+        ["T", undefined, ["\\App\\U"]],
+        ["U", undefined, undefined],
+      ]);
+    });
+
+    it("does not record an interface's parents", () => {
+      expect(inheritanceIn("<?php\nnamespace App;\ninterface I extends J, K {}\n")).toEqual([["I", undefined, undefined]]);
+    });
+
+    it("reads a trait's name, not its alias list", () => {
+      const php = "<?php\nnamespace App;\nclass C { use T { a as b; } }\n";
+      expect(inheritanceIn(php)).toEqual([["C", undefined, ["\\App\\T"]]]);
+    });
+
+    it("does not take a nested anonymous class's parent or traits for its container's", () => {
+      const php = "<?php\nnamespace App;\nclass C {\n    public function m() { return new class extends P { use T; }; }\n}\n";
+      expect(inheritanceIn(php)).toEqual([["C", undefined, undefined]]);
+    });
+
+    it("records no parent the parse cut short", () => {
+      const php = "<?php\nnamespace Top;\nclass C extends \u{20BB7}\\App\\Made {}\n";
+      expect(inheritanceIn(php)).toEqual([["C", undefined, undefined]]);
     });
   });
 
