@@ -16,6 +16,7 @@ import type {
 } from "../types.js";
 import { ensureElixirTemplateParsers, isElixirTemplateExtension } from "./elixir-templates.js";
 import { detectExtensionFromSource, resolveExtensionlessDetection } from "./extensionless.js";
+import type { GitRefreshTarget } from "./git-state.js";
 import { loadPathAliases } from "./graph-aliases.js";
 import { extractImports } from "./graph-imports.js";
 import {
@@ -125,7 +126,7 @@ export interface GraphBuildCompleted {
 const graphBuildInProgress = new Map<string, GraphBuildProgress>();
 
 /** In-flight build promises — allows callers to share a single build */
-const graphBuildPromises = new Map<string, Promise<CodeGraph>>();
+const graphBuildPromises = new Map<string, { projectId: string; promise: Promise<CodeGraph> }>();
 
 /** Track the last completed graph build per project */
 const lastGraphBuildCompleted = new Map<string, GraphBuildCompleted>();
@@ -156,8 +157,8 @@ export function getGraphBuildInProgressProjects(): string[] {
 /** Keyed by resolved path; the identity is kept from load time, since a checkout can change what it resolves to. */
 const graphCache = new Map<string, { graph: CodeGraph; projectId: string }>();
 
-function cacheGraph(resolvedPath: string, graph: CodeGraph): void {
-  graphCache.set(resolvedPath, { graph, projectId: identityOfCachedPath(resolvedPath) ?? "" });
+function cacheGraph(resolvedPath: string, graph: CodeGraph, projectId = identityOfCachedPath(resolvedPath) ?? ""): void {
+  graphCache.set(resolvedPath, { graph, projectId });
 }
 
 /** Invalidate graph cache for a project (called by watcher on file changes) */
@@ -199,20 +200,25 @@ export async function getOrBuildGraph(
 /** Get a cached or persisted graph without creating one when it is absent. */
 export async function getExistingGraph(projectPath: string): Promise<CodeGraph | null> {
   const resolved = path.resolve(projectPath);
-  const cached = graphCache.get(resolved);
-  if (cached) return cached.graph;
-
   const projectId = projectIdFromPath(resolved);
+  const cached = graphCache.get(resolved);
+  if (cached?.projectId === projectId) return cached.graph;
+  if (cached) graphCache.delete(resolved);
+
   const graphCollName = graphCollectionName(projectId);
   const persisted = await loadGraphData(graphCollName);
   if (!persisted) return null;
 
-  cacheGraph(resolved, persisted);
+  cacheGraph(resolved, persisted, projectId);
   return persisted;
 }
 
 /** Options for `rebuildGraph` controlling which layers are rebuilt. */
 export interface RebuildGraphOptions {
+  /** Storage identity captured by the enclosing index operation. */
+  projectId?: string;
+  /** Git refreshes require both graph layers to finish for the observed state. */
+  target?: GitRefreshTarget;
   /** Extra file extensions to treat as graph nodes. */
   extraExtensions?: Set<string>;
   /**
@@ -242,10 +248,11 @@ export async function shouldRebuildGraph(
   projectPath: string,
   change: GraphChangeSummary,
   extraExtensions?: Set<string>,
+  projectId?: string,
 ): Promise<GraphRebuildDecision> {
   const resolved = path.resolve(projectPath);
   try {
-    const graphCollName = graphCollectionName(projectIdFromPath(resolved));
+    const graphCollName = graphCollectionName(projectId ?? projectIdFromPath(resolved));
     const load = await loadGraphInputs(graphCollName);
     if (load.status === "absent") {
       // Nothing persisted: there is no graph here to refresh, and building one
@@ -319,24 +326,27 @@ export async function rebuildGraph(
   const resolved = path.resolve(projectPath);
   const opts: RebuildGraphOptions =
     optsOrExtras instanceof Set ? { extraExtensions: optsOrExtras } : (optsOrExtras ?? {});
+  const projectId = opts.projectId ?? projectIdFromPath(resolved);
 
   // Concurrency guard: if already building, return the existing promise
   const existing = graphBuildPromises.get(resolved);
   if (existing) {
+    if (existing.projectId !== projectId || opts.target) {
+      throw new Error("A graph build is already running; retry the Git refresh after it completes.");
+    }
     logger.info("Graph build already in progress, joining existing build", { projectPath: resolved });
-    return existing;
+    return existing.promise;
   }
 
-  const projectId = projectIdFromPath(resolved);
   await assertNoReclamationBarrier(projectId);
 
   // Start tracked build. A refused lock rejects here, so a caller joining the
   // promise later sees the rejection and never a null.
-  const promise = withWriterLock(projectId, "graph", () => doRebuildGraph(resolved, opts)).then((graph) => {
+  const promise = withWriterLock(projectId, "graph", () => doRebuildGraph(resolved, { ...opts, projectId })).then((graph) => {
     if (graph === null) throw new Error(`Another process holds the graph lock for ${resolved}, or it could not be taken`);
     return graph;
   });
-  graphBuildPromises.set(resolved, promise);
+  graphBuildPromises.set(resolved, { projectId, promise });
 
   try {
     return await promise;
@@ -409,19 +419,21 @@ async function doRebuildGraph(
   graphBuildInProgress.set(resolvedPath, progress);
 
   try {
+    await opts.target?.assertCurrent();
     // Nothing here replaces the cached or persisted graph until one attempt has
     // come back internally consistent. The cache is deliberately *not* cleared
     // first: a build that gives up must leave the previous graph serving, which
     // clearing it up front would defeat.
     const built = await buildConsistentCodeGraph(resolvedPath, opts, progress);
+    await opts.target?.assertCurrent();
     const graph: CodeGraph = { nodes: built.nodes, edges: built.edges };
-    cacheGraph(resolvedPath, graph);
+    const projectId = opts.projectId ?? projectIdFromPath(resolvedPath);
+    if (!opts.target) cacheGraph(resolvedPath, graph, projectId);
 
     // Persist file-import graph to Qdrant
     progress.phase = "persisting";
-    const projectId = projectIdFromPath(resolvedPath);
     const graphCollName = graphCollectionName(projectId);
-    await saveGraphData(graphCollName, resolvedPath, graph, built.graphInputs);
+    if (!opts.target) await saveGraphData(graphCollName, resolvedPath, graph, built.graphInputs);
 
     // Build & persist symbol graph (resolution + sharded persistence) — unless
     // the caller asked to skip it (Phase F watcher path).
@@ -450,6 +462,7 @@ async function doRebuildGraph(
         progress.phase = "persisting symbols";
         await persistSymbolGraph(projectId, resolvedPath, built.symbolsByFile, built.outgoingCallsByFile);
       } catch (err) {
+        if (opts.target) throw new Error(`Symbol graph persistence failed: ${describeQdrantError(err)}`, { cause: err });
         // Keep returning the file-import graph: it is built and saved, and the
         // caller asked for it. But record WHY the symbol half is missing, with
         // the server's own reason (a bare "Bad Request" names nothing), so the
@@ -469,6 +482,15 @@ async function doRebuildGraph(
       // with a clean one and hide a still-broken graph. Only the branch above,
       // an actual successful persist, clears it.
       symbolGraphError = lastGraphBuildCompleted.get(resolvedPath)?.symbolGraphError;
+    }
+
+    if (opts.target) {
+      await opts.target.assertCurrent();
+      // Do not advance the input record on a failed symbol build. A retry,
+      // including one after restart, must still see that reconciliation is due.
+      await saveGraphData(graphCollName, resolvedPath, graph, built.graphInputs);
+      await opts.target.assertCurrent();
+      cacheGraph(resolvedPath, graph, projectId);
     }
 
     lastGraphBuildCompleted.set(resolvedPath, {
@@ -653,9 +675,9 @@ async function persistSymbolGraph(
  */
 export async function awaitGraphBuild(projectPath: string): Promise<void> {
   const resolved = path.resolve(projectPath);
-  const promise = graphBuildPromises.get(resolved);
-  if (promise) {
-    try { await promise; } catch { /* swallow — caller proceeds regardless */ }
+  const build = graphBuildPromises.get(resolved);
+  if (build) {
+    try { await build.promise; } catch { /* swallow — caller proceeds regardless */ }
   }
 }
 
@@ -674,8 +696,8 @@ export async function removeGraph(projectPath: string): Promise<void> {
 /** Check if a graph exists (in cache or persisted) */
 export async function hasGraph(projectPath: string): Promise<boolean> {
   const resolved = path.resolve(projectPath);
-  if (graphCache.has(resolved)) return true;
   const projectId = projectIdFromPath(resolved);
+  if (graphCache.get(resolved)?.projectId === projectId) return true;
   const graphCollName = graphCollectionName(projectId);
   const meta = await getGraphMetadata(graphCollName);
   return meta !== null;
@@ -737,7 +759,7 @@ export async function getGraphStatus(projectPath: string): Promise<{
     edgeCount: meta.edgeCount,
     importCount: meta.importCount,
     builtByVersion: meta.builtByVersion,
-    cached: graphCache.has(resolved),
+    cached: graphCache.get(resolved)?.projectId === projectId,
     symbol,
   };
 }

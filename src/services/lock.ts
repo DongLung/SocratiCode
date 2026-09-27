@@ -71,10 +71,10 @@ export async function acquireProjectLock(
   projectPath: string,
   operation: string,
   onCompromised?: (err: Error) => void | Promise<void>,
-  options: { reentrant?: boolean } = {},
+  options: { reentrant?: boolean; projectId?: string } = {},
 ): Promise<boolean> {
   return acquireIdentityLock(
-    projectIdFromPath(path.resolve(projectPath)),
+    options.projectId ?? projectIdFromPath(path.resolve(projectPath)),
     operation,
     onCompromised,
     projectPath,
@@ -170,8 +170,8 @@ export async function acquireIdentityLock(
  * make — once another process may hold the lock, the safe move is to stop
  * rather than to correct, since a correction would overwrite the new holder.
  */
-export function holdsProjectLock(projectPath: string, operation: string): boolean {
-  return heldLocks.has(lockKey(projectPath, operation));
+export function holdsProjectLock(projectPath: string, operation: string, projectId?: string): boolean {
+  return heldLocks.has(projectId === undefined ? lockKey(projectPath, operation) : identityLockKey(projectId, operation));
 }
 
 /** Whether this process holds the lock for a recorded project identity. */
@@ -185,8 +185,8 @@ export function holdsIdentityLock(projectId: string, operation: string): boolean
  * @param projectPath - Absolute path to the project directory
  * @param operation - Operation type: "index" or "watch"
  */
-export async function releaseProjectLock(projectPath: string, operation: string): Promise<void> {
-  return releaseIdentityLock(projectIdFromPath(path.resolve(projectPath)), operation, projectPath);
+export async function releaseProjectLock(projectPath: string, operation: string, projectId?: string): Promise<void> {
+  return releaseIdentityLock(projectId ?? projectIdFromPath(path.resolve(projectPath)), operation, projectPath);
 }
 
 /** Release a lock acquired through {@link acquireIdentityLock}. */

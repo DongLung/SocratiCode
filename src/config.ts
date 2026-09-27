@@ -87,7 +87,7 @@ function readProjectIdFromConfigFile(folderPath: string): string | null {
  * appended to the hash, producing a separate set of collections per
  * branch.
  */
-export function projectIdFromPath(folderPath: string): string {
+export function projectIdFromPath(folderPath: string, observedBranch?: string | null): string {
   const envExplicit = process.env.SOCRATICODE_PROJECT_ID?.trim();
   if (envExplicit) {
     assertValidProjectId(envExplicit, "SOCRATICODE_PROJECT_ID");
@@ -105,7 +105,7 @@ export function projectIdFromPath(folderPath: string): string {
 
   // Branch-aware mode: append sanitized branch name to isolate per-branch indexes
   if (process.env.SOCRATICODE_BRANCH_AWARE === "true") {
-    const branch = detectGitBranch(path.resolve(folderPath));
+    const branch = observedBranch === undefined ? detectGitBranch(path.resolve(folderPath)) : observedBranch;
     if (branch) {
       const sanitized = sanitizeBranchName(branch);
       if (sanitized) {

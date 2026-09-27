@@ -11,9 +11,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { collectionName, projectIdFromPath } from "../config.js";
-import { QDRANT_COLLECTION_PREFIX, QDRANT_MODE } from "../constants.js";
+import { getWatcherMode, QDRANT_COLLECTION_PREFIX, QDRANT_MODE } from "../constants.js";
 import { isGraphBuildInProgress } from "./code-graph.js";
 import { isDockerAvailable, isQdrantRunning } from "./docker.js";
+import { resumeGitRefresh, stopAllGitRefreshes } from "./git-refresh.js";
 import { getIndexingInProgressProjects, getPersistedIndexingStatus, indexProject, requestCancellation, updateProjectIndex } from "./indexer.js";
 import { getLockHolderPid, releaseAllLocks } from "./lock.js";
 import { logger } from "./logger.js";
@@ -235,6 +236,11 @@ async function resumeProject(
     return;
   }
 
+  if (getWatcherMode() === "git") {
+    await resumeGitRefresh(resolvedPath);
+    return;
+  }
+
   // Check persisted indexing status to detect interrupted indexing
   const persistedStatus = await getPersistedIndexingStatus(resolvedPath);
 
@@ -367,6 +373,8 @@ export async function awaitActiveIndexing(timeoutMs = 60_000): Promise<void> {
  */
 export async function gracefulShutdown(signal: string, closeServer?: () => Promise<void>): Promise<void> {
   logger.info(`Received ${signal}, shutting down gracefully...`);
+
+  stopAllGitRefreshes();
 
   // Signal all in-flight indexing in this process to stop at the next batch boundary
   for (const project of getIndexingInProgressProjects()) {

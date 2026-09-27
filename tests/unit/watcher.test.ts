@@ -130,14 +130,14 @@ describe("watcher (unit)", () => {
   // ── startWatching / stopWatching / isWatching / getWatchedProjects ───
 
   describe("startWatching", () => {
-    it("refuses to start before acquiring a lock when watcher mode is off", async () => {
-      process.env.SOCRATICODE_WATCHER = "off";
+    it.each(["off", "git"])("refuses to start before acquiring a lock when watcher mode is %s", async (mode) => {
+      process.env.SOCRATICODE_WATCHER = mode;
       const progress: string[] = [];
 
       const result = await startWatching(TEST_PROJECT, (msg) => progress.push(msg));
 
       expect(result).toBe(false);
-      expect(progress).toContain("File watcher disabled by SOCRATICODE_WATCHER=off");
+      expect(progress).toContain(`File watcher disabled by SOCRATICODE_WATCHER=${mode}`);
       expect(mockAcquireProjectLock).not.toHaveBeenCalled();
       const watcher = await import("@parcel/watcher");
       expect(watcher.default.subscribe).not.toHaveBeenCalled();
@@ -1066,7 +1066,7 @@ describe("watcher (unit)", () => {
       expect(isWatching(TEST_PROJECT)).toBe(true);
     });
 
-    it.each(["manual", "off"])("does no watcher work in %s mode", async (mode) => {
+    it.each(["manual", "off", "git"])("does no watcher work in %s mode", async (mode) => {
       process.env.SOCRATICODE_WATCHER = mode;
 
       await expect(startWatchingAutomatically(TEST_PROJECT)).resolves.toBe(false);
@@ -1078,7 +1078,7 @@ describe("watcher (unit)", () => {
   });
 
   describe("ensureWatcherStarted", () => {
-    it.each(["manual", "off"])("returns before storage access in %s mode", (mode) => {
+    it.each(["manual", "off", "git"])("returns before storage access in %s mode", (mode) => {
       process.env.SOCRATICODE_WATCHER = mode;
 
       ensureWatcherStarted(TEST_PROJECT);

@@ -39,6 +39,56 @@ jobs:
       - run: npm ci
       - run: npm run test:unit
 
+  git-refresh-windows:
+    name: Git Refresh on Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: git --version
+      - run: npx vitest run tests/unit/git-state.test.ts tests/unit/git-refresh.test.ts tests/unit/git-lock.test.ts
+
+  git-refresh-integration:
+    name: Git Refresh with Qdrant and Ollama
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      qdrant:
+        image: qdrant/qdrant:v1.17.0
+        ports:
+          - 6333:6333
+      ollama:
+        image: ollama/ollama:latest
+        ports:
+          - 11435:11434
+    env:
+      QDRANT_MODE: external
+      QDRANT_URL: http://127.0.0.1:6333
+      QDRANT_HOST: 127.0.0.1
+      QDRANT_PORT: 6333
+      EMBEDDING_PROVIDER: ollama
+      OLLAMA_MODE: external
+      OLLAMA_URL: http://127.0.0.1:11435
+      OLLAMA_HOST: http://127.0.0.1:11435
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Prepare the real embedding model
+        run: docker exec "${{ job.services.ollama.id }}" ollama pull nomic-embed-text
+      - name: Verify Docker and run live Git refresh regressions
+        run: |
+          docker info
+          npx vitest run tests/integration/git-refresh.test.ts tests/integration/git-refresh-mcp.test.ts
+
   node-floor-consumer-install:
     name: Node 18.17 Consumer Install
     runs-on: ubuntu-latest

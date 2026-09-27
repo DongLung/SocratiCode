@@ -13,6 +13,11 @@ vi.mock("../../src/services/docker.js", () => ({
   isQdrantRunning: vi.fn(),
 }));
 
+vi.mock("../../src/services/git-refresh.js", () => ({
+  resumeGitRefresh: vi.fn(async () => {}),
+  stopAllGitRefreshes: vi.fn(),
+}));
+
 vi.mock("../../src/services/qdrant.js", () => ({
   listCodebaseCollections: vi.fn(),
   getProjectMetadata: vi.fn(),
@@ -63,6 +68,7 @@ vi.mock("../../src/constants.js", async (importOriginal) => {
 
 import { collectionName, projectIdFromPath } from "../../src/config.js";
 import { isDockerAvailable, isQdrantRunning } from "../../src/services/docker.js";
+import { resumeGitRefresh, stopAllGitRefreshes } from "../../src/services/git-refresh.js";
 import { getIndexingInProgressProjects, getPersistedIndexingStatus, indexProject, requestCancellation, updateProjectIndex } from "../../src/services/indexer.js";
 import { getLockHolderPid, releaseAllLocks } from "../../src/services/lock.js";
 import { logger } from "../../src/services/logger.js";
@@ -104,6 +110,30 @@ beforeEach(() => {
 // ── autoResumeIndexedProjects ────────────────────────────────────────────
 
 describe("autoResumeIndexedProjects", () => {
+  it("resumes Git monitoring only for existing indexes, and off still prevents startup work", async () => {
+    vi.stubEnv("SOCRATICODE_WATCHER", "git");
+    mockListCollections.mockResolvedValue([collectionName(projectIdFromPath(TEST_PROJECT))]);
+    try {
+      await autoResumeIndexedProjects(TEST_PROJECT);
+      expect(resumeGitRefresh).toHaveBeenCalledExactlyOnceWith(TEST_PROJECT);
+      expect(mockStartWatchingAutomatically).not.toHaveBeenCalled();
+      vi.mocked(resumeGitRefresh).mockClear();
+      mockListCollections.mockResolvedValue([]);
+      await autoResumeIndexedProjects(TEST_PROJECT);
+      expect(resumeGitRefresh).not.toHaveBeenCalled();
+      process.env.SOCRATICODE_AUTO_RESUME = "off";
+      mockListCollections.mockResolvedValue([collectionName(projectIdFromPath(TEST_PROJECT))]);
+      await autoResumeIndexedProjects(TEST_PROJECT);
+      expect(resumeGitRefresh).not.toHaveBeenCalled();
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("stops Git scheduling before shutdown drains writers", async () => {
+    await gracefulShutdown("SIGTERM");
+    expect(stopAllGitRefreshes).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(stopAllGitRefreshes).mock.invocationCallOrder[0]).toBeLessThan(mockReleaseAllLocks.mock.invocationCallOrder[0]);
+  });
+
   it("SOCRATICODE_AUTO_RESUME=off exits before infrastructure access and overrides a project list", async () => {
     process.env.SOCRATICODE_AUTO_RESUME = " OFF ";
     process.env.SOCRATICODE_AUTO_RESUME_PROJECTS = TEST_PROJECT;
