@@ -9,6 +9,7 @@ import { checkGitRefresh, gitRefreshStatus, stopAllGitRefreshes } from "../../sr
 import { hashContent, isIndexingInProgress, removeProjectIndex } from "../../src/services/indexer.js";
 import { getCollectionInfo, loadProjectHashes } from "../../src/services/qdrant.js";
 import { autoResumeIndexedProjects } from "../../src/services/startup.js";
+import { listStoredGenerations, loadFilePayload, loadSymbolGraphMeta, saveFilePayload } from "../../src/services/symbol-graph-store.js";
 import { isWatching } from "../../src/services/watcher.js";
 import { handleGraphTool } from "../../src/tools/graph-tools.js";
 import { handleIndexTool } from "../../src/tools/index-tools.js";
@@ -139,5 +140,27 @@ describe.skipIf(!isDockerAvailable())("Git refresh with real Git, embeddings, Qd
     await settled("detached HEAD");
     expect((await hashes())?.has("offline.ts")).toBe(true);
     expect(isWatching(fixture.root)).toBe(false);
+  });
+
+  it("cleans abandoned symbol generations on an unchanged Git-mode restart without rebuilding the active graph", async () => {
+    stopAllGitRefreshes();
+    const projectId = identity();
+    const meta = await loadSymbolGraphMeta(projectId);
+    const payload = await loadFilePayload(projectId, "main.ts");
+    expect(meta?.generation).toBeTruthy();
+    if (!payload) throw new Error("Indexed main.ts symbol payload is missing");
+    await saveFilePayload(projectId, payload, "abandoned-fixture-generation");
+    expect(await listStoredGenerations(projectId)).toContain("abandoned-fixture-generation");
+
+    vi.stubEnv("SOCRATICODE_AUTO_RESUME", "off");
+    await autoResumeIndexedProjects(fixture.root);
+    expect(await listStoredGenerations(projectId)).toContain("abandoned-fixture-generation");
+
+    vi.stubEnv("SOCRATICODE_AUTO_RESUME", "");
+    await autoResumeIndexedProjects(fixture.root);
+    await settled("detached HEAD");
+    expect((await loadSymbolGraphMeta(projectId))?.generation).toBe(meta?.generation);
+    expect(await listStoredGenerations(projectId)).not.toContain("abandoned-fixture-generation");
+    expect(await loadFilePayload(projectId, "main.ts")).toEqual(payload);
   });
 });

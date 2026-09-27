@@ -18,6 +18,19 @@ vi.mock("../../src/services/git-refresh.js", () => ({
   stopAllGitRefreshes: vi.fn(),
 }));
 
+const graphCleanup = vi.hoisted(() => ({
+  active: vi.fn(() => false),
+  coordinate: vi.fn(async (_id: string, work: () => Promise<void>) => work()),
+  load: vi.fn(),
+  clean: vi.fn(),
+}));
+vi.mock("../../src/services/code-graph.js", () => ({ isGraphBuildInProgress: graphCleanup.active }));
+vi.mock("../../src/services/symbol-graph-store.js", () => ({
+  coordinateProject: graphCleanup.coordinate,
+  loadSymbolGraphMeta: graphCleanup.load,
+  cleanStaleGenerations: graphCleanup.clean,
+}));
+
 vi.mock("../../src/services/qdrant.js", () => ({
   listCodebaseCollections: vi.fn(),
   getProjectMetadata: vi.fn(),
@@ -97,6 +110,7 @@ const TEST_PROJECT = "/tmp/test-project";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  graphCleanup.load.mockReset().mockResolvedValue(null);
   // Default: Docker and Qdrant are running
   mockIsDockerAvailable.mockResolvedValue(true);
   mockIsQdrantRunning.mockResolvedValue(true);
@@ -110,6 +124,20 @@ beforeEach(() => {
 // ── autoResumeIndexedProjects ────────────────────────────────────────────
 
 describe("autoResumeIndexedProjects", () => {
+  it("cleans stale generations using the identity captured by Git startup catch-up", async () => {
+    vi.stubEnv("SOCRATICODE_WATCHER", "git");
+    mockListCollections.mockResolvedValue([collectionName(projectIdFromPath(TEST_PROJECT))]);
+    vi.mocked(resumeGitRefresh).mockResolvedValueOnce("captured-startup-identity");
+    graphCleanup.load.mockResolvedValueOnce({ generation: "active-generation" });
+    try {
+      await autoResumeIndexedProjects(TEST_PROJECT);
+      expect(graphCleanup.coordinate).toHaveBeenCalledWith("captured-startup-identity", expect.any(Function));
+      expect(graphCleanup.load).toHaveBeenCalledWith("captured-startup-identity");
+      expect(graphCleanup.clean).toHaveBeenCalledWith("captured-startup-identity", "active-generation");
+      expect(graphCleanup.coordinate.mock.invocationCallOrder[0]).toBeGreaterThan(vi.mocked(resumeGitRefresh).mock.invocationCallOrder[0]);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   it("resumes Git monitoring only for existing indexes, and off still prevents startup work", async () => {
     vi.stubEnv("SOCRATICODE_WATCHER", "git");
     mockListCollections.mockResolvedValue([collectionName(projectIdFromPath(TEST_PROJECT))]);

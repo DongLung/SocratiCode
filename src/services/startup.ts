@@ -237,7 +237,8 @@ async function resumeProject(
   }
 
   if (getWatcherMode() === "git") {
-    await resumeGitRefresh(resolvedPath);
+    const resumedProjectId = await resumeGitRefresh(resolvedPath);
+    if (resumedProjectId) await cleanStaleSymbolGraphGenerations(resolvedPath, resumedProjectId);
     return;
   }
 
@@ -327,8 +328,12 @@ async function resumeProject(
     });
   }
 
-  // Retire any abandoned or superseded symbol graph generations left from previous sessions,
-  // coordinated per project with any active or upcoming graph rebuild
+  await cleanStaleSymbolGraphGenerations(resolvedPath, projectId);
+}
+
+/** Reuse the startup cleanup for both file-watcher and Git catch-up paths. */
+async function cleanStaleSymbolGraphGenerations(resolvedPath: string, projectId: string): Promise<void> {
+  // Retire abandoned or superseded generations, coordinated with graph rebuilds.
   if (!isGraphBuildInProgress(resolvedPath)) {
     try {
       await coordinateProject(projectId, async () => {

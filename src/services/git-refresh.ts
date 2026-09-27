@@ -138,7 +138,7 @@ export async function checkGitRefresh(projectPath: string, catchUp = false): Pro
         if (!await getCollectionInfo(collectionName(entry.projectId as string))) return;
         if (entry.stopped) return;
         entry.registered = true;
-        entry.pending = catchUp || process.env.SOCRATICODE_AUTO_RESUME?.trim().toLowerCase() !== "off";
+        entry.pending = entry.pending || catchUp || process.env.SOCRATICODE_AUTO_RESUME?.trim().toLowerCase() !== "off";
       } else if (catchUp) {
         entry.pending = true;
       }
@@ -153,10 +153,13 @@ export async function checkGitRefresh(projectPath: string, catchUp = false): Pro
   try { await entry.checking; } finally { entry.checking = undefined; }
 }
 
-/** Startup already selected an indexed project and awaits its normal catch-up. */
-export async function resumeGitRefresh(projectPath: string): Promise<void> {
+/** Await startup catch-up and return its captured project identity for cleanup. */
+export async function resumeGitRefresh(projectPath: string): Promise<string | undefined> {
   await checkGitRefresh(projectPath, true);
-  await projects.get(path.resolve(projectPath))?.running;
+  const entry = projects.get(path.resolve(projectPath));
+  const projectId = entry?.projectId;
+  await entry?.running;
+  return projectId;
 }
 
 /** Capture an explicit operation so its successful result can seed monitoring. */

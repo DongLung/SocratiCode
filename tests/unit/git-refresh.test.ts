@@ -68,6 +68,35 @@ describe("Git refresh lifecycle with real checkout transitions", () => {
     expect(mocks.update).toHaveBeenCalledTimes(1);
   });
 
+  it("preserves a transition to an existing index when initial registration found no collection", async () => {
+    vi.stubEnv("SOCRATICODE_AUTO_RESUME", "off");
+    vi.stubEnv("SOCRATICODE_BRANCH_AWARE", "true");
+    mocks.info.mockResolvedValueOnce(null);
+    await checkGitRefresh(fixture.root);
+    expect(mocks.update).not.toHaveBeenCalled();
+    git(fixture.root, "checkout", "-b", "already-indexed");
+    await checkGitRefresh(fixture.root);
+    await vi.waitFor(() => expect(gitRefreshStatus(fixture.root)).toContain("synchronized"));
+    expect(mocks.update).toHaveBeenCalledTimes(1);
+    expect(mocks.update.mock.lastCall?.[3]).toMatchObject({
+      projectId: gitProjectId(fixture.root, await readGitState(fixture.root)), allowCreate: false,
+    });
+  });
+
+  it("returns the startup identity captured before an in-flight checkout change", async () => {
+    vi.stubEnv("SOCRATICODE_BRANCH_AWARE", "true");
+    const originalIdentity = gitProjectId(fixture.root, await readGitState(fixture.root));
+    let release: () => void = () => {};
+    mocks.update.mockImplementationOnce(async () => { await new Promise<void>((resolve) => { release = resolve; }); return success; });
+    const resumed = resumeGitRefresh(fixture.root);
+    await vi.waitFor(() => expect(mocks.update).toHaveBeenCalledTimes(1));
+    git(fixture.root, "checkout", "-b", "during-startup");
+    await checkGitRefresh(fixture.root);
+    release();
+    expect(await resumed).toBe(originalIdentity);
+    expect(gitRefreshStatus(fixture.root)).toContain("FAILED");
+  });
+
   it("allows a registered branch-aware checkout to acquire a new branch index", async () => {
     vi.stubEnv("SOCRATICODE_BRANCH_AWARE", "true");
     await synchronize();
