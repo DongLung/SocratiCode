@@ -4,6 +4,32 @@ All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
 
+## [1.16.0](https://github.com/giancarloerra/socraticode/compare/v1.15.0...v1.16.0) (2026-09-28)
+
+### Features
+
+* **index:** add opt-in Git-triggered refresh ([647b690](https://github.com/giancarloerra/socraticode/commit/647b690ec0291094bfaa302a74fe609039980008))
+
+### Bug Fixes
+
+* **index:** preserve Git refresh startup state ([aeaba30](https://github.com/giancarloerra/socraticode/commit/aeaba30089629782bd51f4b87b356f78925ed9da))
+* **index:** wait for Git refresh deletions to complete ([fe2dacf](https://github.com/giancarloerra/socraticode/commit/fe2dacf51507ebec24820207d6219e3ca12fa4a5))
+
+### Documentation
+
+* add quick setup and scenario guides ([88018f7](https://github.com/giancarloerra/socraticode/commit/88018f7f6f752174082aaefe563faef765cf03c8))
+* clarify editor setup steps ([abf49d1](https://github.com/giancarloerra/socraticode/commit/abf49d185e7c031f6f769967eb4449f7c0ff7ca3))
+* clarify VS Code indexing prompt ([67a0e73](https://github.com/giancarloerra/socraticode/commit/67a0e73a8494f8a90d7247f49761712309de3dcc))
+* correct quick guide links and linked index requirements ([393ba4d](https://github.com/giancarloerra/socraticode/commit/393ba4d489790fe3c83cb869f98e2a6ecab14e53))
+* note BYOK option for VS Code chat ([65957f9](https://github.com/giancarloerra/socraticode/commit/65957f9936efdf69c5c55cf0a74acdf8463b70e4))
+* qualify VS Code BYOK availability ([c4e8573](https://github.com/giancarloerra/socraticode/commit/c4e857383c15255fd05f335c93870bea0cc23646))
+* remove Roo Code setup guidance ([a839224](https://github.com/giancarloerra/socraticode/commit/a839224cb0efbdc1489436a6febcc5f52fc623ff))
+* use Gemini direct MCP and note Zed trust ([f290d90](https://github.com/giancarloerra/socraticode/commit/f290d90b63fb55d8604f7b209ac8498609a498ce))
+
+### Tests
+
+* **index:** cover Git restart recovery and document helpers ([ec445ad](https://github.com/giancarloerra/socraticode/commit/ec445ad599e746c684c8c7c3de9be632cb095548))
+
 ## [1.15.0](https://github.com/giancarloerra/socraticode/compare/v1.14.0...v1.15.0) (2026-09-24)
 
 ### Features
