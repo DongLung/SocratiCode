@@ -1254,7 +1254,7 @@ async function indexProjectLocked(
     progress.phase = "cleaning stale chunks";
     for (const file of chunkedFiles) {
       if (hashes.has(file.relativePath)) {
-        await deleteFileChunks(collection, file.relativePath);
+        await deleteFileChunks(collection, file.relativePath, Boolean(target));
       }
     }
 
@@ -1264,7 +1264,7 @@ async function indexProjectLocked(
     );
     for (const [filePath] of hashes) {
       if (!currentFileSet.has(filePath)) {
-        await deleteFileChunks(collection, filePath);
+        await deleteFileChunks(collection, filePath, Boolean(target));
         hashes.delete(filePath);
       }
     }
@@ -1773,7 +1773,7 @@ export async function updateProjectIndex(
     progress.phase = "cleaning stale chunks";
     for (const file of changedFiles) {
       if (!file.isNew) {
-        await deleteFileChunks(collection, file.relativePath);
+        await deleteFileChunks(collection, file.relativePath, Boolean(target));
       }
     }
 
@@ -1906,7 +1906,7 @@ export async function updateProjectIndex(
   const removedRelPaths: string[] = [];
   for (const [filePath] of hashes) {
     if (!currentFileSet.has(filePath)) {
-      await deleteFileChunks(collection, filePath);
+      await deleteFileChunks(collection, filePath, Boolean(target));
       hashes.delete(filePath);
       removed++;
       removedRelPaths.push(filePath);

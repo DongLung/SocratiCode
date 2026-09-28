@@ -88,6 +88,13 @@ describe.skipIf(!isDockerAvailable())("Git refresh with real Git, embeddings, Qd
     expect(symbols).toContain("uncommittedHelper");
     expect(isWatching(fixture.root)).toBe(false);
     fs.rmSync(path.join(fixture.root, "dirty.ts"));
+    git(fixture.root, "commit", "--allow-empty", "-m", "Trigger removed working-tree file refresh");
+    await checkGitRefresh(fixture.root);
+    await settled("refs/heads/main");
+    expect((await listIndexedFilePaths(collectionName(identity()))).has("dirty.ts")).toBe(false);
+    const removed = await handleQueryTool("codebase_search", { projectPath: fixture.root, query: "uncommittedHelper", fileFilter: "dirty.ts", minScore: 0 });
+    expect(removed).toContain("synchronized");
+    expect(removed).toContain("No results found");
   });
 
   it("keeps branch-specific collections and cached graphs separate, including same-SHA switches and detached HEAD", async () => {
@@ -174,7 +181,7 @@ describe.skipIf(!isDockerAvailable())("Git refresh with real Git, embeddings, Qd
 
     // Persist an interrupted checkpoint: one stale hash has lost its chunks,
     // and another on-disk file has not reached a completed batch yet.
-    await deleteFileChunks(collection, "main.ts");
+    await deleteFileChunks(collection, "main.ts", true);
     const source = "export function recoveredOnRestart() { return 'git_restart_recovery'; }\n";
     fs.writeFileSync(path.join(fixture.root, "unfinished.ts"), source);
     await saveProjectMetadata(collection, fixture.root, storedHashes.size + 1, storedHashes.size, storedHashes, "in-progress", profile);

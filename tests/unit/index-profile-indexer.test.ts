@@ -211,6 +211,26 @@ afterEach(async () => {
 });
 
 describe("code-index effective profile compatibility", () => {
+  it.each([
+    ["indexProject", true], ["indexProject", false],
+    ["updateProjectIndex", true], ["updateProjectIndex", false],
+  ] as const)("%s requests completed replacements and removals only for Git targets (%s)", async (method, gitTarget) => {
+    const indexer = await loadIndexer();
+    const { legacyIndexProfile } = await import("../../src/services/index-profile.js");
+    const { projectIdFromPath } = await import("../../src/config.js");
+    const { deleteFileChunks } = await import("../../src/services/qdrant.js");
+    const project = await createProject("notes.txt", "new content");
+    collectionInfo = { pointsCount: 2, status: "green" };
+    storedProfile = legacyIndexProfile("code");
+    storedHashes = new Map([["notes.txt", indexer.hashContent("old content")], ["removed.txt", "old-hash"]]);
+    const target = { projectId: projectIdFromPath(project), allowCreate: false, assertCurrent: vi.fn(async () => {}) };
+
+    await indexer[method](project, undefined, undefined, gitTarget ? target : undefined);
+
+    expect(deleteFileChunks).toHaveBeenCalledWith(`codebase_${target.projectId}`, "notes.txt", gitTarget);
+    expect(deleteFileChunks).toHaveBeenCalledWith(`codebase_${target.projectId}`, "removed.txt", gitTarget);
+  });
+
   it("Git refresh preserves legacy profiles, reloads hashes, and keeps locks and writes tied to the captured identity", async () => {
     const indexer = await loadIndexer();
     const project = await createProject("notes.txt", "original source");
