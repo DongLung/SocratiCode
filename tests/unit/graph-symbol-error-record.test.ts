@@ -11,7 +11,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Persisting the FILE graph must succeed; only the SYMBOL graph fails.
 vi.mock("../../src/services/qdrant.js", () => ({
@@ -67,6 +67,21 @@ describe("symbol-graph failure is recorded and not silently cleared (#89)", () =
     fs.writeFileSync(path.join(root, "src", "a.ts"), "export function a() { return 1; }\n");
     fs.writeFileSync(path.join(root, "src", "b.ts"), "import { a } from './a.js';\nexport const b = a();\n");
     invalidateGraphCache(root);
+  });
+
+  afterEach(() => {
+    invalidateGraphCache(root);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("Git refresh does not advance the graph input record when symbol persistence fails", async () => {
+    const { projectIdFromPath } = await import("../../src/config.js");
+    const { saveGraphData } = await import("../../src/services/qdrant.js");
+    vi.mocked(saveGraphData).mockClear();
+    const target = { projectId: projectIdFromPath(root), allowCreate: true, assertCurrent: async () => {} };
+    await expect(rebuildGraph(root, { projectId: target.projectId, target })).rejects.toThrow("Bad Request");
+    expect(saveGraphData).not.toHaveBeenCalled();
+    expect(getLastGraphBuildCompleted(root)?.error).toContain("Bad Request");
   });
 
   it("records the server's real reason, not the bare HTTP status text", async () => {

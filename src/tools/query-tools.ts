@@ -7,6 +7,7 @@ import { getWatcherMode, SEARCH_DEFAULT_LIMIT, SEARCH_MIN_SCORE, SOCRATICODE_VER
 import { getGraphStatus, isGraphBuilderStale } from "../services/code-graph.js";
 import { getArtifactStatusSummary } from "../services/context-artifacts.js";
 import { ensureQdrantReady } from "../services/docker.js";
+import { withGitRefreshNotice } from "../services/git-refresh.js";
 import {
   indexProfileDifferences,
   requestedIndexProfile,
@@ -65,7 +66,10 @@ async function appendWatcherState(
   const watchedAnywhere = watchedHere || await isWatchedByAnyProcess(resolvedPath);
   const watcherLines: string[] = [];
 
-  if (context === "search") {
+  if (watcherMode === "git") {
+    watcherLines.push("File watcher: disabled (SOCRATICODE_WATCHER=git; refresh is triggered by ref/HEAD changes)");
+    if (watchedAnywhere) watcherLines.push("Warning: an active file watcher in another configuration may still update this shared index.");
+  } else if (context === "search") {
     if (watcherMode === "off") {
       if (watchedHere) {
         watcherLines.push("⚠ WARNING: File watching is disabled in this process, but this process still has an active watcher.");
@@ -114,7 +118,17 @@ async function appendWatcherState(
   }
 }
 
+/** Run a query or status request with the selected mode's Git freshness notice. */
 export async function handleQueryTool(
+  name: string,
+  args: Record<string, unknown>,
+): Promise<string> {
+  const projectPath = (args.projectPath as string) || process.cwd();
+  return withGitRefreshNotice(projectPath, () => dispatchQueryTool(name, args));
+}
+
+/** Dispatch search and status requests using the existing project identity and watcher policy. */
+async function dispatchQueryTool(
   name: string,
   args: Record<string, unknown>,
 ): Promise<string> {

@@ -130,6 +130,8 @@ Restart your host. With the default local configuration, first use pulls the req
 
 **Prefer a deliberate index snapshot?** Set `SOCRATICODE_WATCHER=off` and `SOCRATICODE_AUTO_RESUME=off` for every MCP process that uses the checkout, then run `codebase_update` only when you want to refresh it. Existing indexes remain usable without rebuilding. Use `SOCRATICODE_WATCHER=manual` instead if explicit `codebase_watch { action: "start" }` should remain available. See [Indexing Behaviour](#indexing-behaviour) and [Passing env vars by host](#passing-env-vars-by-host).
 
+**Prefer updates at Git transitions?** Set `SOCRATICODE_WATCHER=git`. Active indexed checkouts refresh when the checked-out ref or HEAD changes, without a native file watcher. See [Git-triggered refresh](#git-triggered-refresh).
+
 > **macOS / Windows on large codebases**: Docker containers can't use the GPU. For medium-to-large repos, [install native Ollama](https://ollama.com/download) (auto-detected, no config change needed) for Metal/CUDA acceleration, or use [OpenAI embeddings](#openai-embeddings) for speed without a local install. [Full details.](#embedding-performance-on-macos--windows)
 >
 > **Recommended**: For best results, add the [Agent Instructions](#agent-instructions) to your AI assistant's system prompt or project instructions file (`CLAUDE.md`, `AGENTS.md`, etc.). The key principle, **search before reading**, helps your AI use SocratiCode's tools effectively and avoid unnecessary file reads.
@@ -578,6 +580,7 @@ On VS Code's 2.45M‑line codebase, SocratiCode answers architectural questions 
 - **Session resume** — By default, server startup resumes the indexed project represented by the MCP process's working directory. Complete indexes get a watcher plus an incremental catch-up update; interrupted indexes resume from the last checkpoint. Explicit project lists and `SOCRATICODE_AUTO_RESUME=all` extend this to other indexed projects.
 - **Auto-start watcher** — In the default `SOCRATICODE_WATCHER=auto` mode, the file watcher starts during startup resume and after `codebase_index` or `codebase_update`. A completed indexed project not selected at startup gets a fallback watcher start on its first search, status, or graph interaction. `manual` permits only an explicit `codebase_watch { action: "start" }`; `off` disables watcher startup completely.
 - **Manual index snapshots** — `SOCRATICODE_WATCHER=off` plus `SOCRATICODE_AUTO_RESUME=off` prevents implicit code-index updates, embeddings, and graph creation. Existing code indexes and graphs stay readable; refresh them explicitly with `codebase_index`, `codebase_update`, or `codebase_graph_build`.
+- **Git-triggered refresh**: `SOCRATICODE_WATCHER=git` checks active indexed checkouts every 10 seconds and on search, status, and graph requests. A checked-out ref or HEAD change triggers the existing incremental updater and graph reconciliation. Native file watching stays disabled, including explicit watcher starts.
 - **Auto-build code graph** — The code dependency graph is automatically built after indexing and rebuilt when watched files change. An update that changed nothing the graph is built from — a README, a fixture, a migration — reuses the existing graph rather than rebuilding it; each build records the inputs it read, and the rebuild is skipped only when every one of them is unchanged. Any graph-relevant addition rebuilds — a file appearing where the build looked, but not one the ignore rules exclude — and so does any configuration change, or a graph with no such record. No need to call `codebase_graph_build` manually unless you want to force a rebuild.
 - **Multi-agent collaboration** — Multiple AI agents (each running their own MCP instance) can work on the same codebase simultaneously and share a single index. One agent triggers indexing, all agents search against the same data. Only one watcher runs per project — every agent benefits from real-time updates. Cross-process file locking coordinates indexing and watching automatically. Ideal for workflows like one agent writing tests while another fixes code, or a planning agent and an implementation agent working in parallel.
 - **Cross-process safety** — File-based locking (`proper-lockfile`) prevents multiple MCP instances from simultaneously indexing or watching the same project. Stale locks from crashed processes are automatically reclaimed. When another MCP process is already watching a project, `codebase_status` reports "active (watched by another process)" instead of incorrectly showing "inactive."
@@ -1586,7 +1589,7 @@ Code and context collections persist the settings that define their stored repre
 | `SOCRATICODE_PROJECT_ID` | *(none)* | Override the auto-generated project ID. When set, all paths resolve to the same Qdrant collections, allowing multiple directories (e.g. git worktrees of the same repo) to share a single index. Must match `[a-zA-Z0-9_-]+`. Takes precedence over the `projectId` field in `.socraticode.json`. |
 | `SOCRATICODE_BRANCH_AWARE` | `false` | When `true`, append the current git branch name to the project ID, creating separate Qdrant collections per branch. Ignored when `SOCRATICODE_PROJECT_ID` is set or when `projectId` is set in `.socraticode.json`. |
 | `SOCRATICODE_LINKED_PROJECTS` | *(none)* | Comma-separated list of additional project paths to include in cross-project search. Merged with paths from `.socraticode.json`. Non-existent paths are silently skipped. |
-| `SOCRATICODE_WATCHER` | `auto` | File-watcher policy, case-insensitive: `auto` preserves the default auto-start paths; `manual` suppresses every automatic start but permits `codebase_watch { action: "start" }`; `off` also rejects explicit starts. In `manual` and `off`, graph query tools read an existing graph but do not create a missing one. Invalid values fail at startup. This is process-local, so configure every MCP process that shares the checkout and index. No re-index is required. |
+| `SOCRATICODE_WATCHER` | `auto` | Refresh policy, case-insensitive: `auto` preserves the default file watcher; `manual` permits only explicit watcher starts; `off` rejects all watcher starts; `git` rejects file-watcher starts and refreshes active indexed checkouts on ref/HEAD changes. In `manual` and `off`, graph queries do not create missing graphs. Invalid values fail at startup. Configure every MCP process sharing the checkout and index. No re-index is required. |
 | `SOCRATICODE_AUTO_RESUME` | *(none)* | Startup policy: unset keeps the existing current-project catch-up/recovery behavior; `all` resumes every indexed project that has a stored path, sequentially; `off` skips all startup catch-up updates and interrupted-index recovery before any Docker or Qdrant access. `off` takes precedence over `SOCRATICODE_AUTO_RESUME_PROJECTS`. This does not disable watcher starts caused by later tool use; combine it with `SOCRATICODE_WATCHER=off` for a deliberate snapshot. |
 | `SOCRATICODE_AUTO_RESUME_PROJECTS` | *(none)* | Comma-separated list of project paths to auto-resume on server startup (sequentially), e.g. `/repos/api,/repos/web`. Takes precedence over the unset/`all` behavior, but not over `SOCRATICODE_AUTO_RESUME=off`. Paths that do not exist or are not indexed are skipped with a warning. |
 | `SOCRATICODE_LOG_LEVEL` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
@@ -1771,6 +1774,44 @@ If you work across many indexed repos and want all of them resumed at server sta
 (watcher plus catch-up update), not just the one you opened, see the
 `SOCRATICODE_AUTO_RESUME` and `SOCRATICODE_AUTO_RESUME_PROJECTS` environment variables
 in the [Indexing Behaviour](#indexing-behaviour) table.
+
+### Git-triggered refresh
+
+Set `SOCRATICODE_WATCHER=git` to replace continuous file watching with a fixed
+10-second Git-state check while the MCP server runs. Search, status, and graph
+requests also check the current ref and HEAD. Commits, checkouts, fast-forwards,
+rebases, and same-commit branch switches trigger an incremental refresh; ordinary
+file saves and fetches that leave the checked-out ref and HEAD unchanged do not.
+
+Git is the trigger, not the content source: refreshes index the working tree,
+including uncommitted edits. Run `codebase_update` whenever those edits need to
+be searchable before the next Git transition. `codebase_watch` cannot start a
+native watcher in this mode. Git must be available on the server's PATH; a
+missing executable or non-Git directory produces a visible diagnostic, with no
+file-watcher fallback. Explicit indexing remains available for non-Git projects.
+
+Only already-indexed checkouts selected at startup or subsequently used by tools
+are monitored. Selecting this mode does not create a project's first index or
+discover other worktrees. Existing startup project-selection settings still
+apply. `SOCRATICODE_AUTO_RESUME=off` suppresses startup catch-up: the first later
+tool request attaches monitoring without claiming the existing index is current;
+an explicit update or a subsequent Git transition establishes freshness.
+
+Existing shared and branch-aware identities are preserved. After monitoring an
+indexed checkout, switching to an unindexed branch may create that branch's index
+when branch-aware identity is enabled. Detached HEAD follows the existing
+path-based identity rule. Explicit project IDs continue to take precedence.
+
+Search and graph results report pending, failed, or unverified refreshes. A busy
+lock, cancellation, failure, or checkout change during a refresh remains pending
+and is retried; only successful indexing and graph reconciliation for a stable
+observation is reported as synchronized. Multiple MCP processes use the existing
+cross-process writer locks. No hooks, service, persisted Git cursor, migration,
+or index reset is required. Configure all processes consistently: a file watcher
+in another process can still update a shared index on file saves.
+Cooperating processes on the same host must use the same OS temporary directory
+for the existing locks. These locks do not coordinate writers on different hosts;
+shared team indexes still need a [designated writer](docs/guides/team.md).
 
 ### Can multiple AI agents work on the same codebase at the same time?
 

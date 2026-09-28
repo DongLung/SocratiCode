@@ -13,6 +13,24 @@ vi.mock("../../src/services/docker.js", () => ({
   isQdrantRunning: vi.fn(),
 }));
 
+vi.mock("../../src/services/git-refresh.js", () => ({
+  resumeGitRefresh: vi.fn(async () => {}),
+  stopAllGitRefreshes: vi.fn(),
+}));
+
+const graphCleanup = vi.hoisted(() => ({
+  active: vi.fn(() => false),
+  coordinate: vi.fn(async (_id: string, work: () => Promise<void>) => work()),
+  load: vi.fn(),
+  clean: vi.fn(),
+}));
+vi.mock("../../src/services/code-graph.js", () => ({ isGraphBuildInProgress: graphCleanup.active }));
+vi.mock("../../src/services/symbol-graph-store.js", () => ({
+  coordinateProject: graphCleanup.coordinate,
+  loadSymbolGraphMeta: graphCleanup.load,
+  cleanStaleGenerations: graphCleanup.clean,
+}));
+
 vi.mock("../../src/services/qdrant.js", () => ({
   listCodebaseCollections: vi.fn(),
   getProjectMetadata: vi.fn(),
@@ -63,6 +81,7 @@ vi.mock("../../src/constants.js", async (importOriginal) => {
 
 import { collectionName, projectIdFromPath } from "../../src/config.js";
 import { isDockerAvailable, isQdrantRunning } from "../../src/services/docker.js";
+import { resumeGitRefresh, stopAllGitRefreshes } from "../../src/services/git-refresh.js";
 import { getIndexingInProgressProjects, getPersistedIndexingStatus, indexProject, requestCancellation, updateProjectIndex } from "../../src/services/indexer.js";
 import { getLockHolderPid, releaseAllLocks } from "../../src/services/lock.js";
 import { logger } from "../../src/services/logger.js";
@@ -91,6 +110,7 @@ const TEST_PROJECT = "/tmp/test-project";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  graphCleanup.load.mockReset().mockResolvedValue(null);
   // Default: Docker and Qdrant are running
   mockIsDockerAvailable.mockResolvedValue(true);
   mockIsQdrantRunning.mockResolvedValue(true);
@@ -104,6 +124,44 @@ beforeEach(() => {
 // ── autoResumeIndexedProjects ────────────────────────────────────────────
 
 describe("autoResumeIndexedProjects", () => {
+  it("cleans stale generations using the identity captured by Git startup catch-up", async () => {
+    vi.stubEnv("SOCRATICODE_WATCHER", "git");
+    mockListCollections.mockResolvedValue([collectionName(projectIdFromPath(TEST_PROJECT))]);
+    vi.mocked(resumeGitRefresh).mockResolvedValueOnce("captured-startup-identity");
+    graphCleanup.load.mockResolvedValueOnce({ generation: "active-generation" });
+    try {
+      await autoResumeIndexedProjects(TEST_PROJECT);
+      expect(graphCleanup.coordinate).toHaveBeenCalledWith("captured-startup-identity", expect.any(Function));
+      expect(graphCleanup.load).toHaveBeenCalledWith("captured-startup-identity");
+      expect(graphCleanup.clean).toHaveBeenCalledWith("captured-startup-identity", "active-generation");
+      expect(graphCleanup.coordinate.mock.invocationCallOrder[0]).toBeGreaterThan(vi.mocked(resumeGitRefresh).mock.invocationCallOrder[0]);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("resumes Git monitoring only for existing indexes, and off still prevents startup work", async () => {
+    vi.stubEnv("SOCRATICODE_WATCHER", "git");
+    mockListCollections.mockResolvedValue([collectionName(projectIdFromPath(TEST_PROJECT))]);
+    try {
+      await autoResumeIndexedProjects(TEST_PROJECT);
+      expect(resumeGitRefresh).toHaveBeenCalledExactlyOnceWith(TEST_PROJECT);
+      expect(mockStartWatchingAutomatically).not.toHaveBeenCalled();
+      vi.mocked(resumeGitRefresh).mockClear();
+      mockListCollections.mockResolvedValue([]);
+      await autoResumeIndexedProjects(TEST_PROJECT);
+      expect(resumeGitRefresh).not.toHaveBeenCalled();
+      process.env.SOCRATICODE_AUTO_RESUME = "off";
+      mockListCollections.mockResolvedValue([collectionName(projectIdFromPath(TEST_PROJECT))]);
+      await autoResumeIndexedProjects(TEST_PROJECT);
+      expect(resumeGitRefresh).not.toHaveBeenCalled();
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("stops Git scheduling before shutdown drains writers", async () => {
+    await gracefulShutdown("SIGTERM");
+    expect(stopAllGitRefreshes).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(stopAllGitRefreshes).mock.invocationCallOrder[0]).toBeLessThan(mockReleaseAllLocks.mock.invocationCallOrder[0]);
+  });
+
   it("SOCRATICODE_AUTO_RESUME=off exits before infrastructure access and overrides a project list", async () => {
     process.env.SOCRATICODE_AUTO_RESUME = " OFF ";
     process.env.SOCRATICODE_AUTO_RESUME_PROJECTS = TEST_PROJECT;

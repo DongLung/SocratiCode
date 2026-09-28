@@ -55,6 +55,14 @@ afterEach(() => {
 });
 
 describe("invalidateGraphCacheForIdentity", () => {
+  it("never serves a path's cached graph after its project identity changes", async () => {
+    await getExistingGraph(otherCheckout);
+    fs.rmSync(path.join(otherCheckout, ".socraticode.json"));
+    await getExistingGraph(otherCheckout);
+    expect(mockLoadGraphData).toHaveBeenCalledTimes(2);
+    expect(mockLoadGraphData.mock.calls[0][0]).not.toBe(mockLoadGraphData.mock.calls[1][0]);
+  });
+
   it("drops the graph cached through a checkout other than the recorded path", async () => {
     expect(projectIdFromPath(otherCheckout)).toBe(PINNED_ID);
     await getExistingGraph(recordedCheckout);

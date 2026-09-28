@@ -12,7 +12,7 @@ export const SOCRATICODE_VERSION: string = pkg.version;
 // ── Indexing lifecycle configuration ───────────────────────────────────
 
 /** File-watcher policy for this MCP process. */
-export type WatcherMode = "auto" | "manual" | "off";
+export type WatcherMode = "auto" | "manual" | "off" | "git";
 
 /**
  * Resolve SOCRATICODE_WATCHER at call time.
@@ -25,10 +25,10 @@ export type WatcherMode = "auto" | "manual" | "off";
 export function getWatcherMode(): WatcherMode {
   const raw = process.env.SOCRATICODE_WATCHER?.trim().toLowerCase() ?? "";
   if (raw === "" || raw === "auto") return "auto";
-  if (raw === "manual" || raw === "off") return raw;
+  if (raw === "manual" || raw === "off" || raw === "git") return raw;
   throw new Error(
     `Invalid SOCRATICODE_WATCHER: "${process.env.SOCRATICODE_WATCHER}". ` +
-    'Must be "auto", "manual", or "off".',
+    'Must be "auto", "manual", "off", or "git".',
   );
 }
 

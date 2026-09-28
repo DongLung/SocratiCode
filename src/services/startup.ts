@@ -11,9 +11,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { collectionName, projectIdFromPath } from "../config.js";
-import { QDRANT_COLLECTION_PREFIX, QDRANT_MODE } from "../constants.js";
+import { getWatcherMode, QDRANT_COLLECTION_PREFIX, QDRANT_MODE } from "../constants.js";
 import { isGraphBuildInProgress } from "./code-graph.js";
 import { isDockerAvailable, isQdrantRunning } from "./docker.js";
+import { resumeGitRefresh, stopAllGitRefreshes } from "./git-refresh.js";
 import { getIndexingInProgressProjects, getPersistedIndexingStatus, indexProject, requestCancellation, updateProjectIndex } from "./indexer.js";
 import { getLockHolderPid, releaseAllLocks } from "./lock.js";
 import { logger } from "./logger.js";
@@ -235,6 +236,12 @@ async function resumeProject(
     return;
   }
 
+  if (getWatcherMode() === "git") {
+    const resumedProjectId = await resumeGitRefresh(resolvedPath);
+    if (resumedProjectId) await cleanStaleSymbolGraphGenerations(resolvedPath, resumedProjectId);
+    return;
+  }
+
   // Check persisted indexing status to detect interrupted indexing
   const persistedStatus = await getPersistedIndexingStatus(resolvedPath);
 
@@ -321,8 +328,12 @@ async function resumeProject(
     });
   }
 
-  // Retire any abandoned or superseded symbol graph generations left from previous sessions,
-  // coordinated per project with any active or upcoming graph rebuild
+  await cleanStaleSymbolGraphGenerations(resolvedPath, projectId);
+}
+
+/** Reuse the startup cleanup for both file-watcher and Git catch-up paths. */
+async function cleanStaleSymbolGraphGenerations(resolvedPath: string, projectId: string): Promise<void> {
+  // Retire abandoned or superseded generations, coordinated with graph rebuilds.
   if (!isGraphBuildInProgress(resolvedPath)) {
     try {
       await coordinateProject(projectId, async () => {
@@ -367,6 +378,8 @@ export async function awaitActiveIndexing(timeoutMs = 60_000): Promise<void> {
  */
 export async function gracefulShutdown(signal: string, closeServer?: () => Promise<void>): Promise<void> {
   logger.info(`Received ${signal}, shutting down gracefully...`);
+
+  stopAllGitRefreshes();
 
   // Signal all in-flight indexing in this process to stop at the next batch boundary
   for (const project of getIndexingInProgressProjects()) {

@@ -234,8 +234,9 @@ export async function startWatching(
 ): Promise<boolean> {
   const resolvedPath = path.resolve(projectPath);
 
-  if (getWatcherMode() === "off") {
-    const message = "File watcher disabled by SOCRATICODE_WATCHER=off";
+  const watcherMode = getWatcherMode();
+  if (watcherMode === "off" || watcherMode === "git") {
+    const message = `File watcher disabled by SOCRATICODE_WATCHER=${watcherMode}`;
     onProgress?.(message);
     logger.info(message, { projectPath: resolvedPath });
     return false;

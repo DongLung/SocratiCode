@@ -47,19 +47,21 @@ describe("constants", () => {
       expect(getWatcherMode()).toBe("auto");
     });
 
-    it("accepts auto, manual, and off case-insensitively", () => {
+    it("accepts auto, manual, off, and git case-insensitively", () => {
       vi.stubEnv("SOCRATICODE_WATCHER", " AUTO ");
       expect(getWatcherMode()).toBe("auto");
       vi.stubEnv("SOCRATICODE_WATCHER", " Manual ");
       expect(getWatcherMode()).toBe("manual");
       vi.stubEnv("SOCRATICODE_WATCHER", " OFF ");
       expect(getWatcherMode()).toBe("off");
+      vi.stubEnv("SOCRATICODE_WATCHER", " GiT ");
+      expect(getWatcherMode()).toBe("git");
     });
 
     it("rejects unknown values instead of silently enabling automatic writes", () => {
       vi.stubEnv("SOCRATICODE_WATCHER", "disabled");
       expect(() => getWatcherMode()).toThrow(
-        'Invalid SOCRATICODE_WATCHER: "disabled". Must be "auto", "manual", or "off".',
+        'Invalid SOCRATICODE_WATCHER: "disabled". Must be "auto", "manual", "off", or "git".',
       );
     });
   });

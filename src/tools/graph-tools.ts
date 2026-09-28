@@ -4,6 +4,7 @@ import path from "node:path";
 import { projectIdFromPath } from "../config.js";
 import { getWatcherMode, mergeExtraExtensions, SOCRATICODE_VERSION } from "../constants.js";
 import { awaitGraphBuild, describeGraphBuilder, describeUnresolvedSymbolEdges, ensureDynamicLanguages, findCircularDependencies, generateMermaidDiagram, getAstGrepLang, getDynamicLanguageStatus, getExistingGraph, getFileDependencies, getGraphBuildProgress, getGraphStats, getGraphStatus, getLastGraphBuildCompleted, getOrBuildGraph, isGraphBuildInProgress, isImportResolutionLow, rebuildGraph, removeGraph } from "../services/code-graph.js";
+import { withGitRefreshNotice } from "../services/git-refresh.js";
 import { detectEntryPoints } from "../services/graph-entrypoints.js";
 import {
   type FlowNode,
@@ -76,7 +77,18 @@ function hasRelevantGrammarFailure(
   return failed.some(({ name }) => name.toLowerCase() === String(grammar).toLowerCase());
 }
 
+/** Add Git freshness to graph reads while keeping explicit graph mutations separate. */
 export async function handleGraphTool(
+  name: string,
+  args: Record<string, unknown>,
+): Promise<string> {
+  if (name === "codebase_graph_build" || name === "codebase_graph_remove") return handleGraphResult(name, args);
+  const projectPath = (args.projectPath as string) || process.cwd();
+  return withGitRefreshNotice(projectPath, () => handleGraphResult(name, args));
+}
+
+/** Dispatch a graph request with persisted-generation retries and visible storage errors. */
+async function handleGraphResult(
   name: string,
   args: Record<string, unknown>,
 ): Promise<string> {

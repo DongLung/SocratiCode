@@ -211,6 +211,64 @@ afterEach(async () => {
 });
 
 describe("code-index effective profile compatibility", () => {
+  it.each([
+    ["indexProject", true], ["indexProject", false],
+    ["updateProjectIndex", true], ["updateProjectIndex", false],
+  ] as const)("%s requests completed replacements and removals only for Git targets (%s)", async (method, gitTarget) => {
+    const indexer = await loadIndexer();
+    const { legacyIndexProfile } = await import("../../src/services/index-profile.js");
+    const { projectIdFromPath } = await import("../../src/config.js");
+    const { deleteFileChunks } = await import("../../src/services/qdrant.js");
+    const project = await createProject("notes.txt", "new content");
+    collectionInfo = { pointsCount: 2, status: "green" };
+    storedProfile = legacyIndexProfile("code");
+    storedHashes = new Map([["notes.txt", indexer.hashContent("old content")], ["removed.txt", "old-hash"]]);
+    const target = { projectId: projectIdFromPath(project), allowCreate: false, assertCurrent: vi.fn(async () => {}) };
+
+    await indexer[method](project, undefined, undefined, gitTarget ? target : undefined);
+
+    expect(deleteFileChunks).toHaveBeenCalledWith(`codebase_${target.projectId}`, "notes.txt", gitTarget);
+    expect(deleteFileChunks).toHaveBeenCalledWith(`codebase_${target.projectId}`, "removed.txt", gitTarget);
+  });
+
+  it("Git refresh preserves legacy profiles, reloads hashes, and keeps locks and writes tied to the captured identity", async () => {
+    const indexer = await loadIndexer();
+    const project = await createProject("notes.txt", "original source");
+    collectionInfo = { pointsCount: 1, status: "green" };
+    storedHashes = new Map([["notes.txt", indexer.hashContent("original source")]]);
+    await indexer.updateProjectIndex(project);
+    // Another process updated the shared store. The local hash cache must not
+    // turn the old file on disk into an apparent no-op after taking the lock.
+    storedHashes = new Map([["notes.txt", indexer.hashContent("another writer's source")]]);
+    const { projectIdFromPath } = await import("../../src/config.js");
+    const target = { projectId: projectIdFromPath(project), allowCreate: false, assertCurrent: vi.fn(async () => {
+      process.env.SOCRATICODE_PROJECT_ID = "fixture-new-checkout";
+    }) };
+    const result = await indexer.updateProjectIndex(project, undefined, undefined, target);
+    expect(result.updated).toBe(1);
+    expect(savedMetadata.at(-1)?.profile.indexFormatVersion).toBe(0);
+    const { acquireProjectLock, releaseProjectLock } = await import("../../src/services/lock.js");
+    const { saveProjectMetadata } = await import("../../src/services/qdrant.js");
+    const { rebuildGraph } = await import("../../src/services/code-graph.js");
+    expect(acquireProjectLock).toHaveBeenLastCalledWith(project, "index", expect.any(Function), { reentrant: false, projectId: target.projectId });
+    expect(releaseProjectLock).toHaveBeenLastCalledWith(project, "index", target.projectId);
+    expect(vi.mocked(saveProjectMetadata).mock.lastCall?.[0]).toBe(`codebase_${target.projectId}`);
+    expect(rebuildGraph).toHaveBeenLastCalledWith(project, expect.objectContaining({ projectId: target.projectId, target }));
+  });
+
+  it("Git refresh propagates graph failure and missing-index refusal instead of reporting success", async () => {
+    const indexer = await loadIndexer();
+    const project = await createProject("notes.txt", "new content");
+    const target = { projectId: "git-failure-fixture", allowCreate: false, assertCurrent: vi.fn(async () => {}) };
+    await expect(indexer.updateProjectIndex(project, undefined, undefined, target)).rejects.toThrow("no longer exists");
+    collectionInfo = { pointsCount: 1, status: "green" };
+    storedHashes = new Map([["notes.txt", indexer.hashContent("old content")]]);
+    const { rebuildGraph } = await import("../../src/services/code-graph.js");
+    vi.mocked(rebuildGraph).mockRejectedValueOnce(new Error("graph storage unavailable"));
+    await expect(indexer.updateProjectIndex(project, undefined, undefined, target)).rejects.toThrow("graph storage unavailable");
+    expect(indexer.isIndexingInProgress(project)).toBe(false);
+  });
+
   it("persists a legacy profile without changing points when source files are unchanged", async () => {
     const indexer = await loadIndexer();
     const content = "unchanged source";
@@ -547,7 +605,10 @@ describe("code-index effective profile compatibility", () => {
 
     expect(result.updated).toBe(1);
     expect(vi.mocked(rebuildGraph)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(rebuildGraph)).toHaveBeenCalledWith(project, { skipSymbolGraph: false });
+    const { projectIdFromPath } = await import("../../src/config.js");
+    expect(vi.mocked(rebuildGraph)).toHaveBeenCalledWith(project, {
+      skipSymbolGraph: false, extraExtensions: undefined, projectId: projectIdFromPath(project), target: undefined,
+    });
   });
 
   it("does not rebuild the graph when no graph input changed", async () => {

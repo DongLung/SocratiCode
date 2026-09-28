@@ -7,6 +7,7 @@ import { awaitGraphBuild, getGraphBuildInProgressProjects, invalidateGraphCache,
 import { getContextIndexingInProgressProjects } from "../services/context-artifacts.js";
 import type { InfraProgressCallback } from "../services/docker.js";
 import { ensureQdrantReady, isDockerAvailable } from "../services/docker.js";
+import { finishGitIndex, gitRefreshStatus, prepareGitIndex, stopGitRefresh, withGitRefreshNotice } from "../services/git-refresh.js";
 import { ensureEffectiveEmbeddingReady } from "../services/index-profile.js";
 import { getIndexingInProgressProjects, getIndexingProgress, indexProject, invalidateProjectHashesForIdentity, isIndexingInProgress, removeProjectIndex, requestCancellation, setIndexingProgress, updateProjectIndex } from "../services/indexer.js";
 import { isProjectIdentityLocked, isProjectLocked, terminateLockHolder } from "../services/lock.js";
@@ -230,13 +231,15 @@ export async function handleIndexTool(
         logger.info(msg, { tool: "codebase_index", projectPath: resolved });
       };
       const extraExts = mergeExtraExtensions(args.extraExtensions as string | undefined);
+      const gitOperation = await prepareGitIndex(resolved, extraExts.size > 0 ? extraExts : undefined);
 
       // Clear infra progress — indexProject will set its own progress
       setIndexingProgress(resolved, null);
 
       // Start indexing — do NOT await. Runs in the background on the event loop.
-      indexProject(resolved, bgOnProgress, extraExts.size > 0 ? extraExts : undefined)
+      indexProject(resolved, bgOnProgress, extraExts.size > 0 ? extraExts : undefined, gitOperation?.target)
         .then(async (result) => {
+          await finishGitIndex(resolved, gitOperation, result);
           logger.info("Background indexing completed", {
             projectPath: resolved,
             filesIndexed: result.filesIndexed,
@@ -252,8 +255,9 @@ export async function handleIndexTool(
             }
           }
         })
-        .catch((err) => {
+        .catch(async (err) => {
           const message = err instanceof Error ? err.message : String(err);
+          await finishGitIndex(resolved, gitOperation, { cancelled: false, skipped: message });
           logger.error("Background indexing failed", { projectPath: resolved, error: message });
         });
 
@@ -266,6 +270,7 @@ export async function handleIndexTool(
         "Call codebase_status to check progress. Keep calling it periodically until progress reaches 100%.",
         "Once complete, you can use codebase_search to query the indexed codebase.",
       ];
+      if (getWatcherMode() === "git" && !gitOperation) lines.push("", gitRefreshStatus(resolved));
       return lines.join("\n");
     }
 
@@ -283,10 +288,18 @@ export async function handleIndexTool(
 
       const infraMessages = await ensureInfrastructure(resolved, onProgress);
       const updateExtraExts = mergeExtraExtensions(args.extraExtensions as string | undefined);
-      const result = await updateProjectIndex(projectPath, onProgress, updateExtraExts.size > 0 ? updateExtraExts : undefined);
+      const gitOperation = await prepareGitIndex(resolved, updateExtraExts.size > 0 ? updateExtraExts : undefined);
+      let result: Awaited<ReturnType<typeof updateProjectIndex>>;
+      try {
+        result = await updateProjectIndex(projectPath, onProgress, updateExtraExts.size > 0 ? updateExtraExts : undefined, gitOperation?.target);
+        await finishGitIndex(resolved, gitOperation, result);
+      } catch (err) {
+        await finishGitIndex(resolved, gitOperation, { cancelled: false, skipped: err instanceof Error ? err.message : String(err) });
+        throw err;
+      }
       const lines = [
         ...infraMessages,
-        `Updated project index: ${projectPath}`,
+        result.skipped ? `Index update skipped: ${result.skipped}` : `Updated project index: ${projectPath}`,
         `Added: ${result.added}`,
         `Updated: ${result.updated}`,
         `Removed: ${result.removed}`,
@@ -304,11 +317,13 @@ export async function handleIndexTool(
         }
       }
 
+      if (getWatcherMode() === "git") lines.push("", gitRefreshStatus(resolved));
       return lines.join("\n");
     }
 
     case "codebase_remove": {
       const resolved = path.resolve(projectPath);
+      stopGitRefresh(resolved);
       // How long to wait for a SIGTERM'd cross-process to release its lock
       const SIGNAL_TIMEOUT_MS = 10_000;
       // How long to wait for a same-process batch to drain after cancellation.
@@ -523,9 +538,9 @@ export async function handleIndexTool(
       const watcherMode = getWatcherMode();
 
       if (action === "start") {
-        if (watcherMode === "off") {
+        if (watcherMode === "off" || watcherMode === "git") {
           return [
-            "File watcher disabled by SOCRATICODE_WATCHER=off.",
+            `File watcher disabled by SOCRATICODE_WATCHER=${watcherMode}.`,
             "Set SOCRATICODE_WATCHER=manual or auto and restart the MCP server before starting it.",
           ].join("\n");
         }
@@ -565,6 +580,7 @@ export async function handleIndexTool(
 
       if (action === "stop") {
         await stopWatching(projectPath);
+        if (watcherMode === "git") return "No native file watcher is enabled. Git refresh remains enabled by SOCRATICODE_WATCHER=git.";
         return `Stopped watching: ${projectPath}`;
       }
 
@@ -573,6 +589,13 @@ export async function handleIndexTool(
       const resolved = path.resolve(projectPath);
       // Check if the current project is watched by another process (cross-process lock)
       const watchedByOtherProcess = !watched.includes(resolved) && await isProjectLocked(resolved, "watch");
+
+      if (watcherMode === "git") {
+        return withGitRefreshNotice(resolved, async () => [
+          "File watcher: disabled (SOCRATICODE_WATCHER=git)",
+          ...(watched.includes(resolved) || watchedByOtherProcess ? ["Warning: an active file watcher in another configuration may still update this shared index."] : []),
+        ].join("\n"));
+      }
 
       if (watcherMode === "off") {
         const lines = ["File watcher: disabled (SOCRATICODE_WATCHER=off)"];

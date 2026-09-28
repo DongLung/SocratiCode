@@ -63,7 +63,7 @@ server.tool(
 
 server.tool(
   "codebase_update",
-  "Incrementally update an existing codebase index. Only re-indexes changed files. Runs synchronously. Use it to refresh a manual/off snapshot, or whenever an immediate catch-up is needed.",
+  "Incrementally update an existing codebase index. Only re-indexes changed files. Runs synchronously. Use it to refresh a manual/off snapshot, working-tree edits before the next Git transition in git mode, or whenever an immediate catch-up is needed.",
   {
     projectPath: z
       .string()
@@ -120,7 +120,7 @@ server.tool(
 
 server.tool(
   "codebase_watch",
-  "Start/stop watching a project directory for file changes and automatically update the index. When starting, first runs an incremental update to catch up, then watches for changes. SOCRATICODE_WATCHER=manual allows explicit starts only; off rejects starts.",
+  "Start/stop watching a project directory for file changes and automatically update the index. When starting, first runs an incremental update to catch up, then watches for changes. SOCRATICODE_WATCHER=manual allows explicit starts only; off and git reject file-watcher starts. In git mode, status reports Git refresh state and stop does not disable Git checks.",
   {
     projectPath: z
       .string()

@@ -657,9 +657,8 @@ export function getContextIndexingInProgressProjects(): string[] {
 }
 
 /** A context write reclamation can see: refused under the barrier, registered here and locked by identity while it runs. */
-async function withContextWrite<T>(projectPath: string, write: () => Promise<T>): Promise<T> {
+async function withContextWrite<T>(projectPath: string, write: () => Promise<T>, projectId = projectIdFromPath(projectPath)): Promise<T> {
   const resolvedProject = path.resolve(projectPath);
-  const projectId = projectIdFromPath(resolvedProject);
   await assertNoReclamationBarrier(projectId);
   contextIndexingInProgress.set(resolvedProject, (contextIndexingInProgress.get(resolvedProject) ?? 0) + 1);
   try {
@@ -679,8 +678,8 @@ export function indexAllArtifacts(projectPath: string): ReturnType<typeof indexA
 }
 
 /** Re-index only the artifacts whose content or configuration changed. */
-export function ensureArtifactsIndexed(projectPath: string): ReturnType<typeof ensureArtifactsIndexedUnguarded> {
-  return withContextWrite(projectPath, () => ensureArtifactsIndexedUnguarded(projectPath));
+export function ensureArtifactsIndexed(projectPath: string, projectId = projectIdFromPath(projectPath)): ReturnType<typeof ensureArtifactsIndexedUnguarded> {
+  return withContextWrite(projectPath, () => ensureArtifactsIndexedUnguarded(projectPath, projectId), projectId);
 }
 
 /**
@@ -801,13 +800,12 @@ async function indexAllArtifactsUnguarded(projectPath: string): Promise<{
  * Compares content hashes to detect staleness and only re-indexes changed artifacts.
  * Returns true if any re-indexing occurred.
  */
-async function ensureArtifactsIndexedUnguarded(projectPath: string): Promise<{
+async function ensureArtifactsIndexedUnguarded(projectPath: string, projectId: string): Promise<{
   reindexed: string[];
   upToDate: string[];
   errors: Array<{ name: string; error: string }>;
 }> {
   const resolvedProject = path.resolve(projectPath);
-  const projectId = projectIdFromPath(resolvedProject);
   const collection = contextCollectionName(projectId);
 
   const config = await loadConfig(resolvedProject);

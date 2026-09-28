@@ -32,6 +32,7 @@ import { ensureArtifactsIndexed, loadConfig, removeAllArtifacts } from "./contex
 import { analyzeElixirTemplate, ensureElixirTemplateParsers, isElixirTemplateExtension } from "./elixir-templates.js";
 import { generateEmbeddings, prepareDocumentText } from "./embeddings.js";
 import { detectExtensionFromSource, resolveExtensionlessExtension } from "./extensionless.js";
+import type { GitRefreshTarget } from "./git-state.js";
 import { createIgnoreFilter, shouldIgnore } from "./ignore.js";
 import {
   CURRENT_INDEX_FORMAT_VERSION,
@@ -206,6 +207,7 @@ async function persistCompletedUnlessLockLost(
   filesIndexed: number,
   hashes: Map<string, string>,
   effectiveProfile: EffectiveIndexProfile,
+  projectId: string,
 ): Promise<boolean> {
   await saveProjectMetadata(
     collection,
@@ -219,7 +221,7 @@ async function persistCompletedUnlessLockLost(
 
   if (!isCancellationRequested(resolvedPath)) return true;
 
-  if (!holdsProjectLock(resolvedPath, "index")) {
+  if (!holdsProjectLock(resolvedPath, "index", projectId)) {
     logger.warn(
       "Cancelled while completing and the lock is no longer held — leaving metadata alone rather than overwriting the new holder",
       { projectPath: resolvedPath, collection },
@@ -1019,9 +1021,9 @@ export async function getIndexableFiles(
 }
 
 /** Why an index must not start, or null; an uninspectable barrier is a reason too. */
-async function reclamationRefusal(resolvedPath: string): Promise<string | null> {
+async function reclamationRefusal(resolvedPath: string, projectId: string): Promise<string | null> {
   try {
-    await assertNoReclamationBarrier(projectIdFromPath(resolvedPath));
+    await assertNoReclamationBarrier(projectId);
     return null;
   } catch (err) {
     const msg = `Refusing to index: ${err instanceof Error ? err.message : String(err)}`;
@@ -1035,16 +1037,18 @@ export async function indexProject(
   projectPath: string,
   onProgress?: (message: string) => void,
   extraExtensions?: Set<string>,
-): Promise<{ filesIndexed: number; chunksCreated: number; cancelled: boolean }> {
+  target?: GitRefreshTarget,
+): Promise<{ filesIndexed: number; chunksCreated: number; cancelled: boolean; skipped?: string }> {
   // Register dynamic AST grammars for AST-aware chunking
   ensureDynamicLanguages();
 
   const resolvedPath = path.resolve(projectPath);
+  const projectId = target?.projectId ?? projectIdFromPath(resolvedPath);
 
-  const reclaimed = await reclamationRefusal(resolvedPath);
+  const reclaimed = await reclamationRefusal(resolvedPath, projectId);
   if (reclaimed) {
     onProgress?.(reclaimed);
-    return { filesIndexed: 0, chunksCreated: 0, cancelled: false };
+    return { filesIndexed: 0, chunksCreated: 0, cancelled: false, ...(target ? { skipped: reclaimed } : {}) };
   }
 
   // Cross-process lock, taken non-reentrantly: a lock this process already
@@ -1053,26 +1057,28 @@ export async function indexProject(
     resolvedPath,
     "index",
     () => cancelBecauseLockWasLost(resolvedPath),
-    { reentrant: false },
+    { reentrant: false, projectId },
   );
   if (!lockAcquired) {
     const msg = "Another process is already indexing this project, skipping";
     logger.info(msg, { projectPath: resolvedPath });
     onProgress?.(msg);
-    return { filesIndexed: 0, chunksCreated: 0, cancelled: false };
+    return { filesIndexed: 0, chunksCreated: 0, cancelled: false, ...(target ? { skipped: msg } : {}) };
   }
   try {
-    return await indexProjectLocked(resolvedPath, onProgress, extraExtensions);
+    return await indexProjectLocked(resolvedPath, projectId, onProgress, extraExtensions, target);
   } finally {
-    await releaseProjectLock(resolvedPath, "index");
+    await releaseProjectLock(resolvedPath, "index", projectId);
   }
 }
 
 /** The full index, under an index lock the caller holds and releases. */
 async function indexProjectLocked(
   projectPath: string,
+  projectId: string,
   onProgress?: (message: string) => void,
   extraExtensions?: Set<string>,
+  target?: GitRefreshTarget,
 ): Promise<{ filesIndexed: number; chunksCreated: number; cancelled: boolean }> {
   const resolvedPath = path.resolve(projectPath);
   const progress: IndexingProgress = {
@@ -1085,7 +1091,8 @@ async function indexProjectLocked(
   indexingInProgress.set(resolvedPath, progress);
 
   try {
-  const projectId = projectIdFromPath(resolvedPath);
+  await target?.assertCurrent();
+  if (target) invalidateProjectHashesForIdentity(projectId);
   const collection = collectionName(projectId);
   const hashes = await getProjectHashes(projectId, collection, resolvedPath);
 
@@ -1239,6 +1246,7 @@ async function indexProjectLocked(
     progress.filesProcessed = Math.min(i + batch.length, files.length);
   }
 
+  await target?.assertCurrent();
   if (hasExistingData) {
     onProgress?.(`${chunkedFiles.length} files changed, ${skippedCount} unchanged/skipped`);
 
@@ -1246,7 +1254,7 @@ async function indexProjectLocked(
     progress.phase = "cleaning stale chunks";
     for (const file of chunkedFiles) {
       if (hashes.has(file.relativePath)) {
-        await deleteFileChunks(collection, file.relativePath);
+        await deleteFileChunks(collection, file.relativePath, Boolean(target));
       }
     }
 
@@ -1256,7 +1264,7 @@ async function indexProjectLocked(
     );
     for (const [filePath] of hashes) {
       if (!currentFileSet.has(filePath)) {
-        await deleteFileChunks(collection, filePath);
+        await deleteFileChunks(collection, filePath, Boolean(target));
         hashes.delete(filePath);
       }
     }
@@ -1277,6 +1285,7 @@ async function indexProjectLocked(
   let totalChunksCreated = 0;
 
   for (let batchIdx = 0; batchIdx < chunkedFiles.length; batchIdx += INDEX_BATCH_SIZE) {
+    await target?.assertCurrent();
     // ── Cancellation check: stop gracefully between batches ──
     if (isCancellationRequested(resolvedPath)) {
       const chunksIndexed = totalChunksCreated;
@@ -1357,6 +1366,7 @@ async function indexProjectLocked(
 
     // Throws if any point failed after the per-point fallback, so hashes below
     // are only advanced for a batch that landed in full.
+    await target?.assertCurrent();
     await upsertPreEmbeddedChunks(collection, batchPoints).catch((err) => {
       // Enrich the error with batch context for debugging
       const fileList = fileBatch.map((f) => f.relativePath).join(", ");
@@ -1422,6 +1432,7 @@ async function indexProjectLocked(
 
   // Final metadata save
   progress.phase = "saving metadata";
+  await target?.assertCurrent();
   const completedStands = await persistCompletedUnlessLockLost(
     collection,
     resolvedPath,
@@ -1429,6 +1440,7 @@ async function indexProjectLocked(
     filesIndexed,
     hashes,
     effectiveProfile,
+    projectId,
   );
   if (!completedStands) {
     onProgress?.(`Indexing cancelled while completing (${chunksCreated} chunks saved). Progress is preserved — re-run codebase_index to resume.`);
@@ -1481,9 +1493,10 @@ async function indexProjectLocked(
     // The same extra extensions the index was built with: a graph built under
     // the defaults would drop every leaf node they admit, and the record would
     // then disagree with the next decision about which set was in force.
-    const graph = await rebuildGraph(resolvedPath, extraExtensions);
+    const graph = await rebuildGraph(resolvedPath, { extraExtensions, projectId, target });
     onProgress?.(`Code graph built: ${graph.nodes.length} files, ${graph.edges.length} edges`);
   } catch (graphErr) {
+    if (target) throw graphErr;
     const graphMsg = graphErr instanceof Error ? graphErr.message : String(graphErr);
     logger.warn("Code graph build failed (non-fatal)", { projectPath: resolvedPath, error: graphMsg });
     onProgress?.(`Code graph build failed (non-fatal): ${graphMsg}`);
@@ -1505,7 +1518,9 @@ async function indexProjectLocked(
     if (artifactConfig?.artifacts?.length) {
       progress.phase = "indexing context artifacts";
       onProgress?.(`Indexing ${artifactConfig.artifacts.length} context artifact${artifactConfig.artifacts.length === 1 ? "" : "s"}...`);
-      const result = await ensureArtifactsIndexed(resolvedPath);
+      await target?.assertCurrent();
+      const result = await ensureArtifactsIndexed(resolvedPath, projectId);
+      if (target && result.errors.length > 0) throw new Error(result.errors.map((item) => `${item.name}: ${item.error}`).join("; "));
       if (result.reindexed.length > 0) {
         onProgress?.(`Context artifacts: ${result.reindexed.length} indexed/re-indexed, ${result.upToDate.length} up-to-date`);
       } else {
@@ -1513,6 +1528,7 @@ async function indexProjectLocked(
       }
     }
   } catch (artifactErr) {
+    if (target) throw artifactErr;
     const artifactMsg = artifactErr instanceof Error ? artifactErr.message : String(artifactErr);
     logger.warn("Context artifact indexing failed (non-fatal)", { projectPath: resolvedPath, error: artifactMsg });
     onProgress?.(`Context artifact indexing failed (non-fatal): ${artifactMsg}`);
@@ -1521,6 +1537,7 @@ async function indexProjectLocked(
   postIndexCancelled = stopIfCancelled();
   if (postIndexCancelled) return postIndexCancelled;
 
+  await target?.assertCurrent();
   onProgress?.(`Indexing complete: ${filesIndexed} files, ${chunksCreated} chunks`);
   lastCompleted.set(resolvedPath, {
     type: "full-index",
@@ -1553,15 +1570,17 @@ export async function updateProjectIndex(
   projectPath: string,
   onProgress?: (message: string) => void,
   extraExtensions?: Set<string>,
-): Promise<{ added: number; updated: number; removed: number; chunksCreated: number; cancelled: boolean }> {
+  target?: GitRefreshTarget,
+): Promise<{ added: number; updated: number; removed: number; chunksCreated: number; cancelled: boolean; skipped?: string }> {
   ensureDynamicLanguages();
 
   const resolvedPath = path.resolve(projectPath);
+  const projectId = target?.projectId ?? projectIdFromPath(resolvedPath);
 
-  const reclaimed = await reclamationRefusal(resolvedPath);
+  const reclaimed = await reclamationRefusal(resolvedPath, projectId);
   if (reclaimed) {
     onProgress?.(reclaimed);
-    return { added: 0, updated: 0, removed: 0, chunksCreated: 0, cancelled: false };
+    return { added: 0, updated: 0, removed: 0, chunksCreated: 0, cancelled: false, ...(target ? { skipped: reclaimed } : {}) };
   }
 
   // Cross-process lock, taken non-reentrantly; the full-index fallback below
@@ -1570,13 +1589,13 @@ export async function updateProjectIndex(
     resolvedPath,
     "index",
     () => cancelBecauseLockWasLost(resolvedPath),
-    { reentrant: false },
+    { reentrant: false, projectId },
   );
   if (!lockAcquired) {
     const msg = "Another process is already indexing this project, skipping";
     logger.info(msg, { projectPath: resolvedPath });
     onProgress?.(msg);
-    return { added: 0, updated: 0, removed: 0, chunksCreated: 0, cancelled: false };
+    return { added: 0, updated: 0, removed: 0, chunksCreated: 0, cancelled: false, ...(target ? { skipped: msg } : {}) };
   }
 
   const progress: IndexingProgress = {
@@ -1589,7 +1608,8 @@ export async function updateProjectIndex(
   indexingInProgress.set(resolvedPath, progress);
 
   try {
-  const projectId = projectIdFromPath(resolvedPath);
+  await target?.assertCurrent();
+  if (target) invalidateProjectHashesForIdentity(projectId);
   const collection = collectionName(projectId);
   const hashes = await getProjectHashes(projectId, collection, resolvedPath);
 
@@ -1608,9 +1628,12 @@ export async function updateProjectIndex(
   }
 
   if (!info || info.pointsCount === 0) {
+    if (!info && target && !target.allowCreate) {
+      throw new Error("Git refresh stopped: this index no longer exists. Run codebase_index explicitly to create it.");
+    }
     // Collection truly doesn't exist or is empty — safe to do a full index
     onProgress?.("No existing index found, performing full index...");
-    const result = await indexProjectLocked(resolvedPath, onProgress, extraExtensions);
+    const result = await indexProjectLocked(resolvedPath, projectId, onProgress, extraExtensions, target);
     return { added: result.filesIndexed, updated: 0, removed: 0, chunksCreated: result.chunksCreated, cancelled: result.cancelled };
   }
 
@@ -1635,7 +1658,7 @@ export async function updateProjectIndex(
       collection,
       pointsCount: info.pointsCount,
     });
-    const result = await indexProjectLocked(resolvedPath, onProgress, extraExtensions);
+    const result = await indexProjectLocked(resolvedPath, projectId, onProgress, extraExtensions, target);
     return { added: result.filesIndexed, updated: 0, removed: 0, chunksCreated: result.chunksCreated, cancelled: result.cancelled };
   }
 
@@ -1745,11 +1768,12 @@ export async function updateProjectIndex(
   let chunksCreated = 0;
 
   if (changedFiles.length > 0) {
+    await target?.assertCurrent();
     // Delete old chunks for updated (not new) files
     progress.phase = "cleaning stale chunks";
     for (const file of changedFiles) {
       if (!file.isNew) {
-        await deleteFileChunks(collection, file.relativePath);
+        await deleteFileChunks(collection, file.relativePath, Boolean(target));
       }
     }
 
@@ -1767,6 +1791,7 @@ export async function updateProjectIndex(
     let globalChunksProcessed = 0;
 
     for (let batchIdx = 0; batchIdx < changedFiles.length; batchIdx += INDEX_BATCH_SIZE) {
+      await target?.assertCurrent();
       // ── Cancellation check: stop gracefully between batches ──
       if (isCancellationRequested(resolvedPath)) {
         onProgress?.(`Update cancelled after ${progress.batchesProcessed ?? 0}/${totalBatches} batches (${chunksCreated} chunks saved). Progress is preserved — re-run codebase_update to resume.`);
@@ -1848,6 +1873,7 @@ export async function updateProjectIndex(
 
       // Throws if any point failed after the per-point fallback, so hashes below
       // are only advanced for a batch that landed in full.
+      await target?.assertCurrent();
       await upsertPreEmbeddedChunks(collection, batchPoints);
 
       // Update hashes and counts for this batch's files
@@ -1875,11 +1901,12 @@ export async function updateProjectIndex(
   }
 
   // Check for deleted files
+  await target?.assertCurrent();
   progress.phase = "removing deleted files";
   const removedRelPaths: string[] = [];
   for (const [filePath] of hashes) {
     if (!currentFileSet.has(filePath)) {
-      await deleteFileChunks(collection, filePath);
+      await deleteFileChunks(collection, filePath, Boolean(target));
       hashes.delete(filePath);
       removed++;
       removedRelPaths.push(filePath);
@@ -1906,6 +1933,7 @@ export async function updateProjectIndex(
   }
 
   // Persist updated hashes
+  await target?.assertCurrent();
   const completedStands = await persistCompletedUnlessLockLost(
     collection,
     resolvedPath,
@@ -1913,6 +1941,7 @@ export async function updateProjectIndex(
     hashes.size,
     hashes,
     effectiveProfile,
+    projectId,
   );
   if (!completedStands) {
     onProgress?.(`Update cancelled while completing (${chunksCreated} chunks saved). Progress is preserved — re-run codebase_update to resume.`);
@@ -1998,9 +2027,18 @@ export async function updateProjectIndex(
           knownHash: (relativePath) => hashes.get(relativePath),
         },
         extraExtensions,
+        projectId,
       );
 
-      if (!decision.rebuild || !(indexChanged || decision.graphExists)) {
+      if (target && !decision.rebuild) {
+        const { loadSymbolGraphMeta } = await import("./symbol-graph-store.js");
+        if (!await loadSymbolGraphMeta(projectId)) {
+          decision.rebuild = true;
+          decision.reason = "the symbol graph is missing";
+        }
+      }
+
+      if (!decision.rebuild || (!target && !(indexChanged || decision.graphExists))) {
         if (indexChanged) {
           logger.info("Code graph rebuild skipped: the change touched no graph input", {
             projectPath: resolvedPath,
@@ -2021,10 +2059,13 @@ export async function updateProjectIndex(
         const graph = await rebuildGraph(resolvedPath, {
           skipSymbolGraph: false,
           extraExtensions,
+          projectId,
+          target,
         });
         onProgress?.(`Code graph built: ${graph.nodes.length} files, ${graph.edges.length} edges`);
       }
     } catch (graphErr) {
+      if (target) throw graphErr;
       const graphMsg = graphErr instanceof Error ? graphErr.message : String(graphErr);
       logger.warn("Code graph build failed during incremental update (non-fatal)", { projectPath: resolvedPath, error: graphMsg });
       onProgress?.(`Code graph build failed (non-fatal): ${graphMsg}`);
@@ -2046,12 +2087,15 @@ export async function updateProjectIndex(
 
     if (artifactConfig?.artifacts?.length) {
       progress.phase = "indexing context artifacts";
-      const result = await ensureArtifactsIndexed(resolvedPath);
+      await target?.assertCurrent();
+      const result = await ensureArtifactsIndexed(resolvedPath, projectId);
+      if (target && result.errors.length > 0) throw new Error(result.errors.map((item) => `${item.name}: ${item.error}`).join("; "));
       if (result.reindexed.length > 0) {
         onProgress?.(`Context artifacts: ${result.reindexed.length} indexed/re-indexed, ${result.upToDate.length} up-to-date`);
       }
     }
   } catch (artifactErr) {
+    if (target) throw artifactErr;
     const artifactMsg = artifactErr instanceof Error ? artifactErr.message : String(artifactErr);
     logger.warn("Context artifact indexing failed during incremental update (non-fatal)", { projectPath: resolvedPath, error: artifactMsg });
   }
@@ -2059,6 +2103,7 @@ export async function updateProjectIndex(
   postIndexCancelled = stopIfCancelled();
   if (postIndexCancelled) return postIndexCancelled;
 
+  await target?.assertCurrent();
   onProgress?.(`Update complete: ${added} added, ${updated} updated, ${removed} removed`);
 
   lastCompleted.set(resolvedPath, {
@@ -2084,7 +2129,7 @@ export async function updateProjectIndex(
   } finally {
     indexingInProgress.delete(resolvedPath);
     cancellationRequested.delete(resolvedPath);
-    await releaseProjectLock(resolvedPath, "index");
+    await releaseProjectLock(resolvedPath, "index", projectId);
   }
 }
 
