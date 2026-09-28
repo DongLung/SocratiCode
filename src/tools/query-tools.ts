@@ -118,6 +118,7 @@ async function appendWatcherState(
   }
 }
 
+/** Run a query or status request with the selected mode's Git freshness notice. */
 export async function handleQueryTool(
   name: string,
   args: Record<string, unknown>,
@@ -126,6 +127,7 @@ export async function handleQueryTool(
   return withGitRefreshNotice(projectPath, () => dispatchQueryTool(name, args));
 }
 
+/** Dispatch search and status requests using the existing project identity and watcher policy. */
 async function dispatchQueryTool(
   name: string,
   args: Record<string, unknown>,

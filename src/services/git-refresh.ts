@@ -34,6 +34,7 @@ interface Project {
 
 const projects = new Map<string, Project>();
 
+/** Return the process-local monitor for a resolved checkout path. */
 function project(projectPath: string): Project {
   const resolved = path.resolve(projectPath);
   let entry = projects.get(resolved);
@@ -44,6 +45,7 @@ function project(projectPath: string): Project {
   return entry;
 }
 
+/** Poll registered checkouts without keeping the MCP process alive. */
 function schedule(entry: Project): void {
   if (entry.stopped || !entry.registered || entry.timer) return;
   if (getWatcherMode() !== "git") { stopGitRefresh(entry.path); return; }
@@ -54,11 +56,13 @@ function schedule(entry: Project): void {
   entry.timer.unref();
 }
 
+/** Require a successful refresh of the latest observation with no pending work. */
 function isCurrent(entry: Project): boolean {
   return !entry.pending && !entry.running && !entry.observationError && !entry.refreshError
     && sameGitState(entry.synchronized, entry.observed);
 }
 
+/** Record ref or identity changes and invalidate results from the previous state. */
 function observe(entry: Project, state: GitState): void {
   const identity = gitProjectId(entry.path, state);
   if (entry.observed && (!sameGitState(entry.observed, state) || entry.projectId !== identity)) {
@@ -78,6 +82,7 @@ function observe(entry: Project, state: GitState): void {
   entry.observationError = undefined;
 }
 
+/** Refresh one captured checkout state, retaining failed or superseded work for retry. */
 async function refresh(entry: Project): Promise<void> {
   const state = entry.observed;
   if (!state || !entry.projectId || entry.stopped) return;
@@ -180,6 +185,7 @@ export async function prepareGitIndex(projectPath: string, extraExtensions?: Set
   }
 }
 
+/** Seed monitoring only from a successful explicit operation on the same checkout state. */
 export async function finishGitIndex(
   projectPath: string,
   operation: Awaited<ReturnType<typeof prepareGitIndex>>,
@@ -208,6 +214,7 @@ export async function finishGitIndex(
   schedule(entry);
 }
 
+/** Describe observed freshness without treating pending work as synchronized. */
 export function gitRefreshStatus(projectPath: string): string {
   const entry = projects.get(path.resolve(projectPath));
   if (!entry) return "Git refresh: not monitoring this project yet.";
@@ -219,6 +226,7 @@ export function gitRefreshStatus(projectPath: string): string {
   return `Git refresh: synchronized with ${entry.observed?.ref ?? "detached HEAD"} at ${entry.observed?.head.slice(0, 12)}.\nWorking-tree edits without a ref/HEAD change require codebase_update.`;
 }
 
+/** Annotate a read with freshness, including a refresh that completes during the read. */
 export async function withGitRefreshNotice(projectPath: string, read: () => Promise<string>): Promise<string> {
   if (getWatcherMode() !== "git") return read();
   await checkGitRefresh(projectPath);
@@ -234,6 +242,7 @@ export async function withGitRefreshNotice(projectPath: string, read: () => Prom
   return `${notice}\n\n${result}`;
 }
 
+/** Stop polling a checkout and invalidate any in-flight refresh target. */
 export function stopGitRefresh(projectPath: string): void {
   const resolved = path.resolve(projectPath);
   const entry = projects.get(resolved);
@@ -243,6 +252,7 @@ export function stopGitRefresh(projectPath: string): void {
   projects.delete(resolved);
 }
 
+/** Stop every registered Git monitor during server shutdown. */
 export function stopAllGitRefreshes(): void {
   for (const key of projects.keys()) stopGitRefresh(key);
 }

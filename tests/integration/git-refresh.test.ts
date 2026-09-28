@@ -7,7 +7,7 @@ import { collectionName, projectIdFromPath } from "../../src/config.js";
 import { getExistingGraph } from "../../src/services/code-graph.js";
 import { checkGitRefresh, gitRefreshStatus, stopAllGitRefreshes } from "../../src/services/git-refresh.js";
 import { hashContent, isIndexingInProgress, removeProjectIndex } from "../../src/services/indexer.js";
-import { getCollectionInfo, loadProjectHashes } from "../../src/services/qdrant.js";
+import { deleteFileChunks, getCollectionInfo, listIndexedFilePaths, loadIndexingStatus, loadProjectEffectiveProfile, loadProjectHashes, saveProjectMetadata } from "../../src/services/qdrant.js";
 import { autoResumeIndexedProjects } from "../../src/services/startup.js";
 import { listStoredGenerations, loadFilePayload, loadSymbolGraphMeta, saveFilePayload } from "../../src/services/symbol-graph-store.js";
 import { isWatching } from "../../src/services/watcher.js";
@@ -162,5 +162,35 @@ describe.skipIf(!isDockerAvailable())("Git refresh with real Git, embeddings, Qd
     expect((await loadSymbolGraphMeta(projectId))?.generation).toBe(meta?.generation);
     expect(await listStoredGenerations(projectId)).not.toContain("abandoned-fixture-generation");
     expect(await loadFilePayload(projectId, "main.ts")).toEqual(payload);
+  });
+
+  it("recovers an in-progress checkpoint through Git startup before reporting synchronization", async () => {
+    stopAllGitRefreshes();
+    const collection = collectionName(identity());
+    const storedHashes = await loadProjectHashes(collection);
+    const profile = await loadProjectEffectiveProfile(collection);
+    if (!storedHashes || !profile) throw new Error("Fixture index metadata is missing");
+    expect(storedHashes.has("main.ts")).toBe(true);
+
+    // Persist an interrupted checkpoint: one stale hash has lost its chunks,
+    // and another on-disk file has not reached a completed batch yet.
+    await deleteFileChunks(collection, "main.ts");
+    const source = "export function recoveredOnRestart() { return 'git_restart_recovery'; }\n";
+    fs.writeFileSync(path.join(fixture.root, "unfinished.ts"), source);
+    await saveProjectMetadata(collection, fixture.root, storedHashes.size + 1, storedHashes.size, storedHashes, "in-progress", profile);
+    expect((await listIndexedFilePaths(collection)).has("main.ts")).toBe(false);
+    expect(await loadIndexingStatus(collection)).toBe("in-progress");
+
+    await autoResumeIndexedProjects(fixture.root);
+    await settled("detached HEAD");
+    const recovered = await listIndexedFilePaths(collection);
+    expect(recovered.has("main.ts")).toBe(true);
+    expect(recovered.has("unfinished.ts")).toBe(true);
+    expect((await hashes())?.get("unfinished.ts")).toBe(hashContent(source));
+    expect(await loadProjectEffectiveProfile(collection)).toEqual(profile);
+    expect(await loadIndexingStatus(collection)).toBe("completed");
+    expect(await handleQueryTool("codebase_search", { projectPath: fixture.root, query: "git_restart_recovery", minScore: 0 })).toContain("recoveredOnRestart");
+    expect(await handleGraphTool("codebase_symbols", { projectPath: fixture.root, query: "recoveredOnRestart" })).toContain("recoveredOnRestart");
+    expect(isWatching(fixture.root)).toBe(false);
   });
 });

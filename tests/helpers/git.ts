@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+/** Run fixture Git commands with synthetic author details, signing off, and no hooks. */
 export function git(projectPath: string, ...args: string[]): string {
   return execFileSync("git", [
     "-c", "user.name=Git refresh test", "-c", "user.email=test@example.invalid",
@@ -13,6 +14,7 @@ export function git(projectPath: string, ...args: string[]): string {
   ], { cwd: projectPath, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
+/** Create a disposable committed checkout and return cleanup for that checkout only. */
 export function createGitFixture() {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-git-refresh-")));
   git(root, "init", "-b", "main");

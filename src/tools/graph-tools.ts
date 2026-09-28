@@ -77,6 +77,7 @@ function hasRelevantGrammarFailure(
   return failed.some(({ name }) => name.toLowerCase() === String(grammar).toLowerCase());
 }
 
+/** Add Git freshness to graph reads while keeping explicit graph mutations separate. */
 export async function handleGraphTool(
   name: string,
   args: Record<string, unknown>,
@@ -86,6 +87,7 @@ export async function handleGraphTool(
   return withGitRefreshNotice(projectPath, () => handleGraphResult(name, args));
 }
 
+/** Dispatch a graph request with persisted-generation retries and visible storage errors. */
 async function handleGraphResult(
   name: string,
   args: Record<string, unknown>,
