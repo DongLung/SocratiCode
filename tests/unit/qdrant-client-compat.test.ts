@@ -2,9 +2,10 @@
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import fs from "node:fs";
 import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createQdrantFetchBridge,
+  nativeFetchSupportsUndiciDispatcher,
   qdrantFetchMode,
   readInstalledQdrantClientVersion,
 } from "../../src/services/qdrant-client-compat.js";
@@ -84,6 +85,117 @@ describe("qdrant-client-compat", () => {
 
     it("keeps native fetch for a non-finite Node major", () => {
       expect(qdrantFetchMode(Number.NaN, "1.18.0")).toBe("native");
+    });
+  });
+
+  describe("nativeFetchSupportsUndiciDispatcher", () => {
+    it("settles the synthetic built-in fetch request after inspecting its handler", async () => {
+      const builtInFetch = globalThis.fetch.bind(globalThis);
+      let probeRequest: Promise<Response> | undefined;
+      const nativeFetch: typeof globalThis.fetch = (input, init) => {
+        probeRequest = builtInFetch(input, init);
+        return probeRequest;
+      };
+
+      nativeFetchSupportsUndiciDispatcher(nativeFetch);
+
+      expect(probeRequest).toBeDefined();
+      await expect(probeRequest).rejects.toMatchObject({
+        cause: expect.objectContaining({
+          message: "SocratiCode dispatcher compatibility probe completed",
+        }),
+      });
+    }, 1_000);
+
+    it("reports a handler without onError as unsupported", () => {
+      // Mirrors the real failure: Node's built-in fetch hands undici 6's
+      // dispatcher a handler that has no onError, so undici's own recovery
+      // path throws `invalid onError method`.
+      const nativeFetch = vi.fn(async (_input: unknown, init: unknown) => {
+        const { dispatcher } = init as { dispatcher: { dispatch: (o: unknown, h: unknown) => boolean } };
+        dispatcher.dispatch({}, {});
+        return new Response("ok");
+      }) as unknown as typeof globalThis.fetch;
+
+      expect(nativeFetchSupportsUndiciDispatcher(nativeFetch)).toBe(false);
+    });
+
+    it("reports a handler exposing onError as supported", () => {
+      const nativeFetch = vi.fn(async (_input: unknown, init: unknown) => {
+        const { dispatcher } = init as { dispatcher: { dispatch: (o: unknown, h: unknown) => boolean } };
+        dispatcher.dispatch({}, { onError: () => undefined });
+        return new Response("ok");
+      }) as unknown as typeof globalThis.fetch;
+
+      expect(nativeFetchSupportsUndiciDispatcher(nativeFetch)).toBe(true);
+    });
+
+    it("treats a fetch that throws synchronously as unsupported", () => {
+      const nativeFetch = (() => {
+        throw new TypeError("fetch failed");
+      }) as unknown as typeof globalThis.fetch;
+
+      expect(nativeFetchSupportsUndiciDispatcher(nativeFetch)).toBe(false);
+    });
+
+    it("treats a fetch that never reaches the dispatcher as unsupported", () => {
+      // No handler shape was ever observed, so the pair cannot be trusted.
+      const nativeFetch = vi.fn(async () => new Response("ok")) as unknown as typeof globalThis.fetch;
+
+      expect(nativeFetchSupportsUndiciDispatcher(nativeFetch)).toBe(false);
+    });
+  });
+
+  describe("ensureQdrantClientCompatibility", () => {
+    const nodeVersion = process.versions.node;
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      vi.doUnmock("undici");
+      vi.resetModules();
+      Object.defineProperty(process.versions, "node", { value: nodeVersion });
+    });
+
+    it.each([
+      { node: "24.21.0", supported: false, paired: true },
+      { node: "24.21.0", supported: true, paired: false },
+      { node: "26.0.0", supported: true, paired: true },
+    ])("selects the expected transport on Node $node when dispatcher support is $supported", async ({ node, supported, paired }) => {
+      vi.resetModules();
+      Object.defineProperty(process.versions, "node", { value: node });
+      const nativeFetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+        if (input === "http://socraticode-probe.invalid/") {
+          const { dispatcher } = init as {
+            dispatcher: { dispatch: (options: unknown, handler: unknown) => boolean };
+          };
+          dispatcher.dispatch({}, supported ? { onError: () => undefined } : {});
+        }
+        return new Response("native");
+      });
+      const pairedFetch = vi.fn(async () => new Response("paired"));
+      vi.stubGlobal("fetch", nativeFetch);
+      vi.doMock("undici", () => ({ fetch: pairedFetch }));
+      const { ensureQdrantClientCompatibility } = await import(
+        "../../src/services/qdrant-client-compat.js"
+      );
+
+      ensureQdrantClientCompatibility("http://qdrant.test:6333");
+      const selectedFetch = globalThis.fetch;
+      expect(selectedFetch === nativeFetch).toBe(!paired);
+      ensureQdrantClientCompatibility("http://qdrant-other.test:6333");
+      expect(globalThis.fetch).toBe(selectedFetch);
+
+      const init = { dispatcher: {} } as RequestInit;
+      for (const origin of ["http://qdrant.test:6333", "http://qdrant-other.test:6333"]) {
+        const response = await globalThis.fetch(`${origin}/collections`, init);
+        expect(await response.text()).toBe(paired ? "paired" : "native");
+      }
+      expect(pairedFetch).toHaveBeenCalledTimes(paired ? 2 : 0);
+
+      await globalThis.fetch("https://unrelated.test/", init);
+      await globalThis.fetch("http://qdrant.test:6333/healthz", undefined);
+      expect(nativeFetch).toHaveBeenCalledWith("https://unrelated.test/", init);
+      expect(nativeFetch).toHaveBeenCalledWith("http://qdrant.test:6333/healthz", undefined);
     });
   });
 

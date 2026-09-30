@@ -25,6 +25,19 @@ import { fetch as undiciFetch } from "undici";
  * carry a per-request dispatcher are routed through undici's fetch, and only
  * for the affected Node/client pair. Every other request keeps using the
  * process's original fetch implementation.
+ *
+ *   - The breakage is a property of the *undici pair*, not of a Node version.
+ *     It has now been observed on Node 24 as well as Node 26, so a
+ *     `nodeMajor < 26` cutoff is too narrow to detect it. Two builds reporting
+ *     the identical `process.versions.node` disagree: official Node 24.21.0
+ *     (undici 7.29.1) pairs fine with the client's undici 6 Agent, while a
+ *     distribution rebuild of the same version (e.g. Debian's
+ *     `24.21.0+dfsg+~cs24.13.4`) does not.
+ *   - So the transport is chosen by probing the actual capability rather than
+ *     by matching a Node version table. `nativeFetchSupportsUndiciDispatcher`
+ *     hands a stub dispatcher to the built-in fetch and checks whether the
+ *     handler it passes exposes `onError`. That costs no network round trip
+ *     and stays correct on any Node/undici combination, patched or official.
  */
 
 const QDRANT_CLIENT_PACKAGE = "@qdrant/js-client-rest";
@@ -75,6 +88,46 @@ export function readInstalledQdrantClientVersion(): string | null {
  * to prevent. On Node < 26 the client version is irrelevant.
  */
 export type QdrantFetchMode = "native" | "paired-undici" | "unknown";
+
+/**
+ * Probe whether the built-in fetch can hand a request to an undici 6
+ * dispatcher.
+ *
+ * undici 6's `DispatcherBase.dispatch` catches a throw from the wrapped
+ * dispatcher and then calls `handler.onError(err)`. Node's built-in fetch
+ * passes a handler without that method, so the recovery path itself throws
+ * `InvalidArgumentError: invalid onError method` and the caller only sees
+ * `TypeError: fetch failed`.
+ *
+ * The probe hands fetch a stub dispatcher, records the handler shape it
+ * receives, and rejects the synthetic request without a network round trip.
+ * Returns true when built-in fetch supplied an `onError` method (i.e. the pair
+ * is safe).
+ */
+export function nativeFetchSupportsUndiciDispatcher(
+  nativeFetch: FetchFunction = globalThis.fetch,
+): boolean {
+  let sawOnError: unknown;
+  const stubDispatcher = {
+    dispatch(_opts: unknown, handler: { onError?: unknown }) {
+      sawOnError = handler?.onError;
+      throw new Error("SocratiCode dispatcher compatibility probe completed");
+    },
+  };
+  try {
+    // An unroutable .invalid host guarantees the stub is reached during
+    // dispatch, before any real connection is attempted; the rejection it
+    // produces is irrelevant and deliberately ignored.
+    void Promise.resolve(
+      nativeFetch("http://socraticode-probe.invalid/", {
+        dispatcher: stubDispatcher,
+      } as DispatcherRequestInit),
+    ).catch(() => undefined);
+  } catch {
+    return false;
+  }
+  return typeof sawOnError === "function";
+}
 
 /** Select the fetch transport required by a Node/Qdrant-client pair. */
 export function qdrantFetchMode(
@@ -139,13 +192,25 @@ const bridgedQdrantOrigins = new Set<string>();
 let bridgeInstalled = false;
 
 /**
- * Install the Node 26/Qdrant 1.18 transport bridge once for the configured
- * Qdrant origin. Repeated calls only register an additional origin.
+ * Install the Qdrant transport bridge once for the configured Qdrant origin.
+ * Repeated calls only register an additional origin.
+ *
+ * The capability probe is consulted first and is authoritative: a runtime
+ * whose built-in fetch cannot hand a request to the client's undici dispatcher
+ * needs the bridge whatever its Node version or distribution, and a runtime
+ * that can needs the native transport. The version table stays as the fallback
+ * for the (undetectable-probe) case, and the `unknown` mode still refuses
+ * rather than booting into a client whose first request would die opaquely.
  */
 export function ensureQdrantClientCompatibility(qdrantBaseUrl: string): void {
-  const nodeMajor = Number.parseInt(process.versions.node.split(".")[0], 10);
-  const clientVersion = readInstalledQdrantClientVersion();
-  const mode = qdrantFetchMode(nodeMajor, clientVersion);
+  const nativeFetch = globalThis.fetch.bind(globalThis);
+  const needsBridge = !nativeFetchSupportsUndiciDispatcher(nativeFetch);
+  const mode = needsBridge
+    ? "paired-undici"
+    : ((): QdrantFetchMode => {
+        const nodeMajor = Number.parseInt(process.versions.node.split(".")[0], 10);
+        return qdrantFetchMode(nodeMajor, readInstalledQdrantClientVersion());
+      })();
   if (mode === "native") return;
   if (mode === "unknown") {
     throw new Error(
@@ -157,7 +222,6 @@ export function ensureQdrantClientCompatibility(qdrantBaseUrl: string): void {
   bridgedQdrantOrigins.add(new URL(qdrantBaseUrl).origin);
   if (bridgeInstalled) return;
 
-  const nativeFetch = globalThis.fetch.bind(globalThis);
   globalThis.fetch = createQdrantFetchBridge(
     nativeFetch,
     undiciFetch as unknown as FetchFunction,
