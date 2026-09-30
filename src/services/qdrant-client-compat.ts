@@ -100,8 +100,9 @@ export type QdrantFetchMode = "native" | "paired-undici" | "unknown";
  * `TypeError: fetch failed`.
  *
  * The probe hands fetch a stub dispatcher, records the handler shape it
- * receives, and never performs a network round trip. Returns true when the
- * built-in fetch supplied an `onError` method (i.e. the pair is safe).
+ * receives, and rejects the synthetic request without a network round trip.
+ * Returns true when built-in fetch supplied an `onError` method (i.e. the pair
+ * is safe).
  */
 export function nativeFetchSupportsUndiciDispatcher(
   nativeFetch: FetchFunction = globalThis.fetch,
@@ -110,7 +111,7 @@ export function nativeFetchSupportsUndiciDispatcher(
   const stubDispatcher = {
     dispatch(_opts: unknown, handler: { onError?: unknown }) {
       sawOnError = handler?.onError;
-      return true;
+      throw new Error("SocratiCode dispatcher compatibility probe completed");
     },
   };
   try {
