@@ -1507,6 +1507,8 @@ async function localOwnershipPayload(collName: string, projectPath: string): Pro
   } catch (error) {
     const refusal = error instanceof Error ? error.message : String(error);
     logger.warn("Automatic cleanup ownership refused", { collName, reason: refusal });
+    // Keep proven ownership; retirement is re-verified before every deletion.
+    if (priorOwnership) return { localIndexOwnership: priorOwnership };
     return { localIndexOwnership: { refusal } };
   }
 }

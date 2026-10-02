@@ -105,12 +105,32 @@ describe.skipIf(!reachable)("automatic cleanup through real Git, Qdrant and writ
     const main = await index(fixture.root);
     git(fixture.root, "checkout", "-b", "topic");
     const identity = await index(fixture.root);
+    const ownership = (await getProjectReclamationInventory()).entries.find((entry) => entry.identity === identity)?.metadataRecords[0]?.localIndexOwnership;
+    expect(ownership).toBeDefined();
     git(fixture.root, "checkout", "main");
+    // An old branch writer may save its final checkpoint after the checkout has switched.
+    await saveProjectMetadata(collectionName(identity), fixture.root, 1, 1, new Map([["main.ts", "synthetic"]]), "completed", requestedIndexProfile("code"));
+    expect((await getProjectReclamationInventory()).entries.find((entry) => entry.identity === identity)?.metadataRecords[0]?.localIndexOwnership).toEqual(ownership);
     git(fixture.root, "merge", "topic");
     expect((await runAutomaticCleanup()).join("\n")).not.toContain("Removed");
     git(fixture.root, "branch", "-D", "topic");
     expect((await runAutomaticCleanup()).join("\n")).toContain(`Removed all inventoried resources for identity: ${identity}`);
     expect(await exists(main)).toBe(true);
+  });
+
+  it("keeps an initially refused ownership capture report-only after branch retirement", async () => {
+    vi.stubEnv("SOCRATICODE_BRANCH_AWARE", "true");
+    git(fixture.root, "checkout", "-b", "topic");
+    const identity = projectIdFromPath(fixture.root);
+    identities.add(identity);
+    await ensureCollection(collectionName(identity));
+    git(fixture.root, "checkout", "main");
+    await saveProjectMetadata(collectionName(identity), fixture.root, 1, 1, new Map([["main.ts", "synthetic"]]), "completed", requestedIndexProfile("code"));
+    const ownership = (await getProjectReclamationInventory()).entries.find((entry) => entry.identity === identity)?.metadataRecords[0]?.localIndexOwnership;
+    expect(ownership).toEqual({ refusal: "the Git branch no longer matches the index identity" });
+    git(fixture.root, "branch", "-D", "topic");
+    expect((await runAutomaticCleanup()).join("\n")).toContain("report-only");
+    expect(await exists(identity)).toBe(true);
   });
 
   it("keeps a non-branch-aware worktree's original ownership through branch switches and updates", async () => {
