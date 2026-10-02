@@ -18,6 +18,7 @@ import {
   resolveEffectiveIndexProfile,
   withEffectiveEmbedding,
 } from "./index-profile.js";
+import { automaticCleanupEnabled, captureLocalIndexOwnership, parseLocalIndexOwnership } from "./local-index-ownership.js";
 import { logger } from "./logger.js";
 import { ensureQdrantClientCompatibility } from "./qdrant-client-compat.js";
 
@@ -131,6 +132,8 @@ export function getClient(): QdrantClient {
 
 /** In-flight code-collection initialization, keyed by collection name. */
 const collectionEnsureInFlight = new Map<string, Promise<void>>();
+// Only creations this process actually completed may enroll an otherwise unrecorded identity.
+const locallyCreatedCollections = new Set<string>();
 
 /** Create a collection if needed and ensure its required payload indexes. */
 async function ensureCollectionOnce(name: string): Promise<void> {
@@ -158,6 +161,7 @@ async function ensureCollectionOnce(name: string): Promise<void> {
         },
         on_disk_payload: true,
       });
+      if (automaticCleanupEnabled()) locallyCreatedCollections.add(name);
     } catch (err) {
       // Another process may create the same collection after our membership
       // check. That is the desired end state; every other failure must surface.
@@ -271,6 +275,8 @@ export interface ProjectMetadataRecord {
   lastIndexedAt: string | null;
   lastBuiltAt: string | null;
   builtByVersion: string | null;
+  /** Absent in legacy records. Refused or malformed ownership remains report-only. */
+  localIndexOwnership?: unknown;
 }
 
 export interface ProjectReclamationEntry {
@@ -390,6 +396,7 @@ function inventoryToken(entry: Omit<ProjectReclamationEntry, "confirmationToken"
     record.lastIndexedAt,
     record.lastBuiltAt,
     record.builtByVersion,
+    record.localIndexOwnership,
   ]);
   return createHash("sha256")
     .update(JSON.stringify({
@@ -455,7 +462,7 @@ export async function getProjectReclamationInventory(): Promise<ProjectReclamati
         () => qdrant.scroll(METADATA_COLLECTION, {
           limit: 1000,
           with_payload: {
-            include: ["collectionName", "projectPath", "indexingStatus", "lastIndexedAt", "lastBuiltAt", "builtByVersion"],
+            include: ["collectionName", "projectPath", "indexingStatus", "lastIndexedAt", "lastBuiltAt", "builtByVersion", "localIndexOwnership"],
           },
           with_vector: false,
           ...(offset === undefined || offset === null ? {} : { offset }),
@@ -492,6 +499,7 @@ export async function getProjectReclamationInventory(): Promise<ProjectReclamati
             lastIndexedAt: stringOrNull(payload?.lastIndexedAt),
             lastBuiltAt: stringOrNull(payload?.lastBuiltAt),
             builtByVersion: stringOrNull(payload?.builtByVersion),
+            ...(payload?.localIndexOwnership === undefined ? {} : { localIndexOwnership: payload.localIndexOwnership }),
           },
         });
       }
@@ -567,15 +575,17 @@ export async function getProjectReclamationInventory(): Promise<ProjectReclamati
 export async function removeProjectReclamationEntry(
   entry: ProjectReclamationEntry,
   /** Asked before every write; once it answers false, nothing more is attempted. */
-  mayContinue: () => boolean = () => true,
+  mayContinue: () => boolean | Promise<boolean> = () => true,
+  /** Automatic reclamation retains its proof until collection deletion is verified. Manual prune is unchanged. */
+  preserveMetadataUntilCollectionsGone = false,
 ): Promise<ProjectReclamationOutcome[]> {
   const qdrant = getClient();
   const outcomes: ProjectReclamationOutcome[] = [];
   let stopped = false;
   const attempt = async (resource: string, kind: ProjectReclamationOutcome["kind"], remove: () => Promise<unknown>) => {
-    if (stopped || !mayContinue()) {
+    if (stopped || !await mayContinue()) {
       stopped = true;
-      outcomes.push({ resource, kind, outcome: "skipped", error: "the reclamation barrier was lost before this write" });
+      outcomes.push({ resource, kind, outcome: "skipped", error: preserveMetadataUntilCollectionsGone ? "automatic cleanup authorization was withdrawn before this write" : "the reclamation barrier was lost before this write" });
       return;
     }
     try {
@@ -591,6 +601,32 @@ export async function removeProjectReclamationEntry(
   };
   for (const resource of entry.resourceCollections) {
     await attempt(resource, "collection", () => qdrant.deleteCollection(resource));
+  }
+  if (preserveMetadataUntilCollectionsGone) {
+    let verificationError: string | null = null;
+    try {
+      const names = new Set((await qdrant.getCollections()).collections.map(({ name }) => name));
+      for (const outcome of outcomes) {
+        if (outcome.outcome === "deleted" && names.has(outcome.resource)) {
+          outcome.outcome = "failed";
+          outcome.error = "the collection is still stored after deletion";
+        }
+      }
+    } catch (error) {
+      verificationError = `collection deletion could not be verified: ${error instanceof Error ? error.message : String(error)}`;
+      for (const outcome of outcomes) {
+        if (outcome.outcome === "deleted") {
+          outcome.outcome = "failed";
+          outcome.error = verificationError;
+        }
+      }
+    }
+    if (verificationError || outcomes.some((outcome) => outcome.outcome !== "deleted")) {
+      return [...outcomes, ...entry.metadataRecords.map((record): ProjectReclamationOutcome => ({
+        resource: `${record.collectionName} [point ${record.pointId}]`, kind: "metadata", outcome: "skipped",
+        error: verificationError ?? "ownership metadata retained because collection cleanup is incomplete",
+      }))];
+    }
   }
   for (const record of entry.metadataRecords) {
     // wait: true, so the inventory read that follows sees the point gone.
@@ -1436,6 +1472,45 @@ async function loadMetadataPayloadReadOnly(
   }
 }
 
+/** Add proof only for genuinely new local resources; never retrofit legacy or orphaned resources. */
+async function localOwnershipPayload(collName: string, projectPath: string): Promise<Record<string, unknown>> {
+  if (!automaticCleanupEnabled()) return {};
+  const previous = await loadMetadataPayloadReadOnly(collName);
+  if (previous && previous.localIndexOwnership === undefined) return {};
+  const priorOwnership = parseLocalIndexOwnership(previous?.localIndexOwnership);
+  if (previous && !priorOwnership) return { localIndexOwnership: previous.localIndexOwnership };
+  const family = interpretationsOf(collName).find((candidate) => candidate.kind === "family");
+  if (!family) throw new Error(`Cannot record local ownership for an unknown resource family: ${collName}`);
+  let association = priorOwnership;
+  if (!previous) {
+    for (const resourceFamily of RESOURCE_FAMILIES) {
+      const payload = await loadMetadataPayloadReadOnly(`${QDRANT_COLLECTION_PREFIX}${resourceFamily}${family.identity}`);
+      const recorded = parseLocalIndexOwnership(payload?.localIndexOwnership);
+      if (recorded) { association = recorded; break; }
+    }
+    if (!association) {
+      const resources = (await getClient().getCollections()).collections.filter(({ name }) => interpretationsOf(name).some((candidate) => candidate.identity === family.identity));
+      if (resources.some(({ name }) => !locallyCreatedCollections.has(name))) {
+        logger.warn("Automatic cleanup ownership refused", { collName, reason: "pre-existing resources have no local ownership proof" });
+        return { localIndexOwnership: { refusal: "pre-existing resources have no local ownership proof" } };
+      }
+    }
+  }
+  try {
+    const captured = await captureLocalIndexOwnership(projectPath, family.identity);
+    // A path-keyed worktree can switch branches without changing ownership. Keep its original ref for provenance.
+    const ownership = association && !association.branchAware && !captured.branchAware
+      ? { ...captured, branchRef: association.branchRef }
+      : captured;
+    if (association && JSON.stringify(association) !== JSON.stringify(ownership)) throw new Error("the original local ownership/branch association changed");
+    return { localIndexOwnership: ownership };
+  } catch (error) {
+    const refusal = error instanceof Error ? error.message : String(error);
+    logger.warn("Automatic cleanup ownership refused", { collName, reason: refusal });
+    return { localIndexOwnership: { refusal } };
+  }
+}
+
 /** Indexing status persisted in Qdrant metadata */
 export type IndexingStatus = "in-progress" | "completed";
 
@@ -1471,6 +1546,7 @@ export async function saveProjectMetadata(
   await ensureMetadataCollection();
   const qdrant = getClient();
   const id = metadataPointId(collName);
+  const ownership = await localOwnershipPayload(collName, projectPath);
 
   const hashObj: Record<string, string> = {};
   for (const [k, v] of fileHashes) {
@@ -1491,10 +1567,12 @@ export async function saveProjectMetadata(
           fileHashes: JSON.stringify(hashObj),
           indexingStatus,
           effectiveIndexProfile: JSON.stringify(effectiveProfile),
+          ...ownership,
         },
       },
     ],
   });
+  locallyCreatedCollections.delete(collName);
 
   logger.info("Saved project metadata", { collName, projectPath, filesTotal, filesIndexed, indexingStatus });
 }
@@ -1625,6 +1703,7 @@ export async function saveGraphData(
   await ensureMetadataCollection();
   const qdrant = getClient();
   const id = metadataPointId(graphCollName);
+  const ownership = await localOwnershipPayload(graphCollName, projectPath);
 
   // Total import specifiers captured across all files, resolved or not. Stored
   // alongside edgeCount so status can report the share that resolved without
@@ -1666,6 +1745,7 @@ export async function saveGraphData(
           // reads back as "no record", which costs one rebuild instead.
           graphInputs: JSON.stringify(graphInputs ?? null),
           graphData: JSON.stringify(graph),
+          ...ownership,
         },
       },
     ],
@@ -1802,6 +1882,7 @@ export async function saveContextMetadata(
   await ensureMetadataCollection();
   const qdrant = getClient();
   const id = metadataPointId(contextCollName);
+  const ownership = await localOwnershipPayload(contextCollName, projectPath);
 
   await qdrant.upsert(METADATA_COLLECTION, {
     points: [
@@ -1815,10 +1896,12 @@ export async function saveContextMetadata(
           artifactCount: artifacts.length,
           artifacts: JSON.stringify(artifacts),
           effectiveIndexProfile: JSON.stringify(effectiveProfile),
+          ...ownership,
         },
       },
     ],
   });
+  locallyCreatedCollections.delete(contextCollName);
 
   logger.info("Saved context artifact metadata", { contextCollName, projectPath, artifactCount: artifacts.length });
 }
