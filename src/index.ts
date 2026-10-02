@@ -6,6 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { EXTENSION_LANGUAGE_MAP_INVALID, getWatcherMode, SOCRATICODE_VERSION } from "./constants.js";
+import { startAutomaticCleanup } from "./services/auto-cleanup.js";
 import { logger, setMcpLogSender } from "./services/logger.js";
 import { autoResumeIndexedProjects, gracefulShutdown } from "./services/startup.js";
 import { handleContextTool } from "./tools/context-tools.js";
@@ -480,6 +481,7 @@ async function main() {
   // Auto-resume watchers and incremental updates for already-indexed projects
   // Fire-and-forget — runs in background, non-blocking, non-fatal
   autoResumeIndexedProjects();
+  startAutomaticCleanup();
 
   // ── Process-level error handlers ─────────────────────────────────────
 

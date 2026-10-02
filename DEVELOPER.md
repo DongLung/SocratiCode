@@ -841,6 +841,14 @@ Google Generative AI embedding provider. Requires `GOOGLE_API_KEY`.
 
 `autoResumeIndexedProjects()` checks `SOCRATICODE_AUTO_RESUME=off` before Docker, Qdrant, explicit project lists, or any persisted-index access. Otherwise it preserves the existing current-project, explicit-list, and `all` modes. Watcher starts from startup pass through `startWatchingAutomatically`, so `manual` and `off` suppress the watcher without suppressing the catch-up update; combine watcher `off` with auto-resume `off` for a fully deliberate code-index snapshot.
 
+### local-index-ownership.ts and auto-cleanup.ts
+
+`SOCRATICODE_AUTO_CLEANUP=local` is the explicit host-exclusive declaration; absent/off preserves default behavior without an ownership file or sweep. Ownership is recorded only for newly created local resources or additional resources of an already proven identity, never retrofitted onto legacy metadata/orphan resources. Versioned metadata includes the local UUID, original path-derived identity, exact unsanitized branch ref, repository/common Git directory, checkout-specific Git directory and filesystem directory identities. Config, Git or filesystem uncertainty produces a report-only refusal.
+
+`assertLocalIndexRetired()` requires exact ref deletion without a registered checkout using it, or removed Git worktree registration plus removal of its original administration and source directories. A moved worktree retains its administration directory and is refused. Original directory identities and accessible parent filesystems distinguish retirement from unavailable/replaced paths. Sanitized branch-name collisions, pinned IDs, shared/external stores and foreign ownership are refused.
+
+`startAutomaticCleanup()` runs one sweep at startup and every 60 seconds without provisioning Qdrant or overlapping sweeps. `reclaimProjectIdentity()` is shared with manual prune, preserving its exact inventory token, activity checks, all writer locks, reclamation barrier, cache invalidation and post-deletion verification. Automatic cleanup revalidates retirement under the barrier and before each deletion, and retains metadata until collections are verified absent. `stopAutomaticCleanup()` withdraws authorization and drains the active sweep before shutdown releases locks. Real-Git unit tests cover Windows/Ubuntu/macOS-sensitive path handling; the Qdrant integration suite also exercises a second writer process and the shipped MCP entry point across restarts.
+
 ### watcher.ts
 
 | Function | Signature | Description |

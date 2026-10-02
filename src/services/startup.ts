@@ -12,6 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { collectionName, projectIdFromPath } from "../config.js";
 import { getWatcherMode, QDRANT_COLLECTION_PREFIX, QDRANT_MODE } from "../constants.js";
+import { stopAutomaticCleanup } from "./auto-cleanup.js";
 import { isGraphBuildInProgress } from "./code-graph.js";
 import { isDockerAvailable, isQdrantRunning } from "./docker.js";
 import { resumeGitRefresh, stopAllGitRefreshes } from "./git-refresh.js";
@@ -380,6 +381,7 @@ export async function gracefulShutdown(signal: string, closeServer?: () => Promi
   logger.info(`Received ${signal}, shutting down gracefully...`);
 
   stopAllGitRefreshes();
+  await stopAutomaticCleanup();
 
   // Signal all in-flight indexing in this process to stop at the next batch boundary
   for (const project of getIndexingInProgressProjects()) {

@@ -171,6 +171,70 @@ async function findPruneEntry(identity: string): Promise<ProjectReclamationEntry
   return (await getProjectReclamationInventory()).entries.find((candidate) => candidate.identity === identity);
 }
 
+/** Reuse exact-identity prune barriers and verification, with optional automatic-retirement authorization. */
+export async function reclaimProjectIdentity(
+  identity: string,
+  confirmationToken: string,
+  validateRetirement?: (entry: ProjectReclamationEntry) => Promise<string | null>,
+): Promise<string> {
+  const preview = await findPruneEntry(identity);
+  if (!preview) return `No resources remain for identity ${identity}. Nothing to delete.`;
+  const previewRefusal = pruneRefusal(preview, identity, confirmationToken);
+  if (previewRefusal) return previewRefusal;
+  let activity: string | null;
+  try {
+    activity = await reclamationActivity(identity, preview.projectPath, true);
+  } catch (err) {
+    return `Refusing to delete ${identity}: ${err instanceof Error ? err.message : String(err)}`;
+  }
+  if (activity) return `Refusing to delete ${identity}: ${activity}.`;
+  const barrier = await acquireReclamationBarrier(identity);
+  if (!barrier) return `Refusing to delete ${identity}: a writer holds one of its locks, or the reclamation barrier could not be taken.`;
+  try {
+    const entry = await findPruneEntry(identity);
+    if (!entry) return `No resources remain for identity ${identity}. Nothing to delete.`;
+    const refusal = pruneRefusal(entry, identity, confirmationToken);
+    if (refusal) return refusal;
+    const lateActivity = await reclamationActivity(identity, entry.projectPath, false);
+    if (lateActivity) return `Refusing to delete ${identity}: ${lateActivity}.`;
+    if (barrier.isCompromised()) return `Refusing to delete ${identity}: its reclamation barrier was lost to another process.`;
+    let retirementRefusal = validateRetirement ? await validateRetirement(entry) : null;
+    if (retirementRefusal) return `Refusing to delete ${identity}: ${retirementRefusal}.`;
+    const mayContinue = validateRetirement ? async () => {
+      retirementRefusal = await validateRetirement(entry);
+      return retirementRefusal === null && !barrier.isCompromised();
+    } : () => !barrier.isCompromised();
+    const outcomes = validateRetirement
+      ? await removeProjectReclamationEntry(entry, mayContinue, true)
+      : await removeProjectReclamationEntry(entry, mayContinue);
+    const lostBarrier = barrier.isCompromised();
+    invalidateGraphCacheForIdentity(identity);
+    if (entry.projectPath) invalidateGraphCache(entry.projectPath);
+    invalidateProjectHashesForIdentity(identity);
+    dropSymbolGraphCache(identity);
+    resetSymbolGraphCollectionCache();
+    const remaining = await findPruneEntry(identity);
+    const leftover = remaining ? [
+      ...remaining.resourceCollections.map((resource) => `collection ${resource}`),
+      ...remaining.metadataRecords.map((record) => `metadata ${record.collectionName} [point ${record.pointId}]`),
+    ] : [];
+    const lines = outcomes.map((outcome) => `  ${outcome.outcome}: ${outcome.kind} ${outcome.resource}${outcome.error ? ` (${outcome.error})` : ""}`);
+    if (lostBarrier || retirementRefusal || outcomes.some((outcome) => outcome.outcome !== "deleted") || leftover.length > 0) {
+      return [
+        `Cleanup for ${identity} is incomplete.`,
+        ...(lostBarrier ? ["The reclamation barrier was lost during cleanup; deletion stopped at the first write after the loss."] : []),
+        ...(retirementRefusal ? [`Automatic cleanup stopped: ${retirementRefusal}.`] : []),
+        ...lines,
+        ...(leftover.length > 0 ? ["Still stored after deletion:", ...leftover.map((item) => `  ${item}`)] : []),
+        "Inspect the inventory before retrying; a repeated apply with a fresh token is safe.",
+      ].join("\n");
+    }
+    return [`Removed all inventoried resources for identity: ${identity}`, ...lines].join("\n");
+  } finally {
+    await barrier.release();
+  }
+}
+
 export async function handleIndexTool(
   name: string,
   args: Record<string, unknown>,
@@ -429,62 +493,7 @@ export async function handleIndexTool(
         ].join("\n");
       }
 
-      const preview = await findPruneEntry(identity);
-      if (!preview) return `No resources remain for identity ${identity}. Nothing to delete.`;
-      const previewRefusal = pruneRefusal(preview, identity, confirmationToken);
-      if (previewRefusal) return previewRefusal;
-
-      let activity: string | null;
-      try {
-        activity = await reclamationActivity(identity, preview.projectPath, true);
-      } catch (err) {
-        return `Refusing to delete ${identity}: ${err instanceof Error ? err.message : String(err)}`;
-      }
-      if (activity) return `Refusing to delete ${identity}: ${activity}.`;
-
-      const barrier = await acquireReclamationBarrier(identity);
-      if (!barrier) return `Refusing to delete ${identity}: a writer holds one of its locks, or the reclamation barrier could not be taken.`;
-
-      try {
-        // Everything is judged again under the barrier: a writer that started
-        // after the checks above, or a record that changed, is caught here.
-        const entry = await findPruneEntry(identity);
-        if (!entry) return `No resources remain for identity ${identity}. Nothing to delete.`;
-        const refusal = pruneRefusal(entry, identity, confirmationToken);
-        if (refusal) return refusal;
-        const lateActivity = await reclamationActivity(identity, entry.projectPath, false);
-        if (lateActivity) return `Refusing to delete ${identity}: ${lateActivity}.`;
-        if (barrier.isCompromised()) return `Refusing to delete ${identity}: its reclamation barrier was lost to another process.`;
-
-        const outcomes = await removeProjectReclamationEntry(entry, () => !barrier.isCompromised());
-        const lostBarrier = barrier.isCompromised();
-        invalidateGraphCacheForIdentity(identity);
-        if (entry.projectPath) invalidateGraphCache(entry.projectPath);
-        invalidateProjectHashesForIdentity(identity);
-        dropSymbolGraphCache(identity);
-        resetSymbolGraphCollectionCache();
-
-        const remaining = await findPruneEntry(identity);
-        const leftover = remaining
-          ? [
-              ...remaining.resourceCollections.map((resource) => `collection ${resource}`),
-              ...remaining.metadataRecords.map((record) => `metadata ${record.collectionName} [point ${record.pointId}]`),
-            ]
-          : [];
-        const lines = outcomes.map((outcome) => `  ${outcome.outcome}: ${outcome.kind} ${outcome.resource}${outcome.error ? ` (${outcome.error})` : ""}`);
-        if (lostBarrier || outcomes.some((outcome) => outcome.outcome !== "deleted") || leftover.length > 0) {
-          return [
-            `Cleanup for ${identity} is incomplete.`,
-            ...(lostBarrier ? ["The reclamation barrier was lost during cleanup; deletion stopped at the first write after the loss."] : []),
-            ...lines,
-            ...(leftover.length > 0 ? ["Still stored after deletion:", ...leftover.map((item) => `  ${item}`)] : []),
-            "Inspect the inventory before retrying; a repeated apply with a fresh token is safe.",
-          ].join("\n");
-        }
-        return [`Removed all inventoried resources for identity: ${identity}`, ...lines].join("\n");
-      } finally {
-        await barrier.release();
-      }
+      return reclaimProjectIdentity(identity, confirmationToken);
     }
 
     case "codebase_stop": {
