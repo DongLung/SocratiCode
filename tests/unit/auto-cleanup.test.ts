@@ -28,7 +28,7 @@ afterEach(async () => { await stopAutomaticCleanup(); vi.useRealTimers(); vi.uns
 describe("automatic cleanup lifecycle and explicit local gate", () => {
   it("does not read inventory or start a timer by default", async () => {
     vi.stubEnv("SOCRATICODE_AUTO_CLEANUP", undefined);
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     startAutomaticCleanup();
     await vi.advanceTimersByTimeAsync(180_000);
     expect(await runAutomaticCleanup()).toEqual([]);
@@ -48,7 +48,8 @@ describe("automatic cleanup lifecycle and explicit local gate", () => {
   });
 
   it("runs immediately and periodically without overlapping; stopping drains pending work", async () => {
-    vi.useFakeTimers();
+    // Advance only cleanup intervals, not the runner's timeout/elapsed-time clock.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     let complete!: (value: typeof empty) => void;
     mocks.inventory.mockReturnValueOnce(new Promise<typeof empty>((resolve) => { complete = resolve; }));
     startAutomaticCleanup();
