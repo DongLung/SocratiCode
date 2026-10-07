@@ -37,6 +37,11 @@ function findJvmSourceSetBoundary(parts: string[]): number {
   return kmpIndex;
 }
 
+// Keep the existing Map<string, string> view while retaining KMP alternatives.
+class JvmSuffixMap extends Map<string, string> {
+  readonly sourceSets = new Map<string, Map<string, string>>();
+}
+
 /**
  * Build a suffix lookup map for JVM (Java/Kotlin/Scala) files in multi-module projects.
  *
@@ -51,13 +56,14 @@ function findJvmSourceSetBoundary(parts: string[]): number {
  *
  * Call this once per graph build and pass the result to resolveImport.
  *
- * Classic src/main sources take precedence over KMP source sets. Within each
- * group, the first file iterated wins; pass a lexicographically ordered set
- * (as buildCodeGraph does) for a stable pick. Keys are normalized, but values
- * retain the input fileSet paths.
+ * Classic src/main sources take precedence over KMP source sets. The map view
+ * retains the first file within each group; resolveImport can also select a
+ * retained KMP candidate matching the importing source set. Pass a
+ * lexicographically ordered set (as buildCodeGraph does) for stable picks.
+ * Keys are normalized, but values retain the input fileSet paths.
  */
 export function buildJvmSuffixMap(fileSet: Set<string>): Map<string, string> {
-  const map = new Map<string, string>();
+  const map = new JvmSuffixMap();
   const jvmExts = new Set([".java", ".kt", ".kts", ".scala"]);
   const classicClassPaths = new Set<string>();
 
@@ -73,6 +79,15 @@ export function buildJvmSuffixMap(fileSet: Set<string>): Map<string, string> {
       // classPath = everything after src/<sourceSet>/<lang>, e.g. com/example/Foo.java
       const classPath = parts.slice(idx + 3).join("/");
       const classic = parts[idx + 1] === "main";
+      if (!classic) {
+        const sourceSet = parts[idx + 1];
+        let candidates = map.sourceSets.get(sourceSet);
+        if (!candidates) {
+          candidates = new Map<string, string>();
+          map.sourceSets.set(sourceSet, candidates);
+        }
+        if (!candidates.has(classPath)) candidates.set(classPath, f);
+      }
       // A KMP file cannot replace an existing classic winner.
       if (!map.has(classPath) || (classic && !classicClassPaths.has(classPath))) {
         map.set(classPath, f);
@@ -2856,7 +2871,25 @@ export function resolveImport(
         }
       }
 
-      // 4. Try direct KMP roots before the remaining multi-module KMP lookup.
+      // 4. Prefer the importer's KMP source set, without changing classic picks.
+      const sourceParts = path.relative(projectPath, sourceFile).split(/[\\/]/);
+      const sourceIdx = findJvmSourceSetBoundary(sourceParts);
+      if (sourceIdx !== -1 && sourceParts[sourceIdx + 1] !== "main") {
+        const sourceRoot = sourceParts.slice(0, sourceIdx + 3).join("/");
+        const inSourceSet = resolveRelativePath(
+          path.join(sourceRoot, filePath), projectPath, projectPath, fileSet, exts,
+        );
+        if (inSourceSet) return inSourceSet;
+        if (jvmSuffixMap instanceof JvmSuffixMap) {
+          const candidates = jvmSuffixMap.sourceSets.get(sourceParts[sourceIdx + 1]);
+          for (const ext of exts) {
+            const found = candidates?.get(filePath + ext);
+            if (found) return found;
+          }
+        }
+      }
+
+      // 5. Keep existing cross-source-set probes when no matching target exists.
       const kmpSrcDirs = [
         `src/commonMain/${language}`,
         `src/androidMain/${language}`,
