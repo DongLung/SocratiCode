@@ -13,6 +13,31 @@ import { createIgnoreFilter, shouldIgnore } from "./ignore.js";
 // ── Module resolution ────────────────────────────────────────────────────
 
 /**
+ * Whether `seg` names a JVM source-set directory in a `src/<sourceSet>/<lang>`
+ * layout. `main` covers the classic Maven/Gradle convention; the `*Main` forms
+ * cover Kotlin Multiplatform and Gradle source sets (`commonMain`, `androidMain`,
+ * `iosMain`, `jvmMain`, `nativeMain`, `desktopMain`, `appleMain`, `iosArm64Main`, ...).
+ */
+export function isJvmSourceSetDir(seg: string): boolean {
+  if (seg === "main") return true;
+  return /^(common|android|ios|jvm|native|desktop|macos|linux|mingw|watchos|tvos|wasm|js|uikit|apple)[A-Za-z0-9]*Main$/.test(
+    seg,
+  );
+}
+
+// Preserve the original src/main boundary even beneath a KMP-shaped directory.
+function findJvmSourceSetBoundary(parts: string[]): number {
+  const jvmLangs = new Set(["java", "kotlin", "scala"]);
+  let kmpIndex = -1;
+  for (let i = 0; i < parts.length - 2; i++) {
+    if (parts[i] !== "src" || !jvmLangs.has(parts[i + 2])) continue;
+    if (parts[i + 1] === "main") return i;
+    if (kmpIndex === -1 && isJvmSourceSetDir(parts[i + 1])) kmpIndex = i;
+  }
+  return kmpIndex;
+}
+
+/**
  * Build a suffix lookup map for JVM (Java/Kotlin/Scala) files in multi-module projects.
  *
  * For a Maven/Gradle multi-module layout such as:
@@ -26,28 +51,15 @@ import { createIgnoreFilter, shouldIgnore } from "./ignore.js";
  *
  * Call this once per graph build and pass the result to resolveImport.
  *
- * When two modules provide the same class path, the first one iterated wins, so
- * `fileSet`'s order decides between them — pass a lexicographically ordered set
- * (as `buildCodeGraph` does) for a stable pick. Either file resolves the import;
- * ordering only settles which, so an unordered caller gets a valid map with an
- * arbitrary winner.
+ * Classic src/main sources take precedence over KMP source sets. Within each
+ * group, the first file iterated wins; pass a lexicographically ordered set
+ * (as buildCodeGraph does) for a stable pick. Keys are normalized, but values
+ * retain the input fileSet paths.
  */
-/**
- * Whether `seg` names a JVM source-set directory in a `src/<sourceSet>/<lang>`
- * layout. `main` covers the classic Maven/Gradle convention; the `*Main` forms
- * cover Kotlin Multiplatform and Gradle source sets (`commonMain`, `androidMain`,
- * `iosMain`, `jvmMain`, `nativeMain`, `desktopMain`, `macosMain`, `wasmJsMain`, ...).
- */
-export function isJvmSourceSetDir(seg: string): boolean {
-  if (seg === "main") return true;
-  return /^(common|android|ios|jvm|native|desktop|macos|linux|mingw|watchos|tvos|wasm|js|uikit)[A-Za-z]*Main$/.test(
-    seg,
-  );
-}
-
 export function buildJvmSuffixMap(fileSet: Set<string>): Map<string, string> {
   const map = new Map<string, string>();
   const jvmExts = new Set([".java", ".kt", ".kts", ".scala"]);
+  const classicClassPaths = new Set<string>();
 
   for (const f of fileSet) {
     if (!jvmExts.has(path.extname(f))) continue;
@@ -55,26 +67,17 @@ export function buildJvmSuffixMap(fileSet: Set<string>): Map<string, string> {
     // Split on either separator so the logic works on Windows and POSIX.
     const parts = f.split(/[\\/]/);
 
-    // Find the first occurrence of src/<sourceSet>/<lang> boundary.
-    // Classic JVM: src/main/<lang>. Kotlin Multiplatform / Gradle source sets:
-    // src/commonMain/<lang>, src/androidMain/<lang>, src/iosMain/<lang>,
-    // src/jvmMain/<lang>, src/nativeMain/<lang>, src/desktopMain/<lang>,
-    // src/macosMain/<lang>, and the other KMP target source sets.
-    const jvmLangs = new Set(["java", "kotlin", "scala"]);
-    const idx = parts.findIndex(
-      (p, i) =>
-        p === "src" &&
-        isJvmSourceSetDir(parts[i + 1]) &&
-        jvmLangs.has(parts[i + 2]),
-    );
+    const idx = findJvmSourceSetBoundary(parts);
 
     if (idx !== -1) {
       // classPath = everything after src/<sourceSet>/<lang>, e.g. com/example/Foo.java
       const classPath = parts.slice(idx + 3).join("/");
-      // Only register the first match to avoid ambiguity for duplicate class names.
-      if (!map.has(classPath)) {
+      const classic = parts[idx + 1] === "main";
+      // A KMP file cannot replace an existing classic winner.
+      if (!map.has(classPath) || (classic && !classicClassPaths.has(classPath))) {
         map.set(classPath, f);
       }
+      if (classic) classicClassPaths.add(classPath);
     }
   }
 
@@ -2829,18 +2832,9 @@ export function resolveImport(
 
       // 2. Try common source directories (Maven/Gradle single-module convention).
       const jvmSrcDirs = [
-        `src/main/${language}`,  // src/main/java, src/main/kotlin, src/main/scala
+        `src/main/${language}`, // src/main/java, src/main/kotlin, src/main/scala
         "src/main",
         "src",
-        // Kotlin Multiplatform / Gradle source sets. Without these, every KMP
-        // project resolves zero JVM imports: `src/commonMain/kotlin/...` never
-        // matches `src/main/<lang>` and the suffix map skips the file entirely.
-        `src/commonMain/${language}`,
-        `src/androidMain/${language}`,
-        `src/iosMain/${language}`,
-        `src/jvmMain/${language}`,
-        `src/nativeMain/${language}`,
-        `src/desktopMain/${language}`,
       ];
       for (const dir of jvmSrcDirs) {
         const inSrc = resolveRelativePath(
@@ -2849,18 +2843,37 @@ export function resolveImport(
         if (inSrc) return inSrc;
       }
 
-      // 3. Fallback: suffix-map lookup for multi-module Maven/Gradle projects.
-      //    e.g. module-a/sub/src/main/java/com/example/Foo.java
-      //    The map is built once per graph build (O(n)) and looked up in O(1).
+      // 3. Preserve classic multi-module resolution before adding KMP targets.
+      let kmpSuffix: string | null = null;
       if (jvmSuffixMap) {
         for (const ext of exts) {
-          const classPath = filePath + ext;
-          const found = jvmSuffixMap.get(classPath);
-          if (found) return found;
+          const found = jvmSuffixMap.get(filePath + ext);
+          if (!found) continue;
+          const parts = found.split(/[\\/]/);
+          const idx = findJvmSourceSetBoundary(parts);
+          if (idx === -1 || parts[idx + 1] === "main") return found;
+          if (kmpSuffix === null) kmpSuffix = found;
         }
       }
 
-      return null;
+      // 4. Try direct KMP roots before the remaining multi-module KMP lookup.
+      const kmpSrcDirs = [
+        `src/commonMain/${language}`,
+        `src/androidMain/${language}`,
+        `src/iosMain/${language}`,
+        `src/jvmMain/${language}`,
+        `src/nativeMain/${language}`,
+        `src/desktopMain/${language}`,
+        `src/appleMain/${language}`,
+      ];
+      for (const dir of kmpSrcDirs) {
+        const inSrc = resolveRelativePath(
+          path.join(dir, filePath), projectPath, projectPath, fileSet, exts,
+        );
+        if (inSrc) return inSrc;
+      }
+
+      return kmpSuffix;
     }
 
     case "c":
