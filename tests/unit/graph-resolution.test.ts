@@ -4849,9 +4849,9 @@ describe("graph-resolution", () => {
 
       const map = buildJvmSuffixMap(project.fileSet);
 
-      expect(map.has(`com${path.sep}example${path.sep}Foo.java`)).toBe(true);
-      expect(map.has(`com${path.sep}example${path.sep}Bar.kt`)).toBe(true);
-      expect(map.has(`com${path.sep}example${path.sep}Baz.scala`)).toBe(true);
+      expect(map.has("com/example/Foo.java")).toBe(true);
+      expect(map.has("com/example/Bar.kt")).toBe(true);
+      expect(map.has("com/example/Baz.scala")).toBe(true);
     });
 
     it("returns empty map when project has no JVM files", () => {
@@ -4869,8 +4869,8 @@ describe("graph-resolution", () => {
       });
 
       const map = buildJvmSuffixMap(project.fileSet);
-      expect(map.has(`com${path.sep}example${path.sep}Foo.java`)).toBe(true);
-      expect(map.has(`com${path.sep}example${path.sep}FooTest.java`)).toBe(false);
+      expect(map.has("com/example/Foo.java")).toBe(true);
+      expect(map.has("com/example/FooTest.java")).toBe(false);
     });
 
     it("resolves a Java import in a multi-module Maven project via suffix map", () => {
@@ -4958,6 +4958,258 @@ describe("graph-resolution", () => {
       );
 
       expect(result).toBeNull();
+    });
+
+    // ── Kotlin Multiplatform / Gradle source sets ────────────────────────
+
+    it("builds a suffix map for Kotlin Multiplatform source sets", () => {
+      project = createTempProject({
+        [`core${path.sep}shared${path.sep}src${path.sep}commonMain${path.sep}kotlin${path.sep}com${path.sep}example${path.sep}Shared.kt`]: "",
+        [`composeApp${path.sep}src${path.sep}iosMain${path.sep}kotlin${path.sep}com${path.sep}example${path.sep}Ios.kt`]: "",
+        [`core${path.sep}data${path.sep}src${path.sep}androidMain${path.sep}kotlin${path.sep}com${path.sep}example${path.sep}Android.kt`]: "",
+        [`core${path.sep}logic${path.sep}src${path.sep}jvmMain${path.sep}kotlin${path.sep}com${path.sep}example${path.sep}Desktop.kt`]: "",
+      });
+
+      const map = buildJvmSuffixMap(project.fileSet);
+
+      expect(map.has("com/example/Shared.kt")).toBe(true);
+      expect(map.has("com/example/Ios.kt")).toBe(true);
+      expect(map.has("com/example/Android.kt")).toBe(true);
+      expect(map.has("com/example/Desktop.kt")).toBe(true);
+    });
+
+    it.each([
+      "appleMain", "iosArm64Main", "iosSimulatorArm64Main", "linuxX64Main",
+      "macosArm64Main", "mingwX64Main", "watchosArm64Main",
+    ])("registers standard KMP source set %s", (sourceSet) => {
+      const sourcePath = `shared/src/${sourceSet}/kotlin/com/example/Util.kt`;
+      const map = buildJvmSuffixMap(new Set([sourcePath]));
+
+      expect(map.get("com/example/Util.kt")).toBe(sourcePath);
+    });
+
+    it.each(["/", "\\"])("preserves classic duplicate selection with %s separators", (sep) => {
+      const kmpPath = "android/src/androidMain/kotlin/com/example/Util.kt".replaceAll("/", sep);
+      const firstClassicPath = "module-a/src/main/kotlin/com/example/Util.kt".replaceAll("/", sep);
+      const secondClassicPath = "module-b/src/main/kotlin/com/example/Util.kt".replaceAll("/", sep);
+      const map = buildJvmSuffixMap(new Set([kmpPath, firstClassicPath, secondClassicPath]));
+
+      // Adding KMP files must not change the winner in an existing classic project.
+      expect(map.get("com/example/Util.kt")).toBe(firstClassicPath);
+    });
+
+    it("normalizes backslash source paths only in suffix-map keys", () => {
+      const sharedPath = "shared\\src\\commonMain\\kotlin\\com\\example\\Util.kt";
+      const map = buildJvmSuffixMap(new Set([sharedPath]));
+
+      expect([...map]).toEqual([["com/example/Util.kt", sharedPath]]);
+    });
+
+    it("preserves a classic boundary nested beneath a KMP-shaped directory", () => {
+      const classicPath = "module/src/commonMain/kotlin/nested/src/main/kotlin/com/example/Util.kt";
+      const map = buildJvmSuffixMap(new Set([classicPath]));
+
+      expect([...map]).toEqual([["com/example/Util.kt", classicPath]]);
+    });
+
+    it("ignores KMP test source sets", () => {
+      const map = buildJvmSuffixMap(new Set([
+        "shared/src/commonTest/kotlin/com/example/CommonTest.kt",
+        "app/src/jvmTest/kotlin/com/example/JvmTest.kt",
+        "shared/src/appleTest/kotlin/com/example/AppleTest.kt",
+        "app/src/iosArm64Test/kotlin/com/example/IosTest.kt",
+      ]));
+
+      expect(map.size).toBe(0);
+    });
+
+    it.each([
+      ["", false], ["", true], ["shared/", false], ["shared/", true],
+    ])("prefers the importing KMP source set under %s with a map: %s", (prefix, useMap) => {
+      const androidPath = `${prefix}src/androidMain/kotlin/com/example/Util.kt`;
+      const iosPath = `${prefix}src/iosMain/kotlin/com/example/Util.kt`;
+      const callerPath = `${prefix}src/iosMain/kotlin/com/example/App.kt`;
+      project = createTempProject({ [androidPath]: "", [iosPath]: "", [callerPath]: "" });
+
+      const result = resolveImport(
+        "com.example.Util", path.join(project.root, callerPath), project.root, project.fileSet,
+        "kotlin", undefined, useMap ? buildJvmSuffixMap(project.fileSet) : undefined,
+      );
+
+      expect(result).toBe(iosPath);
+    });
+
+    it.each(["/", "\\"])("retains original KMP candidate paths with %s separators", (sep) => {
+      const androidPath = "a-android/src/androidMain/kotlin/com/example/Util.kt".replaceAll("/", sep);
+      const iosPath = "b-ios/src/iosMain/kotlin/com/example/Util.kt".replaceAll("/", sep);
+      const callerPath = "app/src/iosMain/kotlin/com/example/App.kt".replaceAll("/", sep);
+      const fileSet = new Set([androidPath, iosPath, callerPath]);
+
+      const result = resolveImport(
+        "com.example.Util", path.join(process.cwd(), callerPath), process.cwd(), fileSet,
+        "kotlin", undefined, buildJvmSuffixMap(fileSet),
+      );
+
+      expect(result).toBe(iosPath);
+    });
+
+    it.each(["iosMain", "iosArm64Main"])("retains the %s candidate across modules", (sourceSet) => {
+      const androidPath = "a-android/src/androidMain/kotlin/com/example/Util.kt";
+      const iosPath = `b-ios/src/${sourceSet}/kotlin/com/example/Util.kt`;
+      const callerPath = `app/src/${sourceSet}/kotlin/com/example/App.kt`;
+      project = createTempProject({ [androidPath]: "", [iosPath]: "", [callerPath]: "" });
+      const map = buildJvmSuffixMap(project.fileSet);
+
+      // Existing callers still receive one first-iterated path per class key.
+      expect([...map]).toEqual([
+        ["com/example/Util.kt", androidPath], ["com/example/App.kt", callerPath],
+      ]);
+      const result = resolveImport(
+        "com.example.Util", path.join(project.root, callerPath), project.root, project.fileSet,
+        "kotlin", undefined, map,
+      );
+
+      expect(result).toBe(iosPath);
+    });
+
+    it("prefers the importing module when KMP source-set names match", () => {
+      const otherPath = "a-module/src/iosMain/kotlin/com/example/Util.kt";
+      const localPath = "b-module/src/iosMain/kotlin/com/example/Util.kt";
+      const callerPath = "b-module/src/iosMain/kotlin/com/example/App.kt";
+      project = createTempProject({ [otherPath]: "", [localPath]: "", [callerPath]: "" });
+
+      const result = resolveImport(
+        "com.example.Util", path.join(project.root, callerPath), project.root, project.fileSet,
+        "kotlin", undefined, buildJvmSuffixMap(project.fileSet),
+      );
+
+      expect(result).toBe(localPath);
+    });
+
+    it.each([".kt", ".kts"])("keeps classic %s precedence for a KMP caller", (ext) => {
+      const androidPath = "android/src/androidMain/kotlin/com/example/Util.kt";
+      const iosPath = "ios/src/iosMain/kotlin/com/example/Util.kt";
+      const classicPath = `legacy/src/main/kotlin/com/example/Util${ext}`;
+      const callerPath = "ios/src/iosMain/kotlin/com/example/App.kt";
+      project = createTempProject({
+        [androidPath]: "", [iosPath]: "", [classicPath]: "", [callerPath]: "",
+      });
+
+      const result = resolveImport(
+        "com.example.Util", path.join(project.root, callerPath), project.root, project.fileSet,
+        "kotlin", undefined, buildJvmSuffixMap(project.fileSet),
+      );
+
+      expect(result).toBe(classicPath);
+    });
+
+    it("continues accepting a plain JVM suffix map", () => {
+      const sharedPath = "shared/src/commonMain/kotlin/com/example/Util.kt";
+      const callerPath = "app/src/iosMain/kotlin/com/example/App.kt";
+      project = createTempProject({ [sharedPath]: "", [callerPath]: "" });
+
+      const result = resolveImport(
+        "com.example.Util", path.join(project.root, callerPath), project.root, project.fileSet,
+        "kotlin", undefined, new Map([["com/example/Util.kt", sharedPath]]),
+      );
+
+      expect(result).toBe(sharedPath);
+    });
+
+    it.each([".kt", ".kts"])("preserves nested classic %s targets before direct KMP roots", (ext) => {
+      const classicPath = `module/src/main/kotlin/com/example/Util${ext}`;
+      const sharedPath = "src/commonMain/kotlin/com/example/Util.kt";
+      const callerPath = "app/src/main/kotlin/com/example/App.kt";
+      project = createTempProject({ [sharedPath]: "", [classicPath]: "", [callerPath]: "" });
+
+      const result = resolveImport(
+        "com.example.Util", path.join(project.root, callerPath), project.root, project.fileSet,
+        "kotlin", undefined, buildJvmSuffixMap(project.fileSet),
+      );
+
+      expect(result).toBe(classicPath);
+    });
+
+    it("preserves direct classic roots before nested KMP targets", () => {
+      const classicPath = "src/main/kotlin/com/example/Util.kt";
+      const sharedPath = "shared/src/commonMain/kotlin/com/example/Util.kt";
+      const callerPath = "app/src/main/kotlin/com/example/App.kt";
+      project = createTempProject({ [sharedPath]: "", [classicPath]: "", [callerPath]: "" });
+
+      const result = resolveImport(
+        "com.example.Util", path.join(project.root, callerPath), project.root, project.fileSet,
+        "kotlin", undefined, buildJvmSuffixMap(project.fileSet),
+      );
+
+      expect(result).toBe(classicPath);
+    });
+
+    it("preserves direct KMP roots before other KMP suffix targets", () => {
+      const directPath = "src/commonMain/kotlin/com/example/Util.kt";
+      const nestedPath = "android/src/androidMain/kotlin/com/example/Util.kt";
+      const callerPath = "src/commonMain/kotlin/com/example/App.kt";
+      project = createTempProject({ [nestedPath]: "", [directPath]: "", [callerPath]: "" });
+
+      const result = resolveImport(
+        "com.example.Util", path.join(project.root, callerPath), project.root, project.fileSet,
+        "kotlin", undefined, buildJvmSuffixMap(project.fileSet),
+      );
+
+      expect(result).toBe(directPath);
+    });
+
+    it("resolves a Kotlin import across KMP source sets via suffix map", () => {
+      const sharedPath =
+        `core${path.sep}shared${path.sep}src${path.sep}commonMain${path.sep}kotlin${path.sep}com${path.sep}example${path.sep}Util.kt`;
+      const iosCallerPath =
+        `composeApp${path.sep}src${path.sep}iosMain${path.sep}kotlin${path.sep}com${path.sep}example${path.sep}App.kt`;
+
+      project = createTempProject({ [sharedPath]: "", [iosCallerPath]: "" });
+
+      const jvmSuffixMap = buildJvmSuffixMap(project.fileSet);
+      const result = resolveImport(
+        "com.example.Util",
+        path.join(project.root, iosCallerPath),
+        project.root,
+        project.fileSet,
+        "kotlin",
+        undefined,
+        jvmSuffixMap,
+      );
+
+      expect(result).toBe(sharedPath);
+    });
+
+    it("resolves a Kotlin import from a single-module KMP layout without a suffix map", () => {
+      const sharedPath = "src/commonMain/kotlin/com/example/Util.kt";
+      const callerPath = "src/commonMain/kotlin/com/example/App.kt";
+
+      project = createTempProject({ [sharedPath]: "", [callerPath]: "" });
+
+      const result = resolveImport(
+        "com.example.Util",
+        path.join(project.root, callerPath),
+        project.root,
+        project.fileSet,
+        "kotlin",
+        undefined,
+        undefined,
+      );
+
+      expect(result).toBe(sharedPath);
+    });
+
+    it("resolves a Kotlin import from the shared Apple source set without a suffix map", () => {
+      const sharedPath = "src/appleMain/kotlin/com/example/Util.kt";
+      const callerPath = "src/iosMain/kotlin/com/example/App.kt";
+      project = createTempProject({ [sharedPath]: "", [callerPath]: "" });
+
+      const result = resolveImport(
+        "com.example.Util", path.join(project.root, callerPath), project.root, project.fileSet,
+        "kotlin", undefined, undefined,
+      );
+
+      expect(result).toBe(sharedPath);
     });
   });
 });
