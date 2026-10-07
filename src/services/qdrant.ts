@@ -59,20 +59,31 @@ async function withRetry<T>(
  * the one part a user can act on, so every symbol-graph failure looked
  * identical. Appends that reason when present, and looks through a `cause`
  * chain so an error already wrapped by {@link wrapQdrantError} still resolves.
+ *
+ * Without a server reason, appends the innermost cause's message and `code`
+ * instead, so a transport failure reads as
+ * `fetch failed: other side closed [UND_ERR_SOCKET]` rather than `fetch failed`.
  */
 export function describeQdrantError(err: unknown): string {
   const base = err instanceof Error ? err.message : String(err);
   // Walk the cause chain (bounded — these are never deep) looking for the
   // client's `data` envelope, which may sit on the error or on its cause.
   let current: unknown = err;
+  let innermost: unknown;
   for (let depth = 0; depth < 5 && current; depth++) {
     const reason = (current as { data?: { status?: { error?: unknown } } })?.data?.status?.error;
     if (typeof reason === "string" && reason.length > 0) {
       return base.includes(reason) ? base : `${base}: ${reason}`;
     }
+    if (current !== err) innermost = current;
     current = (current as { cause?: unknown })?.cause;
   }
-  return base;
+  if (!(innermost instanceof Error)) return base;
+  const { message } = innermost;
+  const code = (innermost as { code?: unknown }).code;
+  const tag = typeof code === "string" ? code : "";
+  const detail = message && tag ? `${message} [${tag}]` : message || tag;
+  return base.includes(detail) ? base : `${base}: ${detail}`;
 }
 
 /**

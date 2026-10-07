@@ -15,6 +15,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
+import type { QdrantClient } from "@qdrant/js-client-rest";
 import {
   symgraphFileCollectionName,
   symgraphIndexCollectionName,
@@ -32,6 +33,57 @@ import type {
 } from "../types.js";
 import { logger } from "./logger.js";
 import { getClient, isAlreadyExistsError } from "./qdrant.js";
+
+/** True when the error's cause chain holds undici's closed-socket error. */
+function isClosedSocketError(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 5 && current; depth++) {
+    if ((current as { code?: unknown }).code === "UND_ERR_SOCKET") return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/**
+ * Run a Qdrant request, and run it once more if it failed on a connection the
+ * server had already closed. Every other failure, and a second failure,
+ * propagate unchanged.
+ */
+async function retryOnClosedSocket<T>(operation: string, request: () => Promise<T>): Promise<T> {
+  try {
+    return await request();
+  } catch (err) {
+    if (!isClosedSocketError(err)) throw err;
+    logger.warn("Symbol-graph Qdrant request hit a connection the server had closed; retrying once", { operation });
+    return request();
+  }
+}
+
+type SymbolStoreClient = Pick<
+  QdrantClient,
+  "getCollections" | "createCollection" | "deleteCollection" | "upsert" | "retrieve" | "delete" | "scroll"
+>;
+
+/**
+ * The Qdrant client every symbol-store request goes through.
+ *
+ * A closed-socket failure can follow a request the server already applied, and
+ * the retry sends it again. A method belongs here only if a repeat leaves the
+ * same end state; a repeated `createCollection` answers "already exists", and
+ * its caller must accept that reply.
+ */
+function storeClient(): SymbolStoreClient {
+  const qdrant = getClient();
+  return {
+    getCollections: (...args) => retryOnClosedSocket("getCollections", () => qdrant.getCollections(...args)),
+    createCollection: (...args) => retryOnClosedSocket("createCollection", () => qdrant.createCollection(...args)),
+    deleteCollection: (...args) => retryOnClosedSocket("deleteCollection", () => qdrant.deleteCollection(...args)),
+    upsert: (...args) => retryOnClosedSocket("upsert", () => qdrant.upsert(...args)),
+    retrieve: (...args) => retryOnClosedSocket("retrieve", () => qdrant.retrieve(...args)),
+    delete: (...args) => retryOnClosedSocket("delete", () => qdrant.delete(...args)),
+    scroll: (...args) => retryOnClosedSocket("scroll", () => qdrant.scroll(...args)),
+  };
+}
 
 // ── Shard key helpers ────────────────────────────────────────────────────
 
@@ -176,7 +228,7 @@ async function upsertWithinBudget(
   points: SymgraphPoint[],
   describe: (index: number) => string,
 ): Promise<void> {
-  const qdrant = getClient();
+  const qdrant = storeClient();
   let batch: SymgraphPoint[] = [];
   let batchBytes = 0;
 
@@ -282,7 +334,7 @@ async function saveShardPoints<V>(
   payloadFor: (entries: Record<string, V>, part: number, parts: number) => Record<string, unknown>,
   generation?: string,
 ): Promise<void> {
-  const qdrant = getClient();
+  const qdrant = storeClient();
 
   const single: SymgraphPoint = {
     id: primaryId,
@@ -381,7 +433,7 @@ async function loadShardPoints<V>(
   entriesOf: (payload: Record<string, unknown> | null | undefined) => Record<string, V> | null,
   logContext: Record<string, unknown>,
 ): Promise<Record<string, V> | null> {
-  const qdrant = getClient();
+  const qdrant = storeClient();
   const primary = await qdrant.retrieve(collName, { ids: [primaryId], with_payload: true });
   if (primary.length === 0) return null;
 
@@ -495,7 +547,7 @@ async function ensureCollection(name: string): Promise<void> {
   if (current) return current;
 
   const attempt = (async () => {
-    const qdrant = getClient();
+    const qdrant = storeClient();
     const collections = await qdrant.getCollections();
     const exists = collections.collections.some((c) => c.name === name);
     if (!exists) {
@@ -546,7 +598,7 @@ export async function saveSymbolGraphMeta(
 ): Promise<void> {
   const collName = symgraphMetaCollectionName(projectId);
   await ensureCollection(collName);
-  const qdrant = getClient();
+  const qdrant = storeClient();
   const point: SymgraphPoint = { id: metaPointId(projectId), vector: [0], payload: { meta } };
   // Counters only, so it cannot realistically overflow — guarded anyway so
   // this file has no unguarded upsert path (#99).
@@ -561,7 +613,7 @@ export async function loadSymbolGraphMeta(
   try {
     const collName = symgraphMetaCollectionName(projectId);
     await ensureCollection(collName);
-    const qdrant = getClient();
+    const qdrant = storeClient();
     const points = await qdrant.retrieve(collName, {
       ids: [metaPointId(projectId)],
       with_payload: true,
@@ -604,7 +656,7 @@ export async function saveFilePayload(
 ): Promise<void> {
   const collName = symgraphFileCollectionName(projectId);
   await ensureCollection(collName);
-  const qdrant = getClient();
+  const qdrant = storeClient();
   const point: SymgraphPoint = {
     id: filePointId(projectId, payload.file, generation),
     vector: [0],
@@ -651,7 +703,7 @@ export async function loadFilePayload(
     const gen = await resolveReadGeneration(projectId, generation);
     const collName = symgraphFileCollectionName(projectId);
     await ensureCollection(collName);
-    const qdrant = getClient();
+    const qdrant = storeClient();
     const points = await qdrant.retrieve(collName, {
       ids: [filePointId(projectId, relativePath, gen)],
       with_payload: true,
@@ -681,7 +733,7 @@ export async function deleteFilePayload(
     const gen = await resolveReadGeneration(projectId, generation);
     const collName = symgraphFileCollectionName(projectId);
     await ensureCollection(collName);
-    const qdrant = getClient();
+    const qdrant = storeClient();
     await qdrant.delete(collName, {
       points: [filePointId(projectId, relativePath, gen)],
     });
@@ -977,7 +1029,7 @@ export function resetGenerationLifecycleState(): void {
 /** Delete all points belonging to a specific generation from file and index collections. */
 export async function deleteGeneration(projectId: string, generation: string): Promise<void> {
   if (!generation) return;
-  const qdrant = getClient();
+  const qdrant = storeClient();
   const collNames = [
     symgraphFileCollectionName(projectId),
     symgraphIndexCollectionName(projectId),
@@ -1003,7 +1055,7 @@ export async function deleteGeneration(projectId: string, generation: string): P
 
 /** Find all distinct generation IDs present in storage for a project. */
 export async function listStoredGenerations(projectId: string): Promise<string[]> {
-  const qdrant = getClient();
+  const qdrant = storeClient();
   const generations = new Set<string>();
   const collNames = [
     symgraphFileCollectionName(projectId),
@@ -1081,7 +1133,7 @@ export async function cleanStaleGenerations(
 
 /** Delete all symbol-graph data for a project (best-effort). */
 export async function deleteSymbolGraphData(projectId: string): Promise<void> {
-  const qdrant = getClient();
+  const qdrant = storeClient();
   const names = [
     symgraphMetaCollectionName(projectId),
     symgraphFileCollectionName(projectId),
