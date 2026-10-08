@@ -314,6 +314,7 @@ server.tool(
     file: z.string().describe("Optional file path to disambiguate the target symbol.").optional(),
     symbolId: z.string().describe("Exact symbol ID (e.g. 'src/foo.ts::validateUser#10') to disambiguate.").optional(),
     depth: z.number().describe("How many hops back to walk (default 3, max 10).").optional(),
+    limit: z.number().int().min(1).describe("Maximum candidates to list when the target symbol is ambiguous. Omit to list all.").optional(),
   },
   async (args) => ({
     content: [{ type: "text", text: await handleGraphTool("codebase_impact", args) }],
@@ -328,6 +329,7 @@ server.tool(
     entrypoint: z.string().describe("Symbol name to trace from. Omit to list auto-detected entry points.").optional(),
     file: z.string().describe("Optional file hint to disambiguate the symbol.").optional(),
     depth: z.number().describe("Maximum DFS depth (default 5, max 10).").optional(),
+    limit: z.number().int().min(1).describe("Maximum candidates to list when the entrypoint is ambiguous. Omit to list all.").optional(),
   },
   async (args) => ({
     content: [{ type: "text", text: await handleGraphTool("codebase_flow", args) }],
@@ -341,6 +343,7 @@ server.tool(
     projectPath: z.string().describe("Absolute path to the project directory.").optional(),
     name: z.string().describe("Symbol name (e.g. 'validateUser')."),
     file: z.string().describe("Optional file hint to disambiguate when the name is not unique.").optional(),
+    limit: z.number().int().min(1).describe("Maximum definitions to resolve when the name is not unique. Omit to resolve all.").optional(),
   },
   async (args) => ({
     content: [{ type: "text", text: await handleGraphTool("codebase_symbol", args) }],

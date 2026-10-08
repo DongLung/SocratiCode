@@ -10,7 +10,7 @@ import {
   type FlowNode,
   getCallFlow,
   getImpactRadius,
-  getSymbolContext,
+  getSymbolContextResult,
   listSymbols,
   looksLikeFilePath,
 } from "../services/graph-impact.js";
@@ -485,6 +485,7 @@ async function dispatchGraphTool(
       const symbolId = (args.symbolId as string | undefined)?.trim();
       if (!target && !symbolId) return "Missing required argument: target or symbolId";
       const depth = typeof args.depth === "number" ? args.depth : 3;
+      const limit = typeof args.limit === "number" ? args.limit : undefined;
       const projectId = projectIdFromPath(projectPath);
       const cache = await getSymbolGraphCache(projectId);
       if (!cache) {
@@ -498,7 +499,7 @@ async function dispatchGraphTool(
         file,
         symbolId,
       ) || (cache.meta.schemaVersion ? cache.meta.schemaVersion < 2 : true);
-      const result = await getImpactRadius(cache, target || (symbolId as string), depth, { file, symbolId, isIncomplete });
+      const result = await getImpactRadius(cache, target || (symbolId as string), depth, { file, symbolId, isIncomplete, limit });
 
       if (result.status === "graph_upgrade_required") {
         return result.message ?? "The symbol graph requires an upgrade. Rebuild with codebase_graph_build.";
@@ -516,6 +517,9 @@ async function dispatchGraphTool(
         ];
         if (result.candidates && result.candidates.length > 0) {
           lines.push("");
+          if (limit !== undefined && (result.totalCandidates ?? 0) > limit) {
+            lines.push(showingLine(result.candidates.length, result.totalCandidates ?? 0, "candidates for", target), "");
+          }
           lines.push("Candidates:");
           for (const c of result.candidates) {
             lines.push(`  - [${c.kind}] ${c.qualifiedName} in ${c.file}:${c.line} (ID: ${c.id})`);
@@ -599,8 +603,11 @@ async function dispatchGraphTool(
           return `No symbol named "${entrypoint}" found${fileHint ? ` in ${fileHint}` : ""}.`;
         }
         if (refs.length > 1) {
+          const limit = typeof args.limit === "number" ? args.limit : undefined;
+          const listed = limit === undefined ? refs : refs.slice(0, limit);
           const lines = [`Symbol "${entrypoint}" is ambiguous (${refs.length} matches). Pass \`file\` to disambiguate:`, ""];
-          for (const r of refs) lines.push(`  - ${r.file}`);
+          if (listed.length < refs.length) lines.push(showingLine(listed.length, refs.length, "candidates for", entrypoint), "");
+          for (const r of listed) lines.push(`  - ${r.file}`);
           return lines.join("\n");
         }
         const depth = typeof args.depth === "number" ? args.depth : 5;
@@ -624,11 +631,16 @@ async function dispatchGraphTool(
       if (!cache) {
         return "No symbol graph found. Run codebase_graph_build (or codebase_index) first.";
       }
-      const ctxs = await getSymbolContext(cache, symName, fileHint);
+      const limit = typeof args.limit === "number" ? args.limit : undefined;
+      const { contexts: ctxs, total, fileCount } = await getSymbolContextResult(cache, symName, fileHint, limit);
       if (ctxs.length === 0) {
         return `No symbol named "${symName}" found${fileHint ? ` in ${fileHint}` : ""}.`;
       }
       const lines: string[] = [];
+      if (limit !== undefined && total > limit) {
+        const narrow = fileCount > 1 ? (fileHint ? NARROW_BY_LONGER_FILE : NARROW_BY_FILE) : undefined;
+        lines.push(showingLine(ctxs.length, total, "definitions of", symName, narrow), "");
+      }
       for (const ctx of ctxs) {
         lines.push(`Symbol: ${ctx.symbol.qualifiedName} (${ctx.symbol.kind})`);
         lines.push(`Defined: ${ctx.symbol.file}:${ctx.symbol.line}–${ctx.symbol.endLine}  [${ctx.symbol.language}]`);
@@ -679,6 +691,14 @@ async function dispatchGraphTool(
     default:
       return `Unknown tool: ${name}`;
   }
+}
+
+const NARROW_BY_FILE = "Pass file to narrow to one file";
+const NARROW_BY_LONGER_FILE = "Pass a longer file path to narrow to one file";
+
+/** Format the notice that only `shown` of `total` matches are listed; `narrow`, when given, comes before the larger-limit advice. */
+function showingLine(shown: number, total: number, noun: string, name: string, narrow?: string): string {
+  return `Showing ${shown} of ${total} ${noun} "${name}". ${narrow ? `${narrow}, or pass` : "Pass"} a larger limit to see more.`;
 }
 
 /** Render a FlowNode subtree using ASCII tree characters. */

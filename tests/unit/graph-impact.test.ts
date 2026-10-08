@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 
-import { describe, expect, it } from "vitest";
-import { getImpactRadius, getSymbolContext } from "../../src/services/graph-impact.js";
+import { describe, expect, it, vi } from "vitest";
+import { getImpactRadius, getSymbolContext, getSymbolContextResult } from "../../src/services/graph-impact.js";
 import { SymbolGraphCache } from "../../src/services/symbol-graph-cache.js";
 import type { SymbolGraphFilePayload, SymbolGraphMeta, SymbolNode } from "../../src/types.js";
 
@@ -687,5 +687,70 @@ describe("graph-impact exact symbol traversal and fail-closed", () => {
     expect(result.filesByDepth.get(1)).toBeUndefined();
     // Hop 2 reaches external caller app.ts via publicHelper
     expect(result.filesByDepth.get(2)).toEqual(["src/app.ts"]);
+  });
+
+  function sameNameCache(name: string, count: number): SymbolGraphCache {
+    const symbols: SymbolNode[] = [];
+    const filePayloads = new Map<string, SymbolGraphFilePayload>();
+    for (let i = 0; i < count; i++) {
+      const file = `src/m${i}.ts`;
+      const sym: SymbolNode = {
+        id: `${file}::${name}#1`,
+        name,
+        qualifiedName: name,
+        kind: "function",
+        file,
+        line: 1,
+        endLine: 1,
+        language: "typescript",
+      };
+      symbols.push(sym);
+      filePayloads.set(file, { file, language: "typescript", contentHash: `h${i}`, symbols: [sym], outgoingCalls: [] });
+    }
+    return createMockCache({ symbols, reverseFileIndex: new Map(), filePayloads });
+  }
+
+  it("getSymbolContext returns an array of the matching definitions, narrowed by the file hint", async () => {
+    const cache = sameNameCache("main", 3);
+
+    const all = await getSymbolContext(cache, "main");
+    expect(all.map((c) => c.symbol.file)).toEqual(["src/m0.ts", "src/m1.ts", "src/m2.ts"]);
+
+    const inFile = await getSymbolContext(cache, "main", "src/m1.ts");
+    expect(inFile.map((c) => c.symbol.file)).toEqual(["src/m1.ts"]);
+  });
+
+  it("stops resolving definitions at the limit and reports the full count", async () => {
+    const cache = sameNameCache("main", 3);
+    const fetch = vi.spyOn(cache, "getFilePayload");
+
+    const { contexts, total } = await getSymbolContextResult(cache, "main", undefined, 1);
+
+    expect(contexts).toHaveLength(1);
+    expect(total).toBe(3);
+    expect(fetch, "payloads read past the limit").toHaveBeenCalledTimes(1);
+  });
+
+  it("fills the limit from later definitions when an earlier name-index entry does not resolve", async () => {
+    const cache = sameNameCache("main", 3);
+    cache.fileDataLru.set("src/m0.ts", { file: "src/m0.ts", language: "typescript", contentHash: "stale", symbols: [], outgoingCalls: [] });
+
+    const { contexts } = await getSymbolContextResult(cache, "main", undefined, 1);
+    expect(contexts.map((c) => c.symbol.file)).toEqual(["src/m1.ts"]);
+
+    const impact = await getImpactRadius(cache, "main", 3, { limit: 1 });
+    expect(impact.candidates?.map((c) => c.file)).toEqual(["src/m1.ts"]);
+  });
+
+  it("reads payloads only for the ambiguous impact candidates within the limit", async () => {
+    const cache = sameNameCache("main", 3);
+    const fetch = vi.spyOn(cache, "getFilePayload");
+
+    const result = await getImpactRadius(cache, "main", 3, { limit: 1 });
+
+    expect(result.status).toBe("ambiguous");
+    expect(result.candidates).toHaveLength(1);
+    expect(result.totalCandidates).toBe(3);
+    expect(fetch, "payloads read past the limit").toHaveBeenCalledTimes(1);
   });
 });
