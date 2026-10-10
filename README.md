@@ -1247,9 +1247,9 @@ and methods call which. Use these tools BEFORE refactoring, renaming, or deletin
 
 | Tool | Description |
 |------|-------------|
-| `codebase_impact` | Blast radius — what files break if you change file/function X (BFS through reverse-call edges) |
-| `codebase_flow` | Trace forward execution flow from an entry point. Call with no args to discover entry points (orphans, `main()`, framework routes, tests) |
-| `codebase_symbol` | 360° view of one symbol — its definition, callers, and callees |
+| `codebase_impact` | Blast radius — what files break if you change file/function X (BFS through reverse-call edges). Pass `limit` to list only the first N candidates of an ambiguous symbol name; when some are left out, the answer gives the full count |
+| `codebase_flow` | Trace forward execution flow from an entry point. Call with no args to discover entry points (orphans, `main()`, framework routes, tests). Pass `limit` to list only the first N candidates of an ambiguous entry-point name; when some are left out, the answer gives the full count |
+| `codebase_symbol` | 360° view of one symbol — its definition, callers, and callees. Pass `limit` to resolve only the first N definitions of a name that is not unique; when some are left out, the answer gives the full count |
 | `codebase_symbols` | List symbols in a file or search by name across the project |
 
 > **Accepted limits.** The call graph is static-analysis-based — no type inference. Dynamic dispatch (`getattr`, `obj[key](...)`, reflection, `eval`), unexpanded macros, and framework magic (Spring `@Autowired`, Angular DI, Rails `has_many`, decorator-driven routing) are invisible. Callers that reach a method only through these mechanisms will not appear in `codebase_impact`. Treat "zero callers" as a hint to double-check on DI-heavy codebases. `codebase_graph_status` reports the unresolved share (`unresolvedEdgePct`) as a quality signal: the percentage of captured symbol edges (calls, imports, re-exports and type or value references) that matched no project symbol, GDScript engine calls excluded. That share includes edges into runtime builtins and external libraries (`setTimeout`, `JSON.stringify`, an SDK client's methods), which no project symbol can resolve, so it runs high on healthy TypeScript/JavaScript code and is not a resolver failure rate. See [DEVELOPER.md § Impact Analysis](DEVELOPER.md) for the full list.

@@ -290,6 +290,102 @@ describe("symbol-graph-contract (End-to-End Pipeline on Disk)", () => {
     expect(impact.filesByDepth.get(2)).toEqual(["src/calculator.ts"]);
   });
 
+  function writeMains(count: number): void {
+    fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
+    for (let i = 0; i < count; i++) {
+      fs.writeFileSync(path.join(tmpDir, "src", `m${i}.ts`), "export function main(): void {}\n");
+    }
+  }
+
+  it("prints every definition and candidate of a common name when no limit is passed", async () => {
+    writeMains(3);
+    await runPipeline();
+
+    const block = (i: number) => [
+      "Symbol: main (function)",
+      `Defined: src/m${i}.ts:1–1  [typescript]`,
+      "",
+      "Callers (0):",
+      "  (none — possibly an entry point or unused)",
+      "",
+      "Callees (0):",
+      "  (none)",
+    ].join("\n");
+    const symbol = await handleGraphTool("codebase_symbol", { name: "main", projectPath: tmpDir });
+    expect(symbol).toBe([block(0), block(1), block(2)].join("\n---\n"));
+
+    const flow = await handleGraphTool("codebase_flow", { entrypoint: "main", projectPath: tmpDir });
+    expect(flow).toBe([
+      'Symbol "main" is ambiguous (3 matches). Pass `file` to disambiguate:',
+      "",
+      "  - src/m0.ts",
+      "  - src/m1.ts",
+      "  - src/m2.ts",
+    ].join("\n"));
+
+    const impact = await handleGraphTool("codebase_impact", { target: "main", projectPath: tmpDir });
+    expect(impact).toBe([
+      "Target 'main' is ambiguous:",
+      "Symbol 'main' is ambiguous (matches 3 symbols across 3 files (src/m0.ts, src/m1.ts, src/m2.ts)). Specify 'file' or 'symbolId' to disambiguate.",
+      "",
+      "Candidates:",
+      "  - [function] main in src/m0.ts:1 (ID: src/m0.ts::main#1)",
+      "  - [function] main in src/m1.ts:1 (ID: src/m1.ts::main#1)",
+      "  - [function] main in src/m2.ts:1 (ID: src/m2.ts::main#1)",
+    ].join("\n"));
+  });
+
+  it("lists only as many definitions and candidates as an explicit limit allows", async () => {
+    writeMains(3);
+    await runPipeline();
+
+    const symbol = await handleGraphTool("codebase_symbol", { name: "main", limit: 2, projectPath: tmpDir });
+    expect(symbol.split("\n")[0]).toBe('Showing 2 of 3 definitions of "main". Pass file to narrow to one file, or pass a larger limit to see more.');
+    expect(symbol.match(/^Symbol: /gm)).toHaveLength(2);
+
+    const flow = await handleGraphTool("codebase_flow", { entrypoint: "main", limit: 2, projectPath: tmpDir });
+    expect(flow).toContain('Showing 2 of 3 candidates for "main". Pass a larger limit to see more.');
+    expect(flow.match(/^ {2}- src\//gm)).toHaveLength(2);
+
+    const impact = await handleGraphTool("codebase_impact", { target: "main", limit: 2, projectPath: tmpDir });
+    expect(impact).toContain('Showing 2 of 3 candidates for "main". Pass a larger limit to see more.');
+    expect(impact.match(/^ {2}- \[function\]/gm)).toHaveLength(2);
+
+    for (const [tool, arg] of [["codebase_symbol", "name"], ["codebase_flow", "entrypoint"], ["codebase_impact", "target"]]) {
+      const all = await handleGraphTool(tool, { [arg]: "main", limit: 3, projectPath: tmpDir });
+      expect(all, `${tool} prints a truncation line with nothing left out`).not.toContain("Showing");
+    }
+  });
+
+  it("counts the total after the file filter when a limit is passed", async () => {
+    fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, "src", "multi.ts"),
+      "export class A {\n  run(): void {}\n}\nexport class B {\n  run(): void {}\n}\n",
+    );
+    fs.writeFileSync(path.join(tmpDir, "src", "other.ts"), "export function run(): void {}\n");
+    await runPipeline();
+
+    const args = { file: "src/multi.ts", limit: 1, projectPath: tmpDir };
+    const symbol = await handleGraphTool("codebase_symbol", { name: "run", ...args });
+    expect(symbol).toContain('Showing 1 of 2 definitions of "run". Pass a larger limit to see more.');
+    const flow = await handleGraphTool("codebase_flow", { entrypoint: "run", ...args });
+    expect(flow).toContain('Showing 1 of 2 candidates for "run". Pass a larger limit to see more.');
+    const impact = await handleGraphTool("codebase_impact", { target: "run", ...args });
+    expect(impact).toContain('Showing 1 of 2 candidates for "run". Pass a larger limit to see more.');
+  });
+
+  it("asks for a longer file path while a suffix file filter still matches several files", async () => {
+    for (const dir of ["a", "b"]) {
+      fs.mkdirSync(path.join(tmpDir, "src", dir), { recursive: true });
+      fs.writeFileSync(path.join(tmpDir, "src", dir, "m.ts"), "export function main(): void {}\n");
+    }
+    await runPipeline();
+
+    const symbol = await handleGraphTool("codebase_symbol", { name: "main", file: "m.ts", limit: 1, projectPath: tmpDir });
+    expect(symbol).toContain('Showing 1 of 2 definitions of "main". Pass a longer file path to narrow to one file, or pass a larger limit to see more.');
+  });
+
   it("provides 360 context including caller kind and same-file callers", async () => {
     fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
     fs.writeFileSync(
