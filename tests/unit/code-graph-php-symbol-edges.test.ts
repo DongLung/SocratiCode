@@ -259,3 +259,106 @@ class Ambiguous
     }
   });
 });
+
+/**
+ * A declaration behind an attribute, at the real `buildCodeGraph` +
+ * `resolveCallSites` level (issue #205).
+ *
+ * The file-level dependency graph was never affected: `use` and `require`
+ * resolution reads imports, not declarations. What broke is the symbol graph
+ * the class declaration is registered under — filed as `ObservedBy`, nothing
+ * named `Post` exists for the observer's type hint to resolve against, so the
+ * edge that file-mode `codebase_impact` derives its reverse index from has no
+ * target and the class has no dependents. Only the name may move here: the
+ * declaration's range — attributes included — and every edge stay as they are.
+ */
+describe("PHP declarations behind an attribute", () => {
+  let root: string;
+  let graph: Awaited<ReturnType<typeof buildCodeGraph>>;
+
+  const write = (rel: string, body: string): void => {
+    const abs = path.join(root, rel);
+    mkdirSync(path.dirname(abs), { recursive: true });
+    writeFileSync(abs, body);
+  };
+
+  const edge = (file: string, name: string, kind: SymbolEdge["kind"]): SymbolEdge => {
+    const found = (graph.outgoingCallsByFile.get(file) ?? []).filter(
+      (e) => e.calleeName === name && e.kind === kind,
+    );
+    expect(found, `expected one ${kind} edge to ${name} in ${file}`).toHaveLength(1);
+    return found[0];
+  };
+
+  beforeAll(async () => {
+    root = mkdtempSync(path.join(tmpdir(), "socraticode-php-attr-"));
+    write("composer.json", JSON.stringify({ autoload: { "psr-4": { "App\\": "src/" } } }));
+
+    // The report's repro shape: the attribute carries arguments of its own,
+    // so `ObservedBy`, the attribute's name, is the first `name` in the
+    // declaration and `PostObserver`, inside its arguments, the second —
+    // either would be wrong for a class called `Post`.
+    write("src/Models/Post.php", `<?php
+
+namespace App\\Models;
+
+#[ObservedBy([PostObserver::class])]
+class Post
+{
+    public function author() {}
+}
+`);
+
+    write("src/Observers/PostObserver.php", `<?php
+
+namespace App\\Observers;
+
+use App\\Models\\Post;
+
+class PostObserver
+{
+    public function updated(Post $post): void
+    {
+        $post->author();
+    }
+}
+`);
+
+    graph = await buildCodeGraph(root);
+    resolveCallSites(
+      graph,
+      graph.symbolsByFile,
+      graph.outgoingCallsByFile,
+      graph.rustBindingsByFile,
+      graph.rustCrateRootByFile,
+      graph.rustInlineScopedCalls,
+      graph.rustInlineDeclaredSymbols,
+      graph.rustCrateRootsByFile,
+    );
+  });
+
+  afterAll(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  it("records an attributed class under its own name, not the attribute's", () => {
+    const syms = graph.symbolsByFile.get("src/Models/Post.php") ?? [];
+    // The id pins the declaration's range too: line 5 is the attribute, which
+    // is where the declaration has always started.
+    expect(syms.filter((s) => s.kind === "class").map((s) => [s.name, s.id]))
+      .toEqual([["Post", "src/Models/Post.php::Post#5"]]);
+    // Neither `name` the declaration holds — the attribute's own nor the one
+    // inside its arguments — may be filed as a symbol of this file.
+    const names = syms.map((s) => s.name);
+    expect(names).not.toContain("ObservedBy");
+    expect(names).not.toContain("PostObserver");
+  });
+
+  it("resolves a reference to the class under the name the source writes", () => {
+    // The dependents file-mode `codebase_impact` reports come from exactly
+    // this edge: resolved, it puts PostObserver.php in Post's reverse index.
+    const e = edge("src/Observers/PostObserver.php", "Post", "type_reference");
+    expect(e.calleeCandidates).toEqual(["src/Models/Post.php::Post#5"]);
+    expect(e.confidence).toBe("unique");
+  });
+});

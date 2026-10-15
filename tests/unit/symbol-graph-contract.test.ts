@@ -83,13 +83,14 @@ vi.mock("../../src/services/qdrant.js", async (importOriginal) => {
 });
 
 import { projectIdFromPath, symgraphFileCollectionName } from "../../src/config.js";
-import { rebuildGraph } from "../../src/services/code-graph.js";
+import { buildCodeGraph, rebuildGraph } from "../../src/services/code-graph.js";
 import { getImpactRadius, getSymbolContext } from "../../src/services/graph-impact.js";
 import { getClient } from "../../src/services/qdrant.js";
 import { getSymbolGraphCache, resetSymbolGraphCacheRegistry } from "../../src/services/symbol-graph-cache.js";
 import { applyRemoval, updateChangedFilesSymbolGraph } from "../../src/services/symbol-graph-incremental.js";
 import {
   cleanStaleGenerations,
+  contentHashOf,
   coordinateProject,
   deleteFilePayload,
   LEGACY_SYMBOL_GRAPH_GENERATION,
@@ -98,12 +99,15 @@ import {
   loadNameShard,
   loadReverseShard,
   loadSymbolGraphMeta,
+  nameShardKey,
   registerStagingGeneration,
   resetSymbolGraphCollectionCache,
   reverseShardKeyForCallee,
   StorageReadError,
   SymbolGraphGenerationChangedError,
   saveFilePayload,
+  saveFilePayloads,
+  saveNameShard,
   saveReverseShard,
   saveSymbolGraphMeta,
   unregisterStagingGeneration,
@@ -163,6 +167,186 @@ describe("symbol-graph-contract (End-to-End Pipeline on Disk)", () => {
     expect(names).toContain("simpleVal");
     // Ensure the whole destructuring pattern was not extracted as a symbol name
     expect(names.some((n) => n.includes("{") || n.includes("}") || n.includes(":"))).toBe(false);
+  });
+
+  /**
+   * The issue #205 repro: an attributed class whose attribute carries a name
+   * of its own, reached from another file through a type hint.
+   */
+  function writeIssue205Fixture(): void {
+    fs.mkdirSync(path.join(tmpDir, "src", "Models"), { recursive: true });
+    fs.mkdirSync(path.join(tmpDir, "src", "Observers"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, "composer.json"),
+      JSON.stringify({ autoload: { "psr-4": { "App\\": "src/" } } }),
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, "src", "Models", "Post.php"),
+      [
+        "<?php",
+        "",
+        "namespace App\\Models;",
+        "",
+        "#[ObservedBy([PostObserver::class])]",
+        "class Post",
+        "{",
+        "    public function author() {}",
+        "}",
+      ].join("\n"),
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, "src", "Observers", "PostObserver.php"),
+      [
+        "<?php",
+        "",
+        "namespace App\\Observers;",
+        "",
+        "use App\\Models\\Post;",
+        "",
+        "class PostObserver",
+        "{",
+        "    public function updated(Post $post): void",
+        "    {",
+        "    }",
+        "}",
+      ].join("\n"),
+    );
+  }
+
+  it("lists an attributed PHP class under its real name, not the attribute's", async () => {
+    // Issue #205: `#[ObservedBy([PostObserver::class])] class Post` was
+    // recorded under the attribute's name, so `codebase_symbol` never listed
+    // `Post` and `codebase_symbols query: ObservedBy` returned one entry per
+    // attributed class. The fixture runs through the persisted pipeline —
+    // rebuild → persistSymbolGraph → cache → tools — which is what the
+    // graph-refresh path runs; the storage is the suite's in-memory Qdrant
+    // mock, not Docker or a live server.
+    writeIssue205Fixture();
+    const { cache } = await runPipeline();
+
+    const payload = await cache.getFilePayload("src/Models/Post.php");
+    expect(payload?.symbols.map((s) => s.name)).toContain("Post");
+    expect(payload?.symbols.map((s) => s.name)).not.toContain("ObservedBy");
+
+    const contexts = await getSymbolContext(cache, "Post");
+    expect(contexts.map((c) => [c.symbol.name, c.symbol.kind, c.symbol.file])).toEqual([
+      ["Post", "class", "src/Models/Post.php"],
+    ]);
+
+    const lookup = await handleGraphTool("codebase_symbol", { name: "Post", projectPath: tmpDir });
+    expect(lookup).toContain("Symbol: Post (class)");
+    const wrongName = await handleGraphTool("codebase_symbol", { name: "ObservedBy", projectPath: tmpDir });
+    expect(wrongName).toBe('No symbol named "ObservedBy" found.');
+  });
+
+  it("answers impact for the class under the name the source writes", async () => {
+    // `codebase_impact Post` reported `Symbol 'Post' was not found in the
+    // symbol graph.` before the fix, while the file graph listed the
+    // observer's file as an importer — the reverse index is built from the
+    // resolved edge the class symbol's name has to match.
+    writeIssue205Fixture();
+    const { cache } = await runPipeline();
+
+    const impact = await getImpactRadius(cache, "Post", 3);
+    expect(impact.status).toBe("ok");
+    expect(impact.filesByDepth.get(1)).toEqual(["src/Observers/PostObserver.php"]);
+
+    const byImpact = await handleGraphTool("codebase_impact", { target: "Post", projectPath: tmpDir });
+    expect(byImpact).not.toContain("was not found");
+    expect(byImpact).toContain("PostObserver");
+  });
+
+  it("replaces a stale pre-fix symbol graph through the refresh path", async () => {
+    // Refresh evidence — symbol-graph refresh only. The store is this suite's
+    // in-memory Qdrant mock, so nothing here speaks for embeddings, deletion
+    // policies, Docker or a live server. The seed is the graph an index built
+    // before the fix held for this fixture: the real builder's own output
+    // with the class filed under the attribute's name and id — exactly the
+    // shape the pre-fix red runs recorded — written through the existing
+    // persistence API in the stored format. It must be readable as it stands
+    // (that is what an existing index is), and the existing refresh pipeline
+    // must replace it with no store surgery.
+    writeIssue205Fixture();
+
+    const staleGen = "pre-fix-seed-generation";
+    const built = await buildCodeGraph(tmpDir);
+    const staleClass = (built.symbolsByFile.get("src/Models/Post.php") ?? []).find((s) => s.kind === "class");
+    if (!staleClass) throw new Error("Expected the fixture's class symbol");
+    staleClass.name = "ObservedBy";
+    staleClass.qualifiedName = "ObservedBy";
+    staleClass.id = "src/Models/Post.php::ObservedBy#5";
+    // Pre-fix, the observer's reference to `Post` resolved to nothing, so the
+    // stored graph held no reverse entry for the class at all.
+    for (const edges of built.outgoingCallsByFile.values()) {
+      for (const e of edges) {
+        if (e.calleeName === "Post") e.calleeCandidates = [];
+      }
+    }
+
+    const payloads: SymbolGraphFilePayload[] = [];
+    const shardNames = new Map<string, Map<string, SymbolRef[]>>();
+    let symbolCount = 0;
+    let edgeCount = 0;
+    for (const [relPath, symbols] of built.symbolsByFile.entries()) {
+      const outgoingCalls = built.outgoingCallsByFile.get(relPath) ?? [];
+      payloads.push({
+        file: relPath,
+        language: (symbols.find((s) => s.name !== "<module>") ?? symbols[0])?.language ?? "plaintext",
+        contentHash: contentHashOf(fs.readFileSync(path.join(tmpDir, relPath), "utf-8")),
+        symbols,
+        outgoingCalls,
+      });
+      symbolCount += symbols.filter((s) => s.name !== "<module>").length;
+      edgeCount += outgoingCalls.length;
+      for (const sym of symbols) {
+        if (sym.name === "<module>") continue;
+        const key = nameShardKey(sym.name);
+        const shard = shardNames.get(key) ?? new Map();
+        shard.set(sym.name, [...(shard.get(sym.name) ?? []), { file: relPath, id: sym.id }]);
+        shardNames.set(key, shard);
+      }
+    }
+    await saveFilePayloads(projId, payloads, staleGen);
+    for (const [key, names] of shardNames) {
+      await saveNameShard(projId, key, Object.fromEntries(names), staleGen);
+    }
+    await saveSymbolGraphMeta(projId, {
+      projectId: projId,
+      symbolCount,
+      edgeCount,
+      fileCount: payloads.length,
+      unresolvedEdgePct: 0,
+      builtAt: Date.now(),
+      schemaVersion: 2,
+      generation: staleGen,
+    });
+
+    // Readable as it stands, in the format the fix left untouched: the stale
+    // name answers exactly as the bug report describes and the real one does not.
+    const staleCache = await getSymbolGraphCache(projId);
+    if (!staleCache) throw new Error("Expected the seeded cache");
+    expect(staleCache.meta.schemaVersion).toBe(2);
+    expect((await getSymbolContext(staleCache, "ObservedBy")).map((c) => [c.symbol.name, c.symbol.id]))
+      .toEqual([["ObservedBy", "src/Models/Post.php::ObservedBy#5"]]);
+    expect(await getSymbolContext(staleCache, "Post")).toEqual([]);
+    expect((await getImpactRadius(staleCache, "Post", 3)).status).toBe("not_found");
+
+    // The existing refresh path republishes the symbol graph from source.
+    const { cache } = await runPipeline();
+
+    expect((await getSymbolContext(cache, "Post")).map((c) => [c.symbol.name, c.symbol.kind, c.symbol.file]))
+      .toEqual([["Post", "class", "src/Models/Post.php"]]);
+    const impact = await getImpactRadius(cache, "Post", 3);
+    expect(impact.status).toBe("ok");
+    expect(impact.filesByDepth.get(1)).toEqual(["src/Observers/PostObserver.php"]);
+
+    // And no stale entry survives in what readers resolve afterwards.
+    expect(await getSymbolContext(cache, "ObservedBy")).toEqual([]);
+    expect((await cache.getFilePayload("src/Models/Post.php"))?.symbols.map((s) => s.name))
+      .not.toContain("ObservedBy");
+    await vi.waitFor(async () => {
+      expect(await listStoredGenerations(projId)).not.toContain(staleGen);
+    });
   });
 
   it("resolves multi-module duplicate symbol names preserving module identity", async () => {

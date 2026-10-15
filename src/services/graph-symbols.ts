@@ -3217,9 +3217,15 @@ function extractFromPhp(
     return out;
   };
 
+  // The class-like's name comes from the declaration's `name` field, for the
+  // reason {@link ownerClassOf} already reads it that way: an attribute list
+  // comes before the name inside the declaration, so the first `name`
+  // descendant is the attribute's — `#[ObservedBy(…)] class Post` was
+  // registered as `ObservedBy`, and `codebase_symbol` and `codebase_impact`
+  // could not find `Post` at all (issue #205).
   for (const k of ["class_declaration", "interface_declaration", "trait_declaration"]) {
     for (const cls of safeFindAll(root, k)) {
-      const nameNode = safeFind(cls, "name");
+      const nameNode = cls.field("name");
       if (!nameNode) continue;
       const name = nameNode.text();
       const r = cls.range();
