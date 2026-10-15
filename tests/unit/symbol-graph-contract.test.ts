@@ -21,6 +21,24 @@ const clientInstance = {
   createCollection: async (name: string) => {
     if (!store.has(name)) store.set(name, new Map());
   },
+  createPayloadIndex: async () => ({}),
+  deleteCollection: async (name: string) => {
+    store.delete(name);
+  },
+  query: async () => ({ points: [] }),
+  getCollection: async (name: string) => {
+    const coll = store.get(name);
+    if (!coll) {
+      const err = new Error(`Collection ${name} does not exist`);
+      (err as { status?: number }).status = 404;
+      throw err;
+    }
+    return {
+      points_count: coll.size,
+      status: "green",
+      config: { params: { vectors: { size: 3 } } },
+    };
+  },
   upsert: async (name: string, body: { points: StoredPoint[] }) => {
     const coll = store.get(name) ?? new Map<string, StoredPoint>();
     for (const p of body.points) coll.set(String(p.id), p);
@@ -70,26 +88,64 @@ const clientInstance = {
   },
 };
 
+// Embedding generator/readiness boundary: the update pipeline under test must
+// never regenerate embeddings, and readiness probes are counted apart from
+// generation so "not called" can be told from "called to check the provider".
+const embedSpy = vi.hoisted(() => ({ generations: 0, readinessProbes: 0 }));
+
+vi.mock("../../src/services/embedding-provider.js", () => ({
+  getEmbeddingProvider: async () => ({
+    ensureReady: async () => {
+      embedSpy.readinessProbes += 1;
+      return { modelPulled: false, containerStarted: false, imagePulled: false };
+    },
+  }),
+}));
+
+vi.mock("../../src/services/embeddings.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/services/embeddings.js")>();
+  return {
+    ...actual,
+    generateEmbeddings: async (...args: Parameters<typeof actual.generateEmbeddings>) => {
+      embedSpy.generations += 1;
+      return actual.generateEmbeddings(...args);
+    },
+  };
+});
+
+// The real qdrant.ts module constructs its own QdrantClient internally, and a
+// module-level mock cannot reach that binding — every real qdrant helper the
+// update path calls would leak to the network. Mocking the client constructor
+// instead makes the real persistence layer run against the same in-memory
+// store the symbol-graph readers use.
+vi.mock("@qdrant/js-client-rest", () => ({
+  QdrantClient: function QdrantClient() {
+    return clientInstance;
+  },
+}));
+
 vi.mock("../../src/services/qdrant.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../src/services/qdrant.js")>();
   return {
     ...actual,
     getClient: () => clientInstance,
-    saveGraphData: async () => {},
-    loadGraphData: async () => null,
-    deleteGraphData: async () => {},
     describeQdrantError: (err: unknown) => (err instanceof Error ? err.message : String(err)),
   };
 });
 
-import { projectIdFromPath, symgraphFileCollectionName } from "../../src/config.js";
-import { rebuildGraph } from "../../src/services/code-graph.js";
+import { collectionName, graphCollectionName, projectIdFromPath, symgraphFileCollectionName } from "../../src/config.js";
+import { hashContent, SOCRATICODE_VERSION } from "../../src/constants.js";
+import { buildCodeGraph, rebuildGraph, shouldRebuildGraph } from "../../src/services/code-graph.js";
 import { getImpactRadius, getSymbolContext } from "../../src/services/graph-impact.js";
-import { getClient } from "../../src/services/qdrant.js";
+import type { GraphChangeSummary } from "../../src/services/graph-inputs.js";
+import { profileExtensionLanguageMap, resolveEffectiveIndexProfile } from "../../src/services/index-profile.js";
+import { getIndexableFiles, updateProjectIndex } from "../../src/services/indexer.js";
+import { getClient, loadGraphInputs, saveGraphData, saveProjectMetadata } from "../../src/services/qdrant.js";
 import { getSymbolGraphCache, resetSymbolGraphCacheRegistry } from "../../src/services/symbol-graph-cache.js";
 import { applyRemoval, updateChangedFilesSymbolGraph } from "../../src/services/symbol-graph-incremental.js";
 import {
   cleanStaleGenerations,
+  contentHashOf,
   coordinateProject,
   deleteFilePayload,
   LEGACY_SYMBOL_GRAPH_GENERATION,
@@ -98,12 +154,15 @@ import {
   loadNameShard,
   loadReverseShard,
   loadSymbolGraphMeta,
+  nameShardKey,
   registerStagingGeneration,
   resetSymbolGraphCollectionCache,
   reverseShardKeyForCallee,
   StorageReadError,
   SymbolGraphGenerationChangedError,
   saveFilePayload,
+  saveFilePayloads,
+  saveNameShard,
   saveReverseShard,
   saveSymbolGraphMeta,
   unregisterStagingGeneration,
@@ -163,6 +222,315 @@ describe("symbol-graph-contract (End-to-End Pipeline on Disk)", () => {
     expect(names).toContain("simpleVal");
     // Ensure the whole destructuring pattern was not extracted as a symbol name
     expect(names.some((n) => n.includes("{") || n.includes("}") || n.includes(":"))).toBe(false);
+  });
+
+  /**
+   * The issue #205 repro: an attributed class whose attribute carries a name
+   * of its own, reached from another file through a type hint.
+   */
+  function writeIssue205Fixture(): void {
+    fs.mkdirSync(path.join(tmpDir, "src", "Models"), { recursive: true });
+    fs.mkdirSync(path.join(tmpDir, "src", "Observers"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, "composer.json"),
+      JSON.stringify({ autoload: { "psr-4": { "App\\": "src/" } } }),
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, "src", "Models", "Post.php"),
+      [
+        "<?php",
+        "",
+        "namespace App\\Models;",
+        "",
+        "#[ObservedBy([PostObserver::class])]",
+        "class Post",
+        "{",
+        "    public function author() {}",
+        "}",
+      ].join("\n"),
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, "src", "Observers", "PostObserver.php"),
+      [
+        "<?php",
+        "",
+        "namespace App\\Observers;",
+        "",
+        "use App\\Models\\Post;",
+        "",
+        "class PostObserver",
+        "{",
+        "    public function updated(Post $post): void",
+        "    {",
+        "    }",
+        "}",
+      ].join("\n"),
+    );
+  }
+
+  /**
+   * Seed the symbol graph an index built before issue #205's fix held for the
+   * fixture: the real builder's own output with the class filed under the
+   * attribute's name and id — exactly the shape the pre-fix red runs recorded
+   * — written through the existing persistence API in the stored format.
+   * Mutates `built`'s Post symbols and edges into that pre-fix shape first: the
+   * observer's reference to `Post` resolved to nothing, so the stored graph
+   * held no reverse entry for the class at all.
+   */
+  async function seedPreFixSymbolGraph(
+    built: Awaited<ReturnType<typeof buildCodeGraph>>,
+    generation: string,
+  ): Promise<void> {
+    const staleClass = (built.symbolsByFile.get("src/Models/Post.php") ?? []).find((s) => s.kind === "class");
+    if (!staleClass) throw new Error("Expected the fixture's class symbol");
+    staleClass.name = "ObservedBy";
+    staleClass.qualifiedName = "ObservedBy";
+    staleClass.id = "src/Models/Post.php::ObservedBy#5";
+    for (const edges of built.outgoingCallsByFile.values()) {
+      for (const e of edges) {
+        if (e.calleeName === "Post") e.calleeCandidates = [];
+      }
+    }
+
+    const payloads: SymbolGraphFilePayload[] = [];
+    const shardNames = new Map<string, Map<string, SymbolRef[]>>();
+    let symbolCount = 0;
+    let edgeCount = 0;
+    for (const [relPath, symbols] of built.symbolsByFile.entries()) {
+      const outgoingCalls = built.outgoingCallsByFile.get(relPath) ?? [];
+      payloads.push({
+        file: relPath,
+        language: (symbols.find((s) => s.name !== "<module>") ?? symbols[0])?.language ?? "plaintext",
+        contentHash: contentHashOf(fs.readFileSync(path.join(tmpDir, relPath), "utf-8")),
+        symbols,
+        outgoingCalls,
+      });
+      symbolCount += symbols.filter((s) => s.name !== "<module>").length;
+      edgeCount += outgoingCalls.length;
+      for (const sym of symbols) {
+        if (sym.name === "<module>") continue;
+        const key = nameShardKey(sym.name);
+        const shard = shardNames.get(key) ?? new Map();
+        shard.set(sym.name, [...(shard.get(sym.name) ?? []), { file: relPath, id: sym.id }]);
+        shardNames.set(key, shard);
+      }
+    }
+    await saveFilePayloads(projId, payloads, generation);
+    for (const [key, names] of shardNames) {
+      await saveNameShard(projId, key, Object.fromEntries(names), generation);
+    }
+    await saveSymbolGraphMeta(projId, {
+      projectId: projId,
+      symbolCount,
+      edgeCount,
+      fileCount: payloads.length,
+      unresolvedEdgePct: 0,
+      builtAt: Date.now(),
+      schemaVersion: 2,
+      generation,
+    });
+  }
+
+  it("lists an attributed PHP class under its real name, not the attribute's", async () => {
+    // Issue #205: `#[ObservedBy([PostObserver::class])] class Post` was
+    // recorded under the attribute's name, so `codebase_symbol` never listed
+    // `Post` and `codebase_symbols query: ObservedBy` returned one entry per
+    // attributed class. The fixture runs through the persisted pipeline —
+    // rebuild → persistSymbolGraph → cache → tools — which is what the
+    // graph-refresh path runs; the storage is the suite's in-memory Qdrant
+    // mock, not Docker or a live server.
+    writeIssue205Fixture();
+    const { cache } = await runPipeline();
+
+    const payload = await cache.getFilePayload("src/Models/Post.php");
+    expect(payload?.symbols.map((s) => s.name)).toContain("Post");
+    expect(payload?.symbols.map((s) => s.name)).not.toContain("ObservedBy");
+
+    const contexts = await getSymbolContext(cache, "Post");
+    expect(contexts.map((c) => [c.symbol.name, c.symbol.kind, c.symbol.file])).toEqual([
+      ["Post", "class", "src/Models/Post.php"],
+    ]);
+
+    const lookup = await handleGraphTool("codebase_symbol", { name: "Post", projectPath: tmpDir });
+    expect(lookup).toContain("Symbol: Post (class)");
+    const wrongName = await handleGraphTool("codebase_symbol", { name: "ObservedBy", projectPath: tmpDir });
+    expect(wrongName).toBe('No symbol named "ObservedBy" found.');
+  });
+
+  it("answers impact for the class under the name the source writes", async () => {
+    // `codebase_impact Post` reported `Symbol 'Post' was not found in the
+    // symbol graph.` before the fix, while the file graph listed the
+    // observer's file as an importer — the reverse index is built from the
+    // resolved edge the class symbol's name has to match.
+    writeIssue205Fixture();
+    const { cache } = await runPipeline();
+
+    const impact = await getImpactRadius(cache, "Post", 3);
+    expect(impact.status).toBe("ok");
+    expect(impact.filesByDepth.get(1)).toEqual(["src/Observers/PostObserver.php"]);
+
+    const byImpact = await handleGraphTool("codebase_impact", { target: "Post", projectPath: tmpDir });
+    expect(byImpact).not.toContain("was not found");
+    expect(byImpact).toContain("PostObserver");
+  });
+
+  it("replaces a stale pre-fix symbol graph through the refresh path", async () => {
+    // Refresh evidence — symbol-graph refresh only. The store is this suite's
+    // in-memory Qdrant mock, so nothing here speaks for embeddings, deletion
+    // policies, Docker or a live server. The seed is the graph an index built
+    // before the fix held for this fixture: the real builder's own output
+    // with the class filed under the attribute's name and id — exactly the
+    // shape the pre-fix red runs recorded — written through the existing
+    // persistence API in the stored format. It must be readable as it stands
+    // (that is what an existing index is), and the existing refresh pipeline
+    // must replace it with no store surgery.
+    writeIssue205Fixture();
+
+    const staleGen = "pre-fix-seed-generation";
+    const built = await buildCodeGraph(tmpDir);
+    await seedPreFixSymbolGraph(built, staleGen);
+
+    // Readable as it stands, in the format the fix left untouched: the stale
+    // name answers exactly as the bug report describes and the real one does not.
+    const staleCache = await getSymbolGraphCache(projId);
+    if (!staleCache) throw new Error("Expected the seeded cache");
+    expect(staleCache.meta.schemaVersion).toBe(2);
+    expect((await getSymbolContext(staleCache, "ObservedBy")).map((c) => [c.symbol.name, c.symbol.id]))
+      .toEqual([["ObservedBy", "src/Models/Post.php::ObservedBy#5"]]);
+    expect(await getSymbolContext(staleCache, "Post")).toEqual([]);
+    expect((await getImpactRadius(staleCache, "Post", 3)).status).toBe("not_found");
+
+    // The existing refresh path republishes the symbol graph from source.
+    const { cache } = await runPipeline();
+
+    expect((await getSymbolContext(cache, "Post")).map((c) => [c.symbol.name, c.symbol.kind, c.symbol.file]))
+      .toEqual([["Post", "class", "src/Models/Post.php"]]);
+    const impact = await getImpactRadius(cache, "Post", 3);
+    expect(impact.status).toBe("ok");
+    expect(impact.filesByDepth.get(1)).toEqual(["src/Observers/PostObserver.php"]);
+
+    // And no stale entry survives in what readers resolve afterwards.
+    expect(await getSymbolContext(cache, "ObservedBy")).toEqual([]);
+    expect((await cache.getFilePayload("src/Models/Post.php"))?.symbols.map((s) => s.name))
+      .not.toContain("ObservedBy");
+    await vi.waitFor(async () => {
+      expect(await listStoredGenerations(projId)).not.toContain(staleGen);
+    });
+  });
+
+  it("restores corrected symbols through the version-triggered refresh without re-embedding", async () => {
+    // The upgrade path the fix rides on (issue #205 / maintainer request): an
+    // index built by an older version holds the pre-fix symbol names and a
+    // graph-input record whose builtByVersion is stale while every file hash
+    // is unchanged — so the version trigger in decideGraphRebuild is the only
+    // thing that can justify a rebuild. updateProjectIndex, the real updater
+    // rather than a direct rebuildGraph call, must run that trigger through
+    // shouldRebuildGraph to a real rebuild/persistence, restore lookup and
+    // impact under the real class name, drop the stale attribute-named
+    // entries, and regenerate no embeddings. Storage and embedding services
+    // are boundary mocks; the decision, update and rebuild run for real.
+    writeIssue205Fixture();
+
+    const built = await buildCodeGraph(tmpDir);
+    await seedPreFixSymbolGraph(built, "pre-fix-seed-generation");
+
+    // The already-indexed embedding state: one chunk point per fixture file
+    // and metadata whose file hashes equal the files as they stand — the
+    // "unchanged file hashes" half of the seed, so Phase 1 finds nothing to
+    // do. Keys come from the updater's own enumeration so they match exactly
+    // what Phase 1 looks up.
+    const collection = collectionName(projId);
+    const profile = resolveEffectiveIndexProfile("code", null, true, 3);
+    const hashes = new Map<string, string>();
+    for (const rel of await getIndexableFiles(tmpDir, undefined, profileExtensionLanguageMap(profile))) {
+      hashes.set(rel, hashContent(fs.readFileSync(path.join(tmpDir, rel), "utf-8")));
+    }
+    expect(hashes.size).toBe(3);
+    await saveProjectMetadata(collection, tmpDir, hashes.size, hashes.size, hashes, "completed", profile);
+    for (const rel of hashes.keys()) {
+      await clientInstance.upsert(collection, {
+        points: [{ id: rel, vector: [0], payload: { relativePath: rel } }],
+      });
+    }
+
+    // The persisted graph-input record exactly as the build left it: real
+    // record, real hashes, real settings and capabilities.
+    const record = built.graphInputs;
+    await saveGraphData(graphCollectionName(projId), tmpDir, built, record);
+
+    // Precondition, proved before the update runs: readers see the stale
+    // graph — the real class name is missing and the attribute's name answers
+    // — so the stale removal asserted below is the refresh's doing, standing
+    // on its own rather than on the sibling stale-graph test's seeding.
+    const staleCache = await getSymbolGraphCache(projId);
+    if (!staleCache) throw new Error("Expected the seeded cache");
+    expect(await getSymbolContext(staleCache, "Post")).toEqual([]);
+    expect((await getSymbolContext(staleCache, "ObservedBy")).map((c) => [c.symbol.name, c.symbol.id]))
+      .toEqual([["ObservedBy", "src/Models/Post.php::ObservedBy#5"]]);
+    expect((await getImpactRadius(staleCache, "Post", 3)).status).toBe("not_found");
+
+    // Same-version counterfactual: with the record's version left alone, the
+    // decision must find nothing to rebuild. decideGraphRebuild checks the
+    // version before any hash, so the rebuild reason asserted below cannot by
+    // itself prove the "unchanged file hashes, same settings and capabilities"
+    // premise — this control can. knownHash reads the same map the updater
+    // loads, keyed by its own enumeration, and any input the map does not hold
+    // is read from disk by the decision itself.
+    const quietChange: GraphChangeSummary = {
+      hasAdditions: false,
+      changed: new Map<string, string>(),
+      removed: new Set<string>(),
+      unreadable: new Set<string>(),
+      knownHash: (relativePath) => hashes.get(relativePath),
+    };
+    const sameVersionDecision = await shouldRebuildGraph(tmpDir, quietChange, undefined, projId);
+    expect(sameVersionDecision.rebuild).toBe(false);
+    expect(sameVersionDecision.reason).toBe("no graph input changed");
+
+    // Now age only the version: the rest of the record is exactly the data
+    // the control just ruled sufficient for no rebuild at all.
+    await saveGraphData(graphCollectionName(projId), tmpDir, built, {
+      ...record,
+      builtByVersion: "0.0.1-old",
+    });
+
+    // Fixture setup is done: from here, any embedding generation is the
+    // updater's own doing. Provider readiness probes are counted apart from
+    // generation so "not generated" is not confused with "provider untouched".
+    embedSpy.generations = 0;
+    embedSpy.readinessProbes = 0;
+    const progress: string[] = [];
+    const result = await updateProjectIndex(tmpDir, (message) => progress.push(message));
+    expect(result.cancelled).toBe(false);
+
+    // Symbol state is the primary oracle and is checked first, so a regression
+    // in the trigger fails on the wrong stored symbol: restored lookup and
+    // impact under the real class name…
+    const cache = await getSymbolGraphCache(projId);
+    if (!cache) throw new Error("Expected the refreshed symbol graph cache");
+    expect((await getSymbolContext(cache, "Post")).map((c) => [c.symbol.name, c.symbol.kind, c.symbol.file]))
+      .toEqual([["Post", "class", "src/Models/Post.php"]]);
+    const impact = await getImpactRadius(cache, "Post", 3);
+    expect(impact.status).toBe("ok");
+    expect(impact.filesByDepth.get(1)).toEqual(["src/Observers/PostObserver.php"]);
+
+    // …and the stale attribute-named entries gone from what readers resolve.
+    expect(await getSymbolContext(cache, "ObservedBy")).toEqual([]);
+    expect((await cache.getFilePayload("src/Models/Post.php"))?.symbols.map((s) => s.name))
+      .not.toContain("ObservedBy");
+
+    // The rebuilt record names the running version, closing the loop for the
+    // next update.
+    const reloaded = await loadGraphInputs(graphCollectionName(projId));
+    if (reloaded.status !== "stored") throw new Error("Expected a stored graph-input record");
+    expect(JSON.parse(String(reloaded.value)).builtByVersion).toBe(SOCRATICODE_VERSION);
+
+    // No embedding regeneration: every file hash was unchanged.
+    expect(embedSpy.generations).toBe(0);
+
+    // The rebuild ran because the recorded build version was stale — the
+    // decision's reason surfaces through the updater's own progress channel.
+    expect(progress.some((message) => message.includes("built by SocratiCode"))).toBe(true);
   });
 
   it("resolves multi-module duplicate symbol names preserving module identity", async () => {

@@ -259,6 +259,98 @@ function helper() {}
     });
   });
 
+  describe("a declaration preceded by an attribute is named by the declaration", () => {
+    /** Each symbol's `[kind, name, id, owner]`, module excluded, in registration order. */
+    const declsIn = (php: string): Array<[string, string, string, string | undefined]> =>
+      extract(php).symbols
+        .filter((s) => s.kind !== "module")
+        .map((s) => [s.kind, s.name, s.id, s.phpOwner]);
+
+    it("names an attributed class, interface or trait by the declaration, not the attribute", () => {
+      // An attribute list sits inside the declaration ahead of the name, so
+      // the first `name` descendant is the attribute's: `#[ObservedBy(…)]
+      // class Post` was registered as `ObservedBy`, and `codebase_symbol` and
+      // `codebase_impact` could not find `Post` at all (issue #205). The id
+      // keeps the declaration's own range — attributes included — exactly as
+      // it was, so only the name moves.
+      const php = [
+        "<?php",
+        "namespace App\\Models;",
+        "",
+        "#[ObservedBy([PostObserver::class])]",
+        "class Post",
+        "{",
+        "    public function author() {}",
+        "}",
+        "",
+        "#[Deprecated]",
+        "interface Publishable",
+        "{",
+        "}",
+        "",
+        "#[Route('/logs')]",
+        "trait Logs",
+        "{",
+        "}",
+      ].join("\n");
+      expect(declsIn(php)).toEqual([
+        ["class", "Post", "t.php::Post#4", "\\App\\Models\\"],
+        ["interface", "Publishable", "t.php::Publishable#10", "\\App\\Models\\"],
+        ["trait", "Logs", "t.php::Logs#15", "\\App\\Models\\"],
+        ["method", "author", "t.php::author#7", "\\App\\Models\\Post"],
+      ]);
+    });
+
+    it("leaves unattributed declarations recording exactly what they did", () => {
+      // The same declarations with the attributes removed must change
+      // nothing: same names, same ids, same owners, same order.
+      const php = [
+        "<?php",
+        "namespace App\\Models;",
+        "class Post",
+        "{",
+        "    public function author() {}",
+        "}",
+        "interface Publishable",
+        "{",
+        "}",
+        "trait Logs",
+        "{",
+        "}",
+      ].join("\n");
+      expect(declsIn(php)).toEqual([
+        ["class", "Post", "t.php::Post#3", "\\App\\Models\\"],
+        ["interface", "Publishable", "t.php::Publishable#7", "\\App\\Models\\"],
+        ["trait", "Logs", "t.php::Logs#10", "\\App\\Models\\"],
+        ["method", "author", "t.php::author#5", "\\App\\Models\\Post"],
+      ]);
+    });
+
+    it("owns each method by its attributed class, interface or trait's real name", () => {
+      // Ownership already reads the declaration's `name` field, so the owner
+      // and the class symbol must agree on the name the declaration writes —
+      // for the attributed interface and trait as much as the class.
+      const php = [
+        "<?php",
+        "namespace App;",
+        "#[Entity]",
+        "class User { public function saveIt() {} }",
+        "#[Deprecated]",
+        "interface Billable { public function bill(); }",
+        "#[Route('/logs')]",
+        "trait Logs { public function logIt() {} }",
+      ].join("\n");
+      expect(ownersIn(php)).toEqual([
+        ["User", "\\App\\"],
+        ["Billable", "\\App\\"],
+        ["Logs", "\\App\\"],
+        ["saveIt", "\\App\\User"],
+        ["bill", "\\App\\Billable"],
+        ["logIt", "\\App\\Logs"],
+      ]);
+    });
+  });
+
   describe("a class records what it inherits static methods from", () => {
     /** Each class-like's `[name, phpExtends, phpTraits]`. */
     const inheritanceIn = (php: string): Array<[string, string | undefined, string[] | undefined]> =>
