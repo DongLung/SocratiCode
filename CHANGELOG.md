@@ -4,6 +4,29 @@ All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
 
+## [1.16.1](https://github.com/giancarloerra/socraticode/compare/v1.16.0...v1.16.1) (2026-10-15)
+
+### Features
+
+* **graph:** add limit to codebase_symbol, codebase_impact and codebase_flow ([0f48a19](https://github.com/giancarloerra/socraticode/commit/0f48a191e42ccf5451507f8c84fb562925058aef)), closes [#203](https://github.com/giancarloerra/socraticode/issues/203)
+* opt-in cleanup of retired local indexes ([100bc72](https://github.com/giancarloerra/socraticode/commit/100bc728ff16697cff620a732a233a7fd9be4d4a))
+
+### Bug Fixes
+
+* **graph:** name attributed PHP declarations by their name field ([3b74ab6](https://github.com/giancarloerra/socraticode/commit/3b74ab65c6913a1846213730f8ae55541c65b65a))
+* **graph:** preserve classic JVM precedence with KMP source sets ([7ec0297](https://github.com/giancarloerra/socraticode/commit/7ec029718e18937ccbe7aed68f36f8ec831625bc))
+* **graph:** resolve JVM imports in Kotlin Multiplatform / Gradle source sets ([a9d5eb1](https://github.com/giancarloerra/socraticode/commit/a9d5eb1c24971061fd6dba2c1d157e1980bd6232))
+* **graph:** select KMP imports by caller source set ([413e47d](https://github.com/giancarloerra/socraticode/commit/413e47d15a94874fd15b48f2e674bc53b179d42b))
+* preserve proven local index ownership ([6d6725a](https://github.com/giancarloerra/socraticode/commit/6d6725af185b1224776560267a8aa021abeec0f9))
+* **qdrant:** complete dispatcher probe and cover initialization ([85b96a1](https://github.com/giancarloerra/socraticode/commit/85b96a1f7c6145e628554dac80b5a025c39356d6))
+* **qdrant:** probe the undici pair instead of matching a Node version ([70a8b2f](https://github.com/giancarloerra/socraticode/commit/70a8b2f9ab00ce0a6b7fb907500a99da6e74fe57))
+* **symbol-graph:** retry Qdrant requests once on a closed connection ([0418bd9](https://github.com/giancarloerra/socraticode/commit/0418bd971152025d7cd9d5fb71d857b4fade693b))
+
+### Tests
+
+* **graph:** cover first incremental update after upgrade ([3ca6659](https://github.com/giancarloerra/socraticode/commit/3ca6659e387adcb47408246efa159b09e8148fab))
+* isolate automatic cleanup interval timers ([be9a14e](https://github.com/giancarloerra/socraticode/commit/be9a14ec0c9c537c43d47258734567d01f043997))
+
 ## [1.16.0](https://github.com/giancarloerra/socraticode/compare/v1.15.0...v1.16.0) (2026-09-28)
 
 ### Features
