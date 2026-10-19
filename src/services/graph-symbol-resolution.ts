@@ -1131,6 +1131,41 @@ export function resolveCallSites(
     return found;
   };
 
+  /**
+   * Whether the project type `full` declares `name` as a value — a field,
+   * property, constant, event or enum member, its own or inherited from a
+   * project base — other than one typed as itself (`csSelfTypedMembers`).
+   */
+  const csValueMember = (full: string, name: string, seen = new Set<string>()): boolean => {
+    if (seen.has(full)) return false;
+    seen.add(full);
+    const parts = csTypesNamed(full);
+    if (parts.some((p) => p.csSelfTypedMembers?.includes(name))) return false;
+    if (parts.some((p) => p.csMembers?.includes(name))) return true;
+    const member = `${full}.${name}`;
+    if ((csByName().get(name) ?? []).some((s) => s.kind === "variable" && csFullNameOf(s) === member)) return true;
+    for (const part of parts) {
+      for (const base of part.csBases ?? []) {
+        for (const b of csBaseType(part, base)) if (csValueMember(csFullNameOf(b), name, seen)) return true;
+      }
+    }
+    return false;
+  };
+  /**
+   * Whether `name`, heading an expression inside `context`, names a value
+   * rather than a type, as C# decides it: each enclosing type in turn,
+   * innermost first, declares it as a nested type (a type) or as a value
+   * member. The locals and members the extractor sees are already recorded as
+   * receivers; this finds those a type declares in another file or inherits.
+   */
+  const csHeadIsValue = (context: CsContext, name: string): boolean => {
+    for (const scope of context.types) {
+      if (csTypesNamed(`${scope}.${name}`).length > 0 || csInheritedNested(scope, name, csTypesNamed).length > 0) return false;
+      if (csValueMember(scope, name)) return true;
+    }
+    return false;
+  };
+
   const reexportsByFile = new Map<string, SymbolEdge[]>();
   for (const [file, edges] of outgoingCallsByFile.entries()) {
     const reexports = edges.filter((edge) => edge.kind === "reexport");
@@ -1819,7 +1854,9 @@ export function resolveCallSites(
           // name alone would bind an unrelated same-named type.
           const segments = relative ? [...relative.split("."), name] : [name];
           const shortest = edge.csMemberReceiver ? 1 : segments.length;
-          for (let n = segments.length; n >= shortest && found.length === 0; n--) {
+          // A member access on a value (`Config.Load()` on a property) references no type.
+          const value = edge.csMemberReceiver === true && !anchored && csHeadIsValue(context, segments[0]);
+          for (let n = segments.length; !value && n >= shortest && found.length === 0; n--) {
             const path = anchor + segments.slice(0, n).join(".");
             const next = n < segments.length ? segments[n] : null;
             const declaresNext = (t: SymbolNode): boolean => next === null || csMembersOf(t, next, true).length > 0;
@@ -1838,6 +1875,9 @@ export function resolveCallSites(
             found.push(...(ctors.length > 0 ? ctors : [type]));
           }
           framework = csFrameworkPath(relative?.split(".") ?? []);
+        } else if (qualifier && !anchored && csHeadIsValue(context, qualifier.split(".")[0])) {
+          // `Report.Print()` on a property `Report` declared in another file or
+          // inherited: an instance call, whose receiver's type is not inferred.
         } else if (qualifier) {
           found = lookup(`${qualifier}.${name}`, (s) => !CS_TYPE_KINDS.has(s.kind));
           if (found.length === 0) {

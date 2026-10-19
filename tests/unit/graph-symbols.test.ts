@@ -741,11 +741,11 @@ public class Service {
       const calls = out.rawCalls.filter((c) => c.kind === "call");
       expect(calls.find((c) => c.calleeName === "Calc")).toBeTruthy();
       const compute = calls.filter((c) => c.calleeName === "Compute");
-      // A variable receiver keeps its written path; the resolver finds no type by that name.
-      expect(compute.map((c) => c.calleeQualifier)).toEqual(["Calc", "_calc", undefined]);
+      // A field receiver is a value: an instance call, with no qualifier to look a type up by.
+      expect(compute.map((c) => c.calleeQualifier)).toEqual(["Calc", undefined, undefined]);
       expect(calls.find((c) => c.calleeName === "Run")?.calleeQualifier).toBeUndefined();
       expect(calls.find((c) => c.calleeName === "Run")?.receiver).toBe("this");
-      expect(compute.map((c) => c.receiver)).toEqual([undefined, undefined, undefined]);
+      expect(compute.map((c) => c.receiver)).toEqual([undefined, "?", undefined]);
       expect(calls.find((c) => c.calleeName === "Make")?.calleeQualifier).toBe("Helper");
       // The field type (line 3), `new Calc()` (line 4) and the static call's receiver (line 6) reference `Calc`;
       // `_calc.Compute` and `this.Run` reference no type.

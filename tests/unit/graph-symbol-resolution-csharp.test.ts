@@ -550,6 +550,59 @@ describe("C# extractor-to-resolver regressions", () => {
     ]);
   });
 
+  it("reads a receiver that names a value as an instance call, never as a same-named type", () => {
+    const types = ["Report", "Quill", "Bellows", "Abacus"]
+      .map((t, i) => `public class ${t} { public static int Print() => ${i}; }`)
+      .join(" ");
+    const files = {
+      "Types.cs": `namespace App { public interface IPrinter { int Print(); } ${types} }`,
+      "Shelf.cs": "namespace App { public class Shelf { public IPrinter Bellows { get; } public Report Report { get; } } }",
+      "Desk.cs": [
+        "namespace App { public class Desk : Shelf {",
+        "  IPrinter Quill;",
+        "  int A(IPrinter Report) => Report.Print();",
+        "  int B() { IPrinter Report = null; return Report.Print(); }",
+        "  int C() => Quill.Print();",
+        "  int D() => Bellows.Print();",
+        "  int E() => Report.Print();",
+        "  int F(Report Report) => Report.Print();",
+        "  int G(object Math) => Math.GetHashCode();",
+        "} }",
+      ].join("\n"),
+      "Counter.cs": "namespace App { public partial class Counter { public IPrinter Abacus { get; } } }",
+      "Counter.Use.cs": "namespace App { public partial class Counter {\n  int Go() => Abacus.Print();\n} }",
+      "Outer.cs": [
+        "namespace App { public class Outer { IPrinter Report;",
+        "  public class Inner { public class Report { public static int Print() => 5; }",
+        "    int Go() => Report.Print();",
+        "} } }",
+      ].join("\n"),
+    };
+    const { at } = run(files);
+    const print = (file: string, line: number) => at(file, line, "call", "Print");
+    const unresolved = [{ confidence: "unresolved", targets: [] }];
+    // A parameter, a local, a field of this file, a property inherited from a
+    // project base or declared in another part of the type: each is a value.
+    expect(print("Desk.cs", 3)).toEqual(unresolved);
+    expect(print("Desk.cs", 4)).toEqual(unresolved);
+    expect(print("Desk.cs", 5)).toEqual(unresolved);
+    expect(print("Desk.cs", 6)).toEqual(unresolved);
+    expect(print("Counter.Use.cs", 2)).toEqual(unresolved);
+    // A value's member access references no type; one the extractor cannot see stays unresolved.
+    expect(at("Desk.cs", 3, "type_reference", "Report")).toEqual([]);
+    expect(at("Desk.cs", 4, "type_reference", "Report")).toEqual([]);
+    expect(at("Desk.cs", 5, "type_reference", "Quill")).toEqual([]);
+    expect(at("Desk.cs", 6, "type_reference", "Bellows")).toEqual(unresolved);
+    expect(at("Counter.Use.cs", 2, "type_reference", "Abacus")).toEqual(unresolved);
+    // `Report Report`, inherited or a parameter, may be read as the type: C# then binds the static method.
+    expect(print("Desk.cs", 7)).toEqual([{ confidence: "unique", targets: ["App.Report.Print"] }]);
+    expect(print("Desk.cs", 8)).toEqual([{ confidence: "unique", targets: ["App.Report.Print"] }]);
+    // A value named like a framework type is no framework call.
+    expect(at("Desk.cs", 9, "call", "GetHashCode")).toEqual(unresolved);
+    // The innermost type's nested `Report` hides the outer type's field.
+    expect(print("Outer.cs", 3)).toEqual([{ confidence: "local", targets: ["App.Outer.Inner.Report.Print"] }]);
+  });
+
   it("leaves a path through an extern alias unresolved", () => {
     const files = {
       "Billing/Calc.cs": "namespace App.Billing { public class Calc { public static int Compute() => 1; } }",

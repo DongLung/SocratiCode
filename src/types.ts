@@ -194,6 +194,15 @@ export interface SymbolNode {
    */
   csMembers?: string[];
   /**
+   * C# types only: the fields and properties whose declared type is written
+   * with their own name (`Status Status`). C# lets such a name be read as the
+   * value or as the type (the "Color Color" rule), so it never hides the type
+   * of that name from an expression. Every other field, property, constant,
+   * event and enum member of the type does: a receiver starting with it is a
+   * value, and its access names no type. Absent when the type declares none.
+   */
+  csSelfTypedMembers?: string[];
+  /**
    * C# types only: the base class and interfaces as the declaration writes
    * them, type arguments dropped and the file's `using` aliases written out
    * (`App.Data.Repository`, `IFoo`). Resolution looks each one up as C# does —
@@ -292,9 +301,11 @@ export interface SymbolEdge {
    * C# writes it as the call site spells it, dots kept, type arguments
    * dropped and the file's `using` alias in scope written out:
    * `Billing.Calc` for `Billing.Calc.Compute()`, `global::Billing.Calc` when
-   * the source anchors it. A receiver that is a variable (`repo.Save()`) is
-   * kept too, so the call is never answered by its bare name; no type matches
-   * it, and the edge stays unresolved. An object creation
+   * the source anchors it. A path starting at a local, a parameter or a
+   * member of an enclosing type declared in the file is a value, recorded as
+   * `receiver` `?` instead; one starting at a member declared elsewhere is
+   * kept, and resolution recognises it. Any other path stays a qualifier,
+   * lowercase or not, so the call is never answered by its bare name. An object creation
    * `new Billing.Calc()` carries the whole type path, `Billing.Calc`, with
    * `Calc` as the callee — a member cannot share its class's name in C#, so
    * the repeated name marks a constructor call without ambiguity.
@@ -305,17 +316,19 @@ export interface SymbolEdge {
    * access (`Config.Instance` in `Config.Instance.Load()`), whose last segments
    * may be static members rather than types — an expression does not say
    * which. Resolution tries the longest prefix of the written path that names
-   * a project type first (`Config.Instance`, then `Config`). Absent on a type
-   * position, where the whole path is the type, and on every graph persisted
-   * before it existed.
+   * a project type first (`Config.Instance`, then `Config`). The receiver is
+   * an expression, so a head that names a value (a property the caller's type
+   * inherits) references no type. Absent on a type position, where the whole
+   * path is the type, and on every graph persisted before it existed.
    */
   csMemberReceiver?: boolean;
   callSite: { file: string; line: number };
   /** Receiver expression for method calls (e.g. "fighter" in "fighter.take_damage()").
    *  Used by GDScript receiver-type resolution. Absent for bare function calls.
-   *  C# sets it only where the receiver is no name path: `this`, `base`, or `?`
-   *  for any other expression (a call result, `a?.b`, an element access) —
-   *  such a call is answered from the caller's own type or its bases, or not at all. */
+   *  C# sets it only where the receiver is no type path: `this`, `base`, or `?`
+   *  for any other expression (a value such as a local or parameter, a call
+   *  result, `a?.b`, an element access) — such a call is answered from the
+   *  caller's own type or its bases, or not at all. */
   receiver?: string;
   /** True when a GDScript call edge represents `signal_name.emit()`.
    *  Optional so symbol graphs built before signal-edge support remain readable. */

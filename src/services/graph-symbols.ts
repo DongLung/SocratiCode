@@ -2790,34 +2790,143 @@ function extractFromCSharp(
       }
     }
   }
+  // The innermost type declaration containing `range`, other than `self`.
+  const ownerOf = (range: CsRange, self?: SymbolNode): SymbolNode | null => {
+    let owner: { range: CsRange; sym: SymbolNode } | null = null;
+    for (const t of typeSymbols) {
+      if (t.sym !== self && csWithin(range, t.range) && (!owner || t.range.start >= owner.range.start)) owner = t;
+    }
+    return owner?.sym ?? null;
+  };
+  // A value whose declared type is written with its own name (`Status Status`)
+  // may be read as either in C#, the "Color Color" rule: it never hides the
+  // type of that name, and the type lookup decides.
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const typedAsItself = (type: any, name: string): boolean => csTypeHeadIdentifier(type)?.text() === name;
+  // Each type's value members and nested types by name, read below to tell a
+  // receiver that is a value from one that is a type.
+  const valueMembers = new Map<SymbolNode, Set<string>>();
+  const nestedTypes = new Map<SymbolNode, Set<string>>();
+  const addName = (map: Map<SymbolNode, Set<string>>, sym: SymbolNode, name: string) => {
+    const names = map.get(sym);
+    if (names) names.add(name);
+    else map.set(sym, new Set([name]));
+  };
   // Fields, constants, events and enum members are not symbols, but a member
-  // access names them (`OrderState.Open.Id`): each type keeps their names so
-  // resolution can tell a static member from a namespace segment.
-  const memberNames: Array<[CsRange, string]> = [];
+  // access names them (`OrderState.Open.Id`): each type keeps their names in
+  // `csMembers` so resolution can tell a static member from a namespace segment.
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const addMember = (d: any, name: string, type: any, inCsMembers: boolean) => {
+    const owner = ownerOf(csRange(d));
+    if (!owner) return;
+    if (inCsMembers) {
+      owner.csMembers ??= [];
+      owner.csMembers.push(name);
+    }
+    if (type && typedAsItself(type, name)) {
+      owner.csSelfTypedMembers ??= [];
+      owner.csSelfTypedMembers.push(name);
+    } else addName(valueMembers, owner, name);
+  };
   for (const k of ["field_declaration", "event_field_declaration"]) {
     for (const d of safeFindAll(root, k)) {
       const declaration = safeFind(d, "variable_declaration");
+      const type = declaration?.field?.("type") ?? null;
       // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
       for (const v of declaration?.children?.().filter((c: any) => c.kind() === "variable_declarator") ?? []) {
         const n = csNameField(v) ?? safeFind(v, "identifier");
-        if (n) memberNames.push([csRange(d), n.text()]);
+        if (n) addMember(d, n.text(), type, true);
       }
     }
   }
-  for (const d of safeFindAll(root, "enum_member_declaration")) {
+  for (const k of ["event_declaration", "enum_member_declaration"]) {
+    for (const d of safeFindAll(root, k)) {
+      const n = csNameField(d);
+      if (n) addMember(d, n.text(), d.field?.("type") ?? null, true);
+    }
+  }
+  // A property is a symbol of its own, and a value all the same.
+  for (const d of safeFindAll(root, "property_declaration")) {
     const n = csNameField(d);
-    if (n) memberNames.push([csRange(d), n.text()]);
+    if (n) addMember(d, n.text(), d.field?.("type") ?? null, false);
   }
-  for (const [range, name] of memberNames) {
-    let owner: { range: CsRange; sym: SymbolNode } | null = null;
-    for (const t of typeSymbols) {
-      if (csWithin(range, t.range) && (!owner || t.range.start >= owner.range.start)) owner = t;
+  for (const t of typeSymbols) {
+    const owner = ownerOf(t.range, t.sym);
+    if (owner) addName(nestedTypes, owner, t.sym.name);
+  }
+  // Locals, parameters, pattern and range variables, each with the range it
+  // is visible in: the enclosing block or construct, or the whole member for
+  // a parameter. A pattern variable is given its whole block, which over-
+  // rather than under-states where it is visible.
+  const localScopes = new Set([
+    "block", "switch_section", "for_statement", "foreach_statement", "using_statement", "fixed_statement",
+    "catch_clause", "lambda_expression", "anonymous_method_expression", "query_expression",
+  ]);
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const scopeOf = (node: any): CsRange => {
+    let p = node.parent?.() ?? null;
+    while (p && !localScopes.has(p.kind())) p = p.parent?.() ?? null;
+    return csRange(p ?? root);
+  };
+  const locals = new Map<string, CsRange[]>();
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const bind = (id: any, scope: CsRange, type: any = null) => {
+    if (!id) return;
+    if (id.kind() !== "identifier" && id.kind() !== "implicit_parameter") {
+      // A designation or tuple pattern binds every identifier directly in it.
+      for (const part of id.children?.() ?? []) if (part.kind() === "identifier") bind(part, scope);
+      return;
     }
-    if (owner) {
-      owner.sym.csMembers ??= [];
-      owner.sym.csMembers.push(name);
+    const name = id.text();
+    if (type && typedAsItself(type, name)) return;
+    const scopes = locals.get(name);
+    if (scopes) scopes.push(scope);
+    else locals.set(name, [scope]);
+  };
+  for (const p of safeFindAll(root, "parameter")) {
+    const owner = p.parent?.()?.parent?.() ?? null;
+    bind(csNameField(p), csRange(owner ?? root), p.field?.("type") ?? null);
+  }
+  for (const p of safeFindAll(root, "implicit_parameter")) bind(p, csRange(p.parent?.() ?? root));
+  for (const v of safeFindAll(root, "variable_declarator")) {
+    const declaration = v.parent?.() ?? null;
+    const statement = declaration?.parent?.() ?? null;
+    const kind = statement?.kind();
+    if (!statement || kind === "field_declaration" || kind === "event_field_declaration") continue;
+    const scope = kind === "local_declaration_statement" ? scopeOf(statement) : csRange(statement);
+    // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+    const id = csNameField(v) ?? v.children?.().find((c: any) => c.kind() === "identifier" || c.kind() === "tuple_pattern");
+    bind(id, scope, declaration?.field?.("type") ?? null);
+  }
+  for (const k of ["declaration_pattern", "recursive_pattern", "declaration_expression", "var_pattern"]) {
+    for (const d of safeFindAll(root, k)) bind(csNameField(d) ?? safeFind(d, "identifier"), scopeOf(d), d.field?.("type") ?? null);
+  }
+  for (const d of safeFindAll(root, "catch_declaration")) bind(csNameField(d), csRange(d.parent?.() ?? root), d.field?.("type"));
+  for (const d of safeFindAll(root, "foreach_statement")) bind(d.field?.("left") ?? null, csRange(d), d.field?.("type"));
+  for (const k of ["from_clause", "let_clause", "join_clause", "join_into_clause", "query_continuation"]) {
+    for (const d of safeFindAll(root, k)) {
+      // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+      bind(csNameField(d) ?? d.children?.().find((c: any) => c.kind() === "identifier"), scopeOf(d));
     }
   }
+  /**
+   * Whether the simple name `name` at byte offset `at` names a value, looked
+   * up as C# looks a simple name up in an expression: a local or parameter
+   * first, then each enclosing type, innermost first, which declares it as a
+   * nested type (a type) or as a field, property, constant or event (a value).
+   * Members a type declares in another file or inherits are left to resolution.
+   */
+  const valueAt = (name: string, at: number): boolean => {
+    if (locals.get(name)?.some((r) => r.start <= at && at <= r.end)) return true;
+    const enclosing = typeSymbols
+      .filter((t) => t.range.start <= at && at <= t.range.end)
+      .sort((a, b) => b.range.start - a.range.start);
+    for (const t of enclosing) {
+      if (nestedTypes.get(t.sym)?.has(name)) return false;
+      if (valueMembers.get(t.sym)?.has(name)) return true;
+    }
+    return false;
+  };
 
   const rawCalls: ExtractedSymbols["rawCalls"] = [];
   const seenRefs = new Set<string>();
@@ -2840,9 +2949,7 @@ function extractFromCSharp(
   // A path's last segment is the type; the segments before it are its written
   // qualifier. `path` is written out through the alias in scope at `at`.
   const pushPathRef = (path: string[], line: number, at: number, memberReceiver = false) => {
-    const segments = path.filter((p) => p !== CS_GLOBAL).length;
-    pushTypeRef(path[path.length - 1], path.length > 1 ? csJoin(path.slice(0, -1)) : undefined, line, at,
-      memberReceiver && segments > 1);
+    pushTypeRef(path[path.length - 1], path.length > 1 ? csJoin(path.slice(0, -1)) : undefined, line, at, memberReceiver);
   };
   // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
   const pushTypeRefAt = (id: any) => {
@@ -2869,8 +2976,11 @@ function extractFromCSharp(
       // included: dropping it would leave a bare name for local-first lookup.
       const expr = fn.field?.("expression") ?? null;
       const path = csNamePath(expr);
-      if (path) calleeQualifier = csJoin(expandAt(path, csRange(expr).start));
-      else receiver = expr?.kind() === "this" || expr?.kind() === "base" ? expr.kind() : "?";
+      // A path starting at a value (`order.Save()`, `Report.Print()` on a
+      // parameter `Report`) is an instance receiver, never a type.
+      if (path && (path[0] === CS_GLOBAL || !valueAt(path[0], csRange(expr).start))) {
+        calleeQualifier = csJoin(expandAt(path, csRange(expr).start));
+      } else receiver = expr?.kind() === "this" || expr?.kind() === "base" ? expr.kind() : "?";
     } else if (fn?.kind() === "identifier" || fn?.kind() === "generic_name") {
       calleeName = csTypeHeadIdentifier(fn)?.text() ?? null;
     } else if (fn) {
@@ -2962,6 +3072,8 @@ function extractFromCSharp(
     // call itself still keeps a lowercase receiver as its qualifier.
     if (!receiver || (receiver[0] !== CS_GLOBAL && !/^[A-Z]/.test(receiver[0]))) continue;
     const at = csRange(expr).start;
+    // A value's member (`Config.Load()` on a property `Config`) references no type.
+    if (receiver[0] !== CS_GLOBAL && valueAt(receiver[0], at)) continue;
     pushPathRef(expandAt(receiver, at), node.range().start.line + 1, at, true);
   }
   // `[Foo]` names the class `FooAttribute`; the compiler accepts both spellings.
