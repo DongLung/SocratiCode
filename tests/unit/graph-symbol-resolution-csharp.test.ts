@@ -524,4 +524,16 @@ describe("C# extractor-to-resolver regressions", () => {
     expect(at("Nest.cs", 19, "type_reference", "Missing")).toEqual([{ confidence: "unresolved", targets: [] }]);
     expect(at("Nest.cs", 36, "call", "Run")).toEqual([{ confidence: "local", targets: ["App.Pong.Run"] }]);
   });
+
+  it("answers a call through a lowercase namespace by that namespace, never a same-named local method", () => {
+    const files = {
+      "Lib/Calc.cs": "namespace vendor.tools { public class Calc { public static int Compute() => 1; } }",
+      "Shop.cs": "namespace App { public class Shop {\n  int Compute() => 0;\n  int Go() => vendor.tools.Calc.Compute() + nowhere.Calc.Compute();\n} }",
+    };
+    const { at } = run(files);
+    expect(at("Shop.cs", 3, "call", "Compute")).toEqual([
+      { confidence: "unique", targets: ["vendor.tools.Calc.Compute"] },
+      { confidence: "unresolved", targets: [] },
+    ]);
+  });
 });
