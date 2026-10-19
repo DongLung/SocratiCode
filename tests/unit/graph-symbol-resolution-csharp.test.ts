@@ -488,6 +488,68 @@ describe("C# extractor-to-resolver regressions", () => {
     expect(at("Both.cs", 8, "type_reference", "Calc")).toEqual([{ confidence: "unresolved", targets: [] }]);
   });
 
+  it("consults a namespace block's imports before any outer namespace, and the file's after the global one", () => {
+    const files = {
+      "Root.cs": "public class Calc { public static int Compute() => 0; }",
+      "Vendor.cs": "namespace Vendor { public class Calc { public static int Compute() => 1; } }",
+      // The block's import is consulted at `App`, before the global `Calc`.
+      "Shop.cs": "namespace App { using Vendor; public class Shop {\n  int Go(Calc c) => Calc.Compute();\n} }",
+      // A file-level import is consulted only after the global namespace's own types.
+      "Top.cs": "using Vendor;\nnamespace App.Top { public class Top {\n  int Go(Calc c) => Calc.Compute();\n} }",
+    };
+    const { at } = run(files);
+    expect(at("Shop.cs", 2, "call", "Compute")).toEqual([{ confidence: "unique", targets: ["Vendor.Calc.Compute"] }]);
+    expect(at("Shop.cs", 2, "type_reference", "Calc")).toEqual([{ confidence: "unique", targets: ["Vendor.Calc"] }]);
+    expect(at("Top.cs", 3, "call", "Compute")).toEqual([{ confidence: "unique", targets: ["Calc.Compute"] }]);
+    expect(at("Top.cs", 3, "type_reference", "Calc")).toEqual([{ confidence: "unique", targets: ["Calc"] }]);
+  });
+
+  it("resolves a block's import from the block's namespace unless anchored, and imports types, not namespaces", () => {
+    const files = {
+      "AppBilling.cs": "namespace App.Billing { public class Calc { public static int Compute() => 1; } }",
+      "RootBilling.cs": "namespace Billing { public class Calc { public static int Compute() => 2; } }",
+      "AppTools.cs": "namespace App.Tools { public class Kit { public static int Make() => 3; } }",
+      "Shop.cs": [
+        "namespace App { using Billing; public class Shop {",
+        "  int Go() => Calc.Compute();",
+        "} }",
+        "namespace App.Root { using global::Billing; public class Root {",
+        "  int Go() => Calc.Compute();",
+        "} }",
+        "namespace Elsewhere { using App; public class Far {",
+        "  int Go() => Tools.Kit.Make();",
+        "} }",
+      ].join("\n"),
+      "Top.cs": "using Billing;\nnamespace App.Top { public class Top {\n  int Go() => Calc.Compute();\n} }",
+    };
+    const { at } = run(files);
+    // `using Billing;` inside `namespace App` names `App.Billing`.
+    expect(at("Shop.cs", 2, "call", "Compute")).toEqual([{ confidence: "unique", targets: ["App.Billing.Calc.Compute"] }]);
+    expect(at("Shop.cs", 5, "call", "Compute")).toEqual([{ confidence: "unique", targets: ["Billing.Calc.Compute"] }]);
+    // `using App;` imports `App`'s types; `App.Tools` is a namespace, so `Tools.` is not reached through it.
+    expect(at("Shop.cs", 8, "call", "Make")).toEqual([{ confidence: "unresolved", targets: [] }]);
+    // A file-level import is resolved from the global namespace.
+    expect(at("Top.cs", 3, "call", "Compute")).toEqual([{ confidence: "unique", targets: ["Billing.Calc.Compute"] }]);
+  });
+
+  it("keeps the imports of namespace blocks written on one line to their own block", () => {
+    const files = {
+      "X.cs": "namespace Xs { public class Calc { public static int Compute() => 1; } }",
+      "Y.cs": "namespace Ys { public class Calc { public static int Compute() => 2; } }",
+      "Pair.cs":
+        "namespace A { using Xs; class C { int Go() => Calc.Compute(); } } namespace B { using Ys; class D { int Go() => Calc.Compute(); } }",
+    };
+    const { at } = run(files);
+    expect(at("Pair.cs", 1, "call", "Compute")).toEqual([
+      { confidence: "unique", targets: ["Xs.Calc.Compute"] },
+      { confidence: "unique", targets: ["Ys.Calc.Compute"] },
+    ]);
+    expect(at("Pair.cs", 1, "type_reference", "Calc")).toEqual([
+      { confidence: "unique", targets: ["Xs.Calc"] },
+      { confidence: "unique", targets: ["Ys.Calc"] },
+    ]);
+  });
+
   it("leaves a path through an extern alias unresolved", () => {
     const files = {
       "Billing/Calc.cs": "namespace App.Billing { public class Calc { public static int Compute() => 1; } }",

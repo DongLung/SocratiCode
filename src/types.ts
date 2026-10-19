@@ -216,11 +216,21 @@ export interface SymbolNode {
    */
   csUsings?: string[];
   /**
-   * C# `<module>` symbols only: the imports declared inside a namespace block,
-   * with the block's lines. They apply to references within those lines only,
-   * so a sibling block's imports never reach them. Absent when no block has any.
+   * C# `<module>` symbols only: the namespace blocks that import anything,
+   * each with its full namespace name, its `using`s as written (`global::`
+   * kept) and `outer`, the index of the nearest enclosing block here. A
+   * block's imports apply at its own namespace's level of lookup, and only to
+   * the declarations inside it (`csBlock`), so a sibling block's never reach
+   * them — on the same line or not. A file-scoped namespace is a block over
+   * the rest of its file. Absent when no block imports anything.
    */
-  csScopedUsings?: Array<{ line: number; endLine: number; usings: string[] }>;
+  csBlockUsings?: Array<{ namespace: string; usings: string[]; outer?: number }>;
+  /**
+   * C# symbols only: the index into the file's `csBlockUsings` of the
+   * innermost importing namespace block that contains the declaration. Absent
+   * outside every such block.
+   */
+  csBlock?: number;
 }
 
 /** Kind of relationship an edge represents */

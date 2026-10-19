@@ -951,67 +951,122 @@ export function resolveCallSites(
     }
     return csSymbolIndex.get(id);
   };
-  /**
-   * What a C# reference at `line` of `file` imports: the file's own top-level
-   * `using`s, its `global using`s among them, then those of every namespace
-   * block enclosing that line. Another file's `global using` is not applied:
-   * which files share a compilation is a project-system fact the graph does
-   * not record.
-   */
-  const csUsingsAt = (file: string, line: number): string[] => {
-    const module = (symbolsByFile.get(file) ?? []).find((s) => s.kind === "module");
-    const fileWide = module?.csUsings ?? [];
-    const scoped = (module?.csScopedUsings ?? []).filter((b) => b.line <= line && line <= b.endLine);
-    return scoped.length === 0 ? fileWide : Array.from(new Set([...scoped.flatMap((b) => b.usings), ...fileWide]));
-  };
-  /**
-   * The scopes C# looks a name up in from inside `sym`, innermost first: the
-   * type itself when `sym` is one, then each enclosing type and namespace,
-   * then the global namespace (`""`). `null` when `sym` has no full name — a
-   * file-level caller, or a graph persisted before `csFullName` — whose names
-   * are then looked up from the global namespace and the imports alone.
-   */
-  const csScopesOf = (sym: SymbolNode | undefined): string[] | null => {
-    if (!sym?.csFullName) return null;
-    const parts = sym.csFullName.split(".");
-    const scopes: string[] = [];
-    for (let n = CS_TYPE_KINDS.has(sym.kind) ? parts.length : parts.length - 1; n >= 1; n--) {
-      scopes.push(parts.slice(0, n).join("."));
+  // Every project namespace and type full name, with each of its prefixes.
+  let csNamespaceIndex: Set<string> | undefined;
+  const csIsNamespaceOrType = (full: string): boolean => {
+    if (!csNamespaceIndex) {
+      csNamespaceIndex = new Set();
+      for (const syms of symbolsByFile.values()) {
+        for (const s of syms) {
+          if (s.language !== "csharp" || !CS_TYPE_KINDS.has(s.kind)) continue;
+          const parts = csFullNameOf(s).split(".");
+          for (let n = 1; n <= parts.length; n++) csNamespaceIndex.add(parts.slice(0, n).join("."));
+        }
+      }
     }
-    scopes.push("");
-    return scopes;
+    return csNamespaceIndex.has(full);
   };
   /**
-   * The symbols a dotted `path` written at `line` of `file` names, looked up
-   * as C# looks a name up rather than by name across the project, and never
-   * by file proximity: an exact full name under each of `scopes`, innermost
-   * first, then under each namespace or type imported there. Two types
-   * imported under one name are an ambiguity C# itself rejects, so neither is
-   * answered; a `global::`-anchored path is looked up in the global namespace
-   * alone. Every part of a partial type is answered.
+   * A namespace block's `using`s as full names. Each is resolved as C#
+   * resolves it, from the block's own namespace outward (`using Billing;` in
+   * `namespace App` is `App.Billing` when the project declares one), and from
+   * the global namespace alone when anchored.
    */
-  const csLookup = (
-    scopes: string[],
-    file: string,
-    line: number,
-    written: string,
-    accept: (s: SymbolNode) => boolean,
-  ): SymbolNode[] => {
+  const csBlockImportCache = new Map<string, string[]>();
+  const csBlockImports = (file: string, block: { namespace: string; usings: string[] }, index: number): string[] => {
+    const key = `${file}\u0000${index}`;
+    const cached = csBlockImportCache.get(key);
+    if (cached) return cached;
+    const resolved = block.usings.map((u) => {
+      if (u.startsWith(CS_GLOBAL_ANCHOR)) return u.slice(CS_GLOBAL_ANCHOR.length);
+      const parts = block.namespace ? block.namespace.split(".") : [];
+      for (let n = parts.length; n >= 1; n--) {
+        const full = `${parts.slice(0, n).join(".")}.${u}`;
+        if (csIsNamespaceOrType(full)) return full;
+      }
+      return u;
+    });
+    csBlockImportCache.set(key, resolved);
+    return resolved;
+  };
+  /**
+   * Where C# looks a name up from inside `sym` of `file`: its enclosing
+   * types, innermost first (the type itself when `sym` is one), then each
+   * enclosing namespace out to the global one (`""`), with the imports C#
+   * consults at that level — a namespace block's `using`s at the block's own
+   * namespace, the file's at the global namespace. A file-level caller, or one
+   * from a graph persisted before `csFullName`, sees the global level alone.
+   * Another file's `global using` is not applied: which files share a
+   * compilation is a project-system fact the graph does not record.
+   */
+  type CsContext = { types: string[]; levels: Array<{ namespace: string; imports: string[] }> };
+  const csContextCache = new Map<string, CsContext>();
+  const csContextOf = (sym: SymbolNode | undefined, file: string): CsContext => {
+    const key = sym?.id ?? `\u0000${file}`;
+    const cached = csContextCache.get(key);
+    if (cached) return cached;
+    const fileSymbols = symbolsByFile.get(file) ?? [];
+    const module = fileSymbols.find((s) => s.kind === "module");
+    const types: string[] = [];
+    const namespaces: string[] = [];
+    if (sym?.csFullName) {
+      const parts = sym.csFullName.split(".");
+      for (let n = CS_TYPE_KINDS.has(sym.kind) ? parts.length : parts.length - 1; n >= 1; n--) {
+        const prefix = parts.slice(0, n).join(".");
+        // An enclosing type is declared in the same file; any other prefix is a namespace.
+        if (fileSymbols.some((s) => CS_TYPE_KINDS.has(s.kind) && s.csFullName === prefix)) types.push(prefix);
+        else namespaces.push(prefix);
+      }
+    }
+    const blocks = module?.csBlockUsings ?? [];
+    const chain: number[] = [];
+    for (let b = sym?.csBlock; b !== undefined && b < blocks.length && !chain.includes(b); b = blocks[b].outer) chain.push(b);
+    const levels = namespaces.map((namespace) => ({
+      namespace,
+      imports: chain.filter((b) => blocks[b].namespace === namespace).flatMap((b) => csBlockImports(file, blocks[b], b)),
+    }));
+    levels.push({ namespace: "", imports: module?.csUsings ?? [] });
+    const context = { types, levels };
+    csContextCache.set(key, context);
+    return context;
+  };
+  /**
+   * The symbols a dotted `path` names from `context`, looked up as C# looks a
+   * name up rather than by name across the project, and never by file
+   * proximity: an exact full name under each enclosing type, innermost first,
+   * then at each namespace level its members before the imports C# consults
+   * there. An import brings in types, not namespaces, so `X.Y` is taken from
+   * one only when `X` is a type it imports. Two types imported under one name
+   * at one level are an ambiguity C# itself rejects, so neither is answered; a
+   * `global::`-anchored path is looked up in the global namespace alone. Every
+   * part of a partial type is answered.
+   */
+  const csLookup = (context: CsContext, written: string, accept: (s: SymbolNode) => boolean): SymbolNode[] => {
     const anchored = written.startsWith(CS_GLOBAL_ANCHOR);
     const path = anchored ? written.slice(CS_GLOBAL_ANCHOR.length) : written;
     const name = path.slice(path.lastIndexOf(".") + 1);
+    const first = path.split(".")[0];
     const candidates = (csByName().get(name) ?? []).filter(accept);
     const named = (full: string) => candidates.filter((s) => csFullNameOf(s) === full);
     if (anchored) return named(path);
-    for (const scope of scopes) {
-      const found = named(scope ? `${scope}.${path}` : path);
+    for (const scope of context.types) {
+      const found = named(`${scope}.${path}`);
       if (found.length > 0) return found;
       // Inside `class A : B`, B's nested types are visible by simple name too.
-      const inherited = scope ? csInheritedNested(scope, path, named) : [];
+      const inherited = csInheritedNested(scope, path, named);
       if (inherited.length > 0) return inherited;
     }
-    const imported = csUsingsAt(file, line).flatMap((u) => named(`${u}.${path}`));
-    return new Set(imported.map(csFullNameOf)).size === 1 ? imported : [];
+    for (const { namespace, imports } of context.levels) {
+      const found = named(namespace ? `${namespace}.${path}` : path);
+      if (found.length > 0) return found;
+      const imported = imports
+        .filter((u) => first === path || csTypesNamed(`${u}.${first}`).length > 0)
+        .flatMap((u) => named(`${u}.${path}`));
+      const distinct = new Set(imported.map(csFullNameOf)).size;
+      if (distinct === 1) return imported;
+      if (distinct > 1) return [];
+    }
+    return [];
   };
   // C# types by full name, the parts of a partial type together.
   let csTypeIndex: Map<string, SymbolNode[]> | undefined;
@@ -1068,8 +1123,10 @@ export function resolveCallSites(
     if (cached) return cached;
     csBaseCache.set(key, []);
     const self = csFullNameOf(t);
-    const scopes = csScopesOf(t)?.filter((s) => s !== self) ?? [""];
-    const found = csLookup(scopes, t.file, t.line, path, (b) => CS_TYPE_KINDS.has(b.kind) && csFullNameOf(b) !== self);
+    // A base list is read outside the type's own members.
+    const own = csContextOf(t, t.file);
+    const context = { types: own.types.filter((s) => s !== self), levels: own.levels };
+    const found = csLookup(context, path, (b) => CS_TYPE_KINDS.has(b.kind) && csFullNameOf(b) !== self);
     csBaseCache.set(key, found);
     return found;
   };
@@ -1740,10 +1797,9 @@ export function resolveCallSites(
         // unresolved rather than widening to every symbol of that name. A .NET
         // framework type the caller cannot see a project type for is `engine`.
         const caller = csSymbolById(edge.callerId);
-        const scopes = csScopesOf(caller) ?? [""];
-        const line = edge.callSite.line;
+        const context = csContextOf(caller, callerFile);
         const lookup = (path: string, accept: (s: SymbolNode) => boolean): SymbolNode[] =>
-          csLookup(scopes, callerFile, line, path, accept);
+          csLookup(context, path, accept);
         const qualifier = edge.calleeQualifier;
         const name = edge.calleeName;
         const anchored = qualifier?.startsWith(CS_GLOBAL_ANCHOR) ?? false;

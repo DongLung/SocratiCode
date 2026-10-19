@@ -2632,9 +2632,19 @@ function extractFromCSharp(
 ): ExtractedSymbols {
   const root = parse("csharp" as unknown as Lang, source).root();
   const symbols: SymbolNode[] = [moduleSym];
-  const scopes: ScopeFrame[] = [];
+  // Every declaration with its byte range: an edge's caller is the innermost
+  // one containing it, so two declarations sharing a line are told apart.
+  const declared: Array<{ range: CsRange; sym: SymbolNode }> = [];
+  const callerAt = (at: number): string => {
+    let best: { range: CsRange; sym: SymbolNode } | null = null;
+    for (const d of declared) {
+      if (d.range.start <= at && at <= d.range.end && (!best || d.range.start >= best.range.start)) best = d;
+    }
+    return best ? best.sym.id : moduleSym.id;
+  };
   // A file-scoped `namespace A.B;` is a sibling of the declarations it covers, not their ancestor.
-  const fileNamespace = csNamePath(csNameField(safeFind(root, "file_scoped_namespace_declaration"))) ?? [];
+  const fileScoped = safeFind(root, "file_scoped_namespace_declaration");
+  const fileNamespace = csNamePath(csNameField(fileScoped)) ?? [];
   const containers = csContainers(root);
   const qualified = csQualifiedNames(root);
   // `using Store = App.Tests.ProductStore;`: an alias stands for the path it
@@ -2644,10 +2654,26 @@ function extractFromCSharp(
   // import brings in the type's nested types. A directive inside a namespace
   // block applies within that block only, so sibling blocks never share one.
   // A `global using` counts for its own file alone (see `csUsings`).
-  const namespaceBlocks = safeFindAll(root, "namespace_declaration").map((n) => {
-    const r = n.range();
-    return { range: csRange(n), line: r.start.line + 1, endLine: r.end.line + 1, usings: [] as string[] };
-  });
+  // A namespace block with its full name: `A.B` for `namespace B` inside
+  // `namespace A`. A file-scoped namespace is a block running to the end of
+  // the file, so a `using` written after it is that namespace's own.
+  const namespaceBlocks = containers
+    .filter((c) => !c.isType)
+    .map((c) => ({
+      range: c.range,
+      namespace: [
+        ...containers.filter((o) => !o.isType && o !== c && csWithin(c.range, o.range)).flatMap((o) => o.segments),
+        ...c.segments,
+      ].join("."),
+      usings: [] as string[],
+    }));
+  if (fileScoped) {
+    namespaceBlocks.push({
+      range: { start: csRange(fileScoped).start, end: csRange(root).end },
+      namespace: fileNamespace.join("."),
+      usings: [],
+    });
+  }
   // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
   const blockOf = (node: any) => {
     const r = csRange(node);
@@ -2675,16 +2701,29 @@ function extractFromCSharp(
       list.push({ block: block?.range ?? null, target: anchored });
       aliases.set(alias.text(), list);
     } else if (!alias) {
-      const imported = (target[0] === CS_GLOBAL ? target.slice(1) : target).join(".");
-      if (block) block.usings.push(imported);
-      else usings.push(imported);
+      // A block's import is resolved from the block's namespace, unless anchored;
+      // a file-level one from the global namespace.
+      if (block) block.usings.push(csJoin(target));
+      else usings.push((target[0] === CS_GLOBAL ? target.slice(1) : target).join("."));
     }
   }
   if (usings.length > 0) moduleSym.csUsings = usings;
-  const scopedUsings = namespaceBlocks
-    .filter((blk) => blk.usings.length > 0)
-    .map(({ line, endLine, usings: u }) => ({ line, endLine, usings: u }));
-  if (scopedUsings.length > 0) moduleSym.csScopedUsings = scopedUsings;
+  // The blocks that import anything, each with the nearest enclosing one that
+  // does; a declaration records the innermost (`csBlock`).
+  const importing = namespaceBlocks.filter((blk) => blk.usings.length > 0);
+  const importingBlockOf = (range: CsRange, except?: (typeof importing)[number]): number | undefined => {
+    let best: number | undefined;
+    importing.forEach((blk, i) => {
+      if (blk !== except && csWithin(range, blk.range) && (best === undefined || blk.range.start >= importing[best].range.start)) best = i;
+    });
+    return best;
+  };
+  if (importing.length > 0) {
+    moduleSym.csBlockUsings = importing.map((blk) => {
+      const outer = importingBlockOf(blk.range, blk);
+      return { namespace: blk.namespace, usings: blk.usings, ...(outer !== undefined ? { outer } : {}) };
+    });
+  }
   // The alias visible at byte offset `at`: the innermost block declaring it, else the file's.
   const expandAt = (path: string[], at: number): string[] => {
     let best: { block: CsRange | null; target: string[] } | null = null;
@@ -2736,8 +2775,10 @@ function extractFromCSharp(
           file, line: startLine, endLine, language,
           csFullName: [...path, name].join("."),
         };
+        const block = importingBlockOf(own);
+        if (block !== undefined) sym.csBlock = block;
         symbols.push(sym);
-        scopes.push({ name, startLine, endLine, symbolId: sym.id });
+        declared.push({ range: own, sym });
         if (!isMember) {
           typeSymbols.push({ range: own, sym });
           const bases = baseTypes(d)
@@ -2780,9 +2821,10 @@ function extractFromCSharp(
 
   const rawCalls: ExtractedSymbols["rawCalls"] = [];
   const seenRefs = new Set<string>();
-  const pushTypeRef = (name: string, qualifier: string | undefined, line: number, memberReceiver = false) => {
+  // `at` is the reference's byte offset, which decides its caller.
+  const pushTypeRef = (name: string, qualifier: string | undefined, line: number, at: number, memberReceiver = false) => {
     if (!/^[A-Z]/.test(name)) return;
-    const callerId = findCallerId(scopes, line, moduleSym.id);
+    const callerId = callerAt(at);
     const key = `${callerId}|${qualifier ?? ""}|${name}|${line}`;
     if (seenRefs.has(key)) return;
     seenRefs.add(key);
@@ -2795,13 +2837,11 @@ function extractFromCSharp(
       callSite: { file, line },
     });
   };
-  // A path's last segment is the type; the segments before it are its written qualifier.
-  // `at` is the reference's byte offset, which decides the alias in scope;
-  // `null` for a path already written out through it.
-  const pushPathRef = (written: string[], line: number, at: number | null, memberReceiver = false) => {
-    const path = at === null ? written : expandAt(written, at);
+  // A path's last segment is the type; the segments before it are its written
+  // qualifier. `path` is written out through the alias in scope at `at`.
+  const pushPathRef = (path: string[], line: number, at: number, memberReceiver = false) => {
     const segments = path.filter((p) => p !== CS_GLOBAL).length;
-    pushTypeRef(path[path.length - 1], path.length > 1 ? csJoin(path.slice(0, -1)) : undefined, line,
+    pushTypeRef(path[path.length - 1], path.length > 1 ? csJoin(path.slice(0, -1)) : undefined, line, at,
       memberReceiver && segments > 1);
   };
   // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
@@ -2809,13 +2849,14 @@ function extractFromCSharp(
     if (qualified.isSegment(id)) return;
     const qualifier = qualified.writtenQualifier(id);
     if (qualifier === null) return;
-    pushPathRef([...qualifier, id.text()], id.range().start.line + 1, csRange(id).start);
+    const at = csRange(id).start;
+    pushPathRef(expandAt([...qualifier, id.text()], at), id.range().start.line + 1, at);
   };
 
   for (const node of safeFindAll(root, "invocation_expression")) {
     const r = node.range();
     const callLine = r.start.line + 1;
-    const callerId = findCallerId(scopes, callLine, moduleSym.id);
+    const callerId = callerAt(csRange(node).start);
     const fn = node.field?.("function") ?? null;
     let calleeName: string | null = null;
     let calleeQualifier: string | undefined;
@@ -2858,13 +2899,13 @@ function extractFromCSharp(
     const path = expandAt(written, at);
     const line = node.range().start.line + 1;
     rawCalls.push({
-      callerId: findCallerId(scopes, line, moduleSym.id),
+      callerId: callerAt(at),
       calleeName: path[path.length - 1],
       kind: "call",
       calleeQualifier: csJoin(path),
       callSite: { file, line },
     });
-    pushPathRef(written, line, at);
+    pushPathRef(path, line, at);
   }
 
   // Type positions: the declaration's `type` field, the base list, type
@@ -2920,7 +2961,8 @@ function extractFromCSharp(
     // unresolvable reference per field access would drown the type graph; the
     // call itself still keeps a lowercase receiver as its qualifier.
     if (!receiver || (receiver[0] !== CS_GLOBAL && !/^[A-Z]/.test(receiver[0]))) continue;
-    pushPathRef(receiver, node.range().start.line + 1, csRange(expr).start, true);
+    const at = csRange(expr).start;
+    pushPathRef(expandAt(receiver, at), node.range().start.line + 1, at, true);
   }
   // `[Foo]` names the class `FooAttribute`; the compiler accepts both spellings.
   for (const a of safeFindAll(root, "attribute")) {
@@ -2932,7 +2974,7 @@ function extractFromCSharp(
     const path = expandAt(written, at);
     const last = path[path.length - 1];
     const name = last.endsWith("Attribute") ? last : `${last}Attribute`;
-    pushPathRef([...path.slice(0, -1), name], a.range().start.line + 1, null);
+    pushPathRef([...path.slice(0, -1), name], a.range().start.line + 1, at);
   }
   return { symbols, rawCalls };
 }
