@@ -1033,8 +1033,6 @@ export function resolveCallSites(
     }
     return csTypeIndex.get(full) ?? [];
   };
-  // Base lookups nest (a base's own scopes have bases); a cyclic hierarchy must end.
-  let csBaseDepth = 0;
   /**
    * What `path` names among the nested types the project type `scope`
    * inherits, nearest base first. `named` is the caller's own filter, so the
@@ -1046,18 +1044,11 @@ export function resolveCallSites(
     named: (full: string) => SymbolNode[],
     seen = new Set<string>(),
   ): SymbolNode[] => {
-    if (seen.has(scope) || csBaseDepth > 8) return [];
+    if (seen.has(scope)) return [];
     seen.add(scope);
     for (const part of csTypesNamed(scope)) {
       for (const base of part.csBases ?? []) {
-        csBaseDepth++;
-        let bases: SymbolNode[];
-        try {
-          bases = csBaseType(part, base);
-        } finally {
-          csBaseDepth--;
-        }
-        for (const b of bases) {
+        for (const b of csBaseType(part, base)) {
           const full = csFullNameOf(b);
           const found = named(`${full}.${path}`);
           if (found.length > 0) return found;
@@ -1068,11 +1059,22 @@ export function resolveCallSites(
     }
     return [];
   };
+  // Base lookups nest: a base is looked up from its type's enclosing types,
+  // whose own bases are looked up in turn. Each base a type declares is
+  // looked up once, or nested types make the walk exponential in their depth;
+  // a lookup still under way answers nothing, which ends a cyclic hierarchy.
+  const csBaseCache = new Map<string, SymbolNode[]>();
   /** The project type a base written in `t`'s declaration names: looked up from `t`'s enclosing scopes. */
   const csBaseType = (t: SymbolNode, path: string): SymbolNode[] => {
+    const key = `${t.id}\u0000${path}`;
+    const cached = csBaseCache.get(key);
+    if (cached) return cached;
+    csBaseCache.set(key, []);
     const self = csFullNameOf(t);
     const scopes = csScopesOf(t)?.filter((s) => s !== self) ?? [""];
-    return csLookup(scopes, t.file, t.line, path, (b) => CS_TYPE_KINDS.has(b.kind) && csFullNameOf(b) !== self);
+    const found = csLookup(scopes, t.file, t.line, path, (b) => CS_TYPE_KINDS.has(b.kind) && csFullNameOf(b) !== self);
+    csBaseCache.set(key, found);
+    return found;
   };
 
   const reexportsByFile = new Map<string, SymbolEdge[]>();

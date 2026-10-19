@@ -493,8 +493,8 @@ describe("C# extractor-to-resolver regressions", () => {
     };
     const { at } = run(files);
     // The alias names another assembly's copy, which the graph does not hold.
-    expect(at("Shop.cs", 3, "call", "Compute").map((e) => e.targets)).not.toContainEqual(["App.Billing.Calc.Compute"]);
-    expect(at("Shop.cs", 3, "type_reference", "Calc").map((e) => e.targets)).not.toContainEqual(["App.Billing.Calc"]);
+    expect(at("Shop.cs", 3, "call", "Compute")).toEqual([{ confidence: "unresolved", targets: [] }]);
+    expect(at("Shop.cs", 3, "type_reference", "Calc")).toEqual([]);
   });
 
   it("marks a framework static call as engine unless a visible project type shadows its class", () => {
@@ -509,5 +509,19 @@ describe("C# extractor-to-resolver regressions", () => {
     // The visible project `Math` declares no `Max`: neither .NET's nor a guess.
     expect(at("Shadow.cs", 3, "call", "Max")).toEqual([{ confidence: "unresolved", targets: [] }]);
     expect(at("Shadow.cs", 3, "call", "Clamp")).toEqual([{ confidence: "unique", targets: ["App.Util.Math.Clamp"] }]);
+  });
+
+  it("looks each base up once, so nested types cost no more than their count, and ends a cyclic hierarchy", () => {
+    // Every enclosing type's bases are searched for each nested one: without
+    // reuse, 16 levels of 4 bases would take hours.
+    const lines = ["namespace App {", "  public interface K0 { } public interface K1 { } public interface K2 { } public interface K3 { }"];
+    for (let i = 0; i < 16; i++) lines.push(`  public class O${i} : K0, K1, K2, K3 {`);
+    lines.push("    Missing m;", ...Array.from({ length: 16 }, () => "  }"));
+    lines.push("  public class Ping : Pong { int Go() => this.Run(); }", "  public class Pong : Ping { public int Run() => 1; }", "}");
+    const started = Date.now();
+    const { at } = run({ "Nest.cs": lines.join("\n") });
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(at("Nest.cs", 19, "type_reference", "Missing")).toEqual([{ confidence: "unresolved", targets: [] }]);
+    expect(at("Nest.cs", 36, "call", "Run")).toEqual([{ confidence: "local", targets: ["App.Pong.Run"] }]);
   });
 });
