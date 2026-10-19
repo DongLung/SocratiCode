@@ -31,6 +31,7 @@ describe("C# qualified calls and type references at the resolver", () => {
     language: "csharp",
   });
   const node = (relativePath: string, dependencies: string[]) => ({
+    filePath: relativePath,
     relativePath,
     imports: [],
     exports: [],
@@ -117,7 +118,7 @@ describe("C# extractor-to-resolver regressions", () => {
     }
     const graph: CodeGraph = {
       nodes: Object.keys(files).map((relativePath) => ({
-        relativePath, imports: [], exports: [], dependencies: [], dependents: [], language: "csharp",
+        filePath: relativePath, relativePath, imports: [], exports: [], dependencies: [], dependents: [], language: "csharp",
       })),
       edges: [],
     };
@@ -188,23 +189,23 @@ describe("C# extractor-to-resolver regressions", () => {
   });
 
   it("resolves a project's own framework-named type, bare, qualified and created, and marks .NET's as engine", () => {
-    const jobs = "namespace App.Jobs { public class Task { } }";
+    const jobs = "namespace App.Chores { public class Task { } }";
     const caller = [
       "namespace App {",
       "  public class Runner {",
-      "    void Go(Jobs.Task a, System.Threading.Tasks.Task b) {",
-      "      var t = new Jobs.Task();",
+      "    void Go(Chores.Task a, System.Threading.Tasks.Task b) {",
+      "      var t = new Chores.Task();",
       "      var l = new List<int>();",
       "    }",
       "  }",
       "}",
     ].join("\n");
-    const { at } = run({ "Jobs/Task.cs": jobs, "Runner.cs": caller });
+    const { at } = run({ "Chores/Task.cs": jobs, "Runner.cs": caller });
     expect(at("Runner.cs", 3, "type_reference", "Task")).toEqual([
-      { confidence: "unique", targets: ["App.Jobs.Task"] },
+      { confidence: "unique", targets: ["App.Chores.Task"] },
       { confidence: "engine", targets: [] },
     ]);
-    expect(at("Runner.cs", 4, "call", "Task")).toEqual([{ confidence: "unique", targets: ["App.Jobs.Task"] }]);
+    expect(at("Runner.cs", 4, "call", "Task")).toEqual([{ confidence: "unique", targets: ["App.Chores.Task"] }]);
     expect(at("Runner.cs", 5, "call", "List")).toEqual([{ confidence: "engine", targets: [] }]);
     expect(at("Runner.cs", 5, "type_reference", "List")).toEqual([{ confidence: "engine", targets: [] }]);
   });
@@ -231,25 +232,25 @@ describe("C# extractor-to-resolver regressions", () => {
   });
 
   it("falls back to a shorter receiver prefix only when that type declares the next segment", () => {
-    // `Billing.Rates` is an external namespace and class; the project's own `Billing` has no `Rates`.
+    // `Billing.Tariffs` is an external namespace and class; the project's own `Billing` has no `Tariffs`.
     const decls = "namespace App.Other { public class Billing { public static int Total; } }";
-    const caller = "namespace App { public class Host {\n  void Go() { Billing.Rates.Load(); }\n} }";
+    const caller = "namespace App { public class Host {\n  void Go() { Billing.Tariffs.Load(); }\n} }";
     const { at } = run({ "Billing.cs": decls, "Host.cs": caller });
-    expect(at("Host.cs", 2, "type_reference", "Rates")).toEqual([{ confidence: "unresolved", targets: [] }]);
+    expect(at("Host.cs", 2, "type_reference", "Tariffs")).toEqual([{ confidence: "unresolved", targets: [] }]);
   });
 
   it("takes a declared field, constant or enum member as the next segment", () => {
     const decls = [
       "namespace App {",
       "  public class OrderState { public static readonly OrderState Open = new(); public int Id; }",
-      "  public static class Limits { public const int MaxItems = 100; }",
+      "  public static class Limits { public const int MaxWidgets = 100; }",
       "  public enum Mode { Fast, Slow }",
       "}",
     ].join("\n");
-    const caller = "namespace App { public class Host {\n  object Go() => (OrderState.Open.Id, Limits.MaxItems.ToString(), Mode.Fast.ToString());\n} }";
+    const caller = "namespace App { public class Host {\n  object Go() => (OrderState.Open.Id, Limits.MaxWidgets.ToString(), Mode.Fast.ToString());\n} }";
     const { at } = run({ "Decls.cs": decls, "Host.cs": caller });
     expect(at("Host.cs", 2, "type_reference", "Open")).toEqual([{ confidence: "unique", targets: ["App.OrderState"] }]);
-    expect(at("Host.cs", 2, "type_reference", "MaxItems")).toEqual([{ confidence: "unique", targets: ["App.Limits"] }]);
+    expect(at("Host.cs", 2, "type_reference", "MaxWidgets")).toEqual([{ confidence: "unique", targets: ["App.Limits"] }]);
     expect(at("Host.cs", 2, "type_reference", "Fast")).toEqual([{ confidence: "unique", targets: ["App.Mode"] }]);
   });
 
@@ -277,17 +278,17 @@ describe("C# extractor-to-resolver regressions", () => {
     const decls = [
       "namespace App {",
       "  public class BaseSeeder { public static int Shelf; public static BaseSeeder Create() => new(); }",
-      "  public class OrderSeeder : BaseSeeder { }",
+      "  public class HarborSeeder : BaseSeeder { }",
       "  public class AppDbContext : DbContext { }",
       "}",
     ].join("\n");
     const caller = [
       "namespace App { public class Host {",
-      "  object Go() => (OrderSeeder.Shelf.ToString(), OrderSeeder.Create(), AppDbContext.Database.Name);",
+      "  object Go() => (HarborSeeder.Shelf.ToString(), HarborSeeder.Create(), AppDbContext.Database.Name);",
       "} }",
     ].join("\n");
     const { at } = run({ "Decls.cs": decls, "Host.cs": caller });
-    expect(at("Host.cs", 2, "type_reference", "Shelf")).toEqual([{ confidence: "unique", targets: ["App.OrderSeeder"] }]);
+    expect(at("Host.cs", 2, "type_reference", "Shelf")).toEqual([{ confidence: "unique", targets: ["App.HarborSeeder"] }]);
     expect(at("Host.cs", 2, "call", "Create")).toEqual([{ confidence: "unique", targets: ["App.BaseSeeder.Create"] }]);
     // `Database` would come from EF's `DbContext`, which declares no project symbol.
     expect(at("Host.cs", 2, "type_reference", "Database")).toEqual([{ confidence: "unresolved", targets: [] }]);
@@ -297,33 +298,216 @@ describe("C# extractor-to-resolver regressions", () => {
     // Two modules each declare a `BaseSeeder` with the same members.
     const base = (ns: string) => `namespace ${ns} { public class BaseSeeder { public static int Shelf; public static int Create() => 1; } }`;
     const files = {
-      "Orders/BaseSeeder.cs": base("App.Orders"),
+      "Harbor/BaseSeeder.cs": base("App.Harbor"),
       "Other/BaseSeeder.cs": base("App.Other"),
       "Shared/BaseSeeder.cs": base("App.Shared"),
-      // Same namespace as `App.Orders.BaseSeeder`, which wins over the imported `App.Shared` one.
-      "Orders/OrderSeeder.cs": "using App.Shared;\nnamespace App.Orders { public class OrderSeeder : BaseSeeder { } }",
+      // Same namespace as `App.Harbor.BaseSeeder`, which wins over the imported `App.Shared` one.
+      "Harbor/HarborSeeder.cs": "using App.Shared;\nnamespace App.Harbor { public class HarborSeeder : BaseSeeder { } }",
       // Only `using App.Shared` makes a `BaseSeeder` visible.
       "Billing/BillSeeder.cs": "using App.Shared;\nnamespace App.Billing { public class BillSeeder : BaseSeeder { } }",
       // Two imported `BaseSeeder`s: C# rejects the name as ambiguous.
-      "Audit/AuditSeeder.cs": "using App.Shared;\nusing App.Other;\nnamespace App.Audit { public class AuditSeeder : BaseSeeder { } }",
+      "Kiosk/KioskSeeder.cs": "using App.Shared;\nusing App.Other;\nnamespace App.Kiosk { public class KioskSeeder : BaseSeeder { } }",
       // No scope or using of this file declares a `BaseSeeder`.
       "Lone/LoneSeeder.cs": "namespace App.Lone { public class LoneSeeder : BaseSeeder { } }",
       "Host.cs": [
-        "using App.Orders; using App.Billing; using App.Audit; using App.Lone;",
+        "using App.Harbor; using App.Billing; using App.Kiosk; using App.Lone;",
         "namespace App { public class Host {",
-        "  object A() => OrderSeeder.Create();",
+        "  object A() => HarborSeeder.Create();",
         "  object B() => BillSeeder.Create();",
-        "  object C() => AuditSeeder.Create();",
+        "  object C() => KioskSeeder.Create();",
         "  object D() => LoneSeeder.Create();",
         "  object E() => LoneSeeder.Shelf.ToString();",
         "} }",
       ].join("\n"),
     };
     const { at } = run(files);
-    expect(at("Host.cs", 3, "call", "Create")).toEqual([{ confidence: "unique", targets: ["App.Orders.BaseSeeder.Create"] }]);
+    expect(at("Host.cs", 3, "call", "Create")).toEqual([{ confidence: "unique", targets: ["App.Harbor.BaseSeeder.Create"] }]);
     expect(at("Host.cs", 4, "call", "Create")).toEqual([{ confidence: "unique", targets: ["App.Shared.BaseSeeder.Create"] }]);
     expect(at("Host.cs", 5, "call", "Create")).toEqual([{ confidence: "unresolved", targets: [] }]);
     expect(at("Host.cs", 6, "call", "Create")).toEqual([{ confidence: "unresolved", targets: [] }]);
     expect(at("Host.cs", 7, "type_reference", "Shelf")).toEqual([{ confidence: "unresolved", targets: [] }]);
+  });
+
+  it("answers a bare type name with the type the caller can see, as C# looks it up", () => {
+    const calc = (ns: string) => `namespace ${ns} { public class Calc { public static int Compute() => 1; } }`;
+    const use = (n: number) => `  object G${n}(Calc c) => (new Calc(), Calc.Compute());`;
+    const files = {
+      "Billing/Calc.cs": calc("App.Billing"),
+      "Other/Calc.cs": calc("App.Other"),
+      "Chores/Task.cs": "namespace App.Chores { public class Task { } }",
+      // Its own namespace declares a `Calc`.
+      "Billing/Invoice.cs": `namespace App.Billing { public class Invoice {\n${use(1)}\n} }`,
+      // Only `using App.Other` makes a `Calc` visible.
+      "Shipping/Parcel.cs": `using App.Other;\nnamespace App.Shipping { public class Parcel {\n${use(2)}\n} }`,
+      // Two imported `Calc`s: C# rejects the name as ambiguous.
+      "Kiosk/Check.cs": `using App.Billing;\nusing App.Other;\nnamespace App.Kiosk { public class Check {\n${use(3)}\n} }`,
+      // No scope or using of this file declares a `Calc`, nor a `Task`.
+      "Lone/Lone.cs": `namespace App.Lone { public class Lone {\n${use(4)}\n  System.Threading.Tasks.Task T() => null; Task U() => null;\n} }`,
+      // A `global using` reaches every file under its directory, and no other.
+      "Tests/GlobalUsings.cs": "global using App.Billing;",
+      "Tests/Unit/CalcTests.cs": `namespace App.Tests { public class CalcTests {\n${use(5)}\n} }`,
+    };
+    const { at } = run(files);
+    const all = (file: string, line: number) => [
+      ...at(file, line, "type_reference", "Calc"),
+      ...at(file, line, "call", "Calc"),
+      ...at(file, line, "call", "Compute"),
+    ];
+    const billing = ["App.Billing.Calc"];
+    // `Calc c`, `new Calc()` and the receiver `Calc.` are one reference: one per name and line.
+    expect(all("Billing/Invoice.cs", 2)).toEqual([
+      { confidence: "unique", targets: billing },
+      { confidence: "unique", targets: billing },
+      { confidence: "unique", targets: ["App.Billing.Calc.Compute"] },
+    ]);
+    expect(all("Shipping/Parcel.cs", 3).map((e) => e.targets)).toEqual([["App.Other.Calc"], ["App.Other.Calc"], ["App.Other.Calc.Compute"]]);
+    expect(all("Kiosk/Check.cs", 4)).toEqual([
+      { confidence: "unresolved", targets: [] },
+      { confidence: "unresolved", targets: [] },
+      { confidence: "unresolved", targets: [] },
+    ]);
+    expect(all("Lone/Lone.cs", 2).map((e) => e.confidence)).toEqual(["unresolved", "unresolved", "unresolved"]);
+    expect(all("Tests/Unit/CalcTests.cs", 2).map((e) => e.targets)).toEqual([billing, billing, ["App.Billing.Calc.Compute"]]);
+    // `App.Chores.Task` is a project type, but not one this file can see: both `Task`s are .NET's.
+    expect(at("Lone/Lone.cs", 3, "type_reference", "Task")).toEqual([
+      { confidence: "engine", targets: [] },
+      { confidence: "engine", targets: [] },
+    ]);
+  });
+
+  it("sees the nested types a using static imports, and those a base class declares", () => {
+    const files = {
+      "Data/Atlas.cs": "namespace App.Data { public static class Atlas { public static class Groups { public static int Items; } } }",
+      "Data/Other.cs": "namespace App.Other { public static class Groups { public static int Items; } }",
+      "Base/Store.cs": "namespace App.Base { public class Store { public class Seed { } } }",
+      "Tests/T.cs": [
+        "using static App.Data.Atlas;",
+        "using App.Base;",
+        "namespace App.Tests { public class T : Store {",
+        "  object Go(Seed s) => Groups.Items.ToString();",
+        "} }",
+      ].join("\n"),
+    };
+    const { at } = run(files);
+    // `Groups` is `Atlas.Groups`, imported by `using static` — not `App.Other.Groups`.
+    expect(at("Tests/T.cs", 4, "type_reference", "Items")).toEqual([{ confidence: "unique", targets: ["App.Data.Atlas.Groups"] }]);
+    // `Seed` is nested in the base class `Store`, visible by simple name inside `T`.
+    expect(at("Tests/T.cs", 4, "type_reference", "Seed")).toEqual([{ confidence: "unique", targets: ["App.Base.Store.Seed"] }]);
+  });
+
+  it("never widens a written namespace to another whose name ends the same", () => {
+    const files = {
+      "App/Calc.cs": "namespace App.Billing { public class Calc { public static int Compute() => 1; } }",
+      "Legacy/Calc.cs": "namespace Legacy.Billing { public class Calc { public static int Compute() => 2; } }",
+      // `Billing.Calc` from `Legacy.Shop` is `Legacy.Billing.Calc`, the enclosing namespace's.
+      "Legacy/Shop.cs": "namespace Legacy.Shop { public class Shop {\n  int Go() => Billing.Calc.Compute();\n} }",
+      // From `Tools` no scope or import declares a `Billing`: nothing is answered.
+      "Tools/Tool.cs": "namespace Tools { public class Tool {\n  int Go(Billing.Calc c) => Billing.Calc.Compute();\n} }",
+    };
+    const { at } = run(files);
+    expect(at("Legacy/Shop.cs", 2, "call", "Compute")).toEqual([{ confidence: "unique", targets: ["Legacy.Billing.Calc.Compute"] }]);
+    expect(at("Legacy/Shop.cs", 2, "type_reference", "Calc")).toEqual([{ confidence: "unique", targets: ["Legacy.Billing.Calc"] }]);
+    expect(at("Tools/Tool.cs", 2, "call", "Compute")).toEqual([{ confidence: "unresolved", targets: [] }]);
+    expect(at("Tools/Tool.cs", 2, "type_reference", "Calc")).toEqual([{ confidence: "unresolved", targets: [] }]);
+  });
+
+  it("looks a global::-anchored path up from the global namespace alone", () => {
+    const files = {
+      "Root/Calc.cs": "namespace Billing { public class Calc { public static int Compute() => 1; } }",
+      "App/Calc.cs": "namespace App.Billing { public class Calc { public static int Compute() => 2; } }",
+      "App/Shop.cs": [
+        "namespace App { public class Shop {",
+        "  int A() => Billing.Calc.Compute();",
+        "  int B(global::Billing.Calc c) => global::Billing.Calc.Compute();",
+        "  int C() => global::App.Billing.Calc.Compute() + new global::Billing.Calc().GetHashCode();",
+        "  int D() => global::Calc.Compute();",
+        "} }",
+      ].join("\n"),
+    };
+    const { at } = run(files);
+    // Unanchored, the enclosing namespace `App` is searched first.
+    expect(at("App/Shop.cs", 2, "call", "Compute")).toEqual([{ confidence: "unique", targets: ["App.Billing.Calc.Compute"] }]);
+    expect(at("App/Shop.cs", 3, "call", "Compute")).toEqual([{ confidence: "unique", targets: ["Billing.Calc.Compute"] }]);
+    expect(at("App/Shop.cs", 3, "type_reference", "Calc")).toEqual([{ confidence: "unique", targets: ["Billing.Calc"] }]);
+    expect(at("App/Shop.cs", 4, "call", "Compute")).toEqual([{ confidence: "unique", targets: ["App.Billing.Calc.Compute"] }]);
+    expect(at("App/Shop.cs", 4, "call", "Calc")).toEqual([{ confidence: "unique", targets: ["Billing.Calc"] }]);
+    // The global namespace declares no `Calc`.
+    expect(at("App/Shop.cs", 5, "call", "Compute")).toEqual([{ confidence: "unresolved", targets: [] }]);
+  });
+
+  it("answers this. and base. by the caller's own type and its bases, and no other receiver", () => {
+    const files = {
+      "Base.cs": "namespace App { public class Base { public int Load() => 1; public int Save() => 1; } }",
+      "Calc.cs": "namespace App { public class Calc { public int Load() => 2; public static Calc Make() => null; } }",
+      "Repo.cs": [
+        "namespace App { public class Repo : Base {",
+        "  public new int Load() => 3;",
+        "  int Go(Calc calc) => this.Load() + base.Load() + this.Save();",
+        "  int Other(Calc calc) => calc.Load() + Calc.Make().Load() + calc?.Load() ?? 0;",
+        "  int Lower(Calc calc) => calc.Load();",
+        "} }",
+      ].join("\n"),
+    };
+    const { at } = run(files);
+    expect(at("Repo.cs", 3, "call", "Load")).toEqual([
+      { confidence: "local", targets: ["App.Repo.Load"] },
+      { confidence: "unique", targets: ["App.Base.Load"] },
+    ]);
+    // `this.Save()` is inherited from `Base`.
+    expect(at("Repo.cs", 3, "call", "Save")).toEqual([{ confidence: "unique", targets: ["App.Base.Save"] }]);
+    // A variable, a call result or `?.` names no type the source spells out.
+    expect(at("Repo.cs", 4, "call", "Load").map((e) => e.confidence)).toEqual(["unresolved", "unresolved", "unresolved"]);
+    // A lowercase receiver is never a type reference.
+    expect(at("Repo.cs", 5, "type_reference", "calc")).toEqual([]);
+  });
+
+  it("applies a namespace block's usings and aliases to that block alone", () => {
+    const files = {
+      "Billing/Calc.cs": "namespace App.Billing { public class Calc { public static int Compute() => 1; } }",
+      "Other/Calc.cs": "namespace App.Other { public class Calc { public static int Compute() => 2; } }",
+      "Both.cs": [
+        "namespace First { using App.Billing; using C = App.Billing.Calc; public class A {",
+        "  int Go(Calc x) => Calc.Compute() + C.Compute();",
+        "} }",
+        "namespace Second { using App.Other; using C = App.Other.Calc; public class B {",
+        "  int Go(Calc x) => Calc.Compute() + C.Compute();",
+        "} }",
+        "namespace Third { public class D {",
+        "  int Go(Calc x) => Calc.Compute();",
+        "} }",
+      ].join("\n"),
+    };
+    const { at } = run(files);
+    const targets = (line: number) => at("Both.cs", line, "call", "Compute").map((e) => e.targets);
+    expect(targets(2)).toEqual([["App.Billing.Calc.Compute"], ["App.Billing.Calc.Compute"]]);
+    expect(targets(5)).toEqual([["App.Other.Calc.Compute"], ["App.Other.Calc.Compute"]]);
+    // A sibling block's imports do not reach this one.
+    expect(at("Both.cs", 8, "call", "Compute")).toEqual([{ confidence: "unresolved", targets: [] }]);
+    expect(at("Both.cs", 8, "type_reference", "Calc")).toEqual([{ confidence: "unresolved", targets: [] }]);
+  });
+
+  it("leaves a path through an extern alias unresolved", () => {
+    const files = {
+      "Billing/Calc.cs": "namespace App.Billing { public class Calc { public static int Compute() => 1; } }",
+      "Shop.cs": "extern alias Legacy;\nnamespace App { public class Shop {\n  int Go(Legacy::App.Billing.Calc c) => Legacy::App.Billing.Calc.Compute();\n} }",
+    };
+    const { at } = run(files);
+    // The alias names another assembly's copy, which the graph does not hold.
+    expect(at("Shop.cs", 3, "call", "Compute").map((e) => e.targets)).not.toContainEqual(["App.Billing.Calc.Compute"]);
+    expect(at("Shop.cs", 3, "type_reference", "Calc").map((e) => e.targets)).not.toContainEqual(["App.Billing.Calc"]);
+  });
+
+  it("marks a framework static call as engine unless a visible project type shadows its class", () => {
+    const files = {
+      "Util/Math.cs": "namespace App.Util { public static class Math { public static int Clamp(int x) => x; } }",
+      "Plain.cs": "namespace App.Plain { public class P {\n  int Go() => Math.Max(1, 2) + System.Math.Min(1, 2);\n} }",
+      "Shadow.cs": "using App.Util;\nnamespace App.Shadow { public class S {\n  int Go() => Math.Max(1, 2) + Math.Clamp(1);\n} }",
+    };
+    const { at } = run(files);
+    expect(at("Plain.cs", 2, "call", "Max")).toEqual([{ confidence: "engine", targets: [] }]);
+    expect(at("Plain.cs", 2, "call", "Min")).toEqual([{ confidence: "engine", targets: [] }]);
+    // The visible project `Math` declares no `Max`: neither .NET's nor a guess.
+    expect(at("Shadow.cs", 3, "call", "Max")).toEqual([{ confidence: "unresolved", targets: [] }]);
+    expect(at("Shadow.cs", 3, "call", "Clamp")).toEqual([{ confidence: "unique", targets: ["App.Util.Math.Clamp"] }]);
   });
 });

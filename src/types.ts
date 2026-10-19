@@ -197,20 +197,35 @@ export interface SymbolNode {
    * C# types only: the base class and interfaces as the declaration writes
    * them, type arguments dropped and the file's `using` aliases written out
    * (`App.Data.Repository`, `IFoo`). Resolution looks each one up as C# does —
-   * the enclosing types and namespaces, innermost first, then
-   * {@link csUsings} — and follows it to find a member the type inherits from
+   * the enclosing types and namespaces, innermost first, then the namespaces
+   * its file imports — and follows it to find a member the type inherits from
    * another project type. Absent when the type names no base, and on every
    * graph persisted before it existed.
    */
   csBases?: string[];
   /**
-   * C# types with {@link csBases} only: the namespaces the declaring file
-   * imports with `using` (aliases and `using static` excluded), where a base
-   * the enclosing namespaces do not declare is looked for. A `global using`
-   * in another file is not seen, so a base imported only by one stays
-   * unresolved.
+   * C# `<module>` symbols only: the namespaces the file imports with a
+   * file-level `using`, and the types it imports with `using static` (whose
+   * nested types become visible by name), its own `global using`s included,
+   * aliases excluded. A type name the enclosing scopes do not declare is
+   * looked for under them. Absent when the file imports none.
    */
   csUsings?: string[];
+  /**
+   * C# `<module>` symbols only: the imports declared inside a namespace block,
+   * with the block's lines. They apply to references within those lines only,
+   * so a sibling block's imports never reach them. Absent when no block has any.
+   */
+  csScopedUsings?: Array<{ line: number; endLine: number; usings: string[] }>;
+  /**
+   * C# `<module>` symbols only: the namespaces and types the file imports
+   * with `global using`. Resolution applies them to every C# file under the file's
+   * directory — the files an SDK-style project rooted there compiles, where
+   * `GlobalUsings.cs` conventionally sits. A `<Using Include>` item in a
+   * `.csproj` is not read, so a type imported only through one stays
+   * unresolved.
+   */
+  csGlobalUsings?: string[];
 }
 
 /** Kind of relationship an edge represents */
@@ -269,8 +284,12 @@ export interface SymbolEdge {
    * qualify statically — `$obj->m()`, `$class::m()`, `Cls::$m()`, `self::`,
    * `static::`, `parent::` and bare function calls.
    *
-   * C# writes it as the call site spells it, dots kept and type arguments
-   * dropped: `Billing.Calc` for `Billing.Calc.Compute()`. An object creation
+   * C# writes it as the call site spells it, dots kept, type arguments
+   * dropped and the file's `using` alias in scope written out:
+   * `Billing.Calc` for `Billing.Calc.Compute()`, `global::Billing.Calc` when
+   * the source anchors it. A receiver that is a variable (`repo.Save()`) is
+   * kept too, so the call is never answered by its bare name; no type matches
+   * it, and the edge stays unresolved. An object creation
    * `new Billing.Calc()` carries the whole type path, `Billing.Calc`, with
    * `Calc` as the callee — a member cannot share its class's name in C#, so
    * the repeated name marks a constructor call without ambiguity.
@@ -288,7 +307,10 @@ export interface SymbolEdge {
   csMemberReceiver?: boolean;
   callSite: { file: string; line: number };
   /** Receiver expression for method calls (e.g. "fighter" in "fighter.take_damage()").
-   *  Used by GDScript receiver-type resolution. Absent for bare function calls. */
+   *  Used by GDScript receiver-type resolution. Absent for bare function calls.
+   *  C# sets it only where the receiver is no name path: `this`, `base`, or `?`
+   *  for any other expression (a call result, `a?.b`, an element access) —
+   *  such a call is answered from the caller's own type or its bases, or not at all. */
   receiver?: string;
   /** True when a GDScript call edge represents `signal_name.emit()`.
    *  Optional so symbol graphs built before signal-edge support remain readable. */

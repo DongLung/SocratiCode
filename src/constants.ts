@@ -845,6 +845,13 @@ export const GODOT_BUILTIN_FUNCTIONS = new Set<string>([
 ]);
 
 /**
+ * The leading segment a C# edge keeps for a `global::`-anchored path
+ * (`global::App.Calc`): the path names members of the global namespace only,
+ * never a scope the reference sits in.
+ */
+export const CS_GLOBAL_ANCHOR = "global::";
+
+/**
  * .NET framework and language-level type names a C# file names without the
  * project declaring them: `Task`, `List`, `DateTime`, and the conventional
  * generic parameter names. Extraction records them like any other type; a

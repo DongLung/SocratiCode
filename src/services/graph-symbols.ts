@@ -8,7 +8,7 @@
  */
 
 import { Lang, parse } from "@ast-grep/napi";
-import { getLanguageFromExtension } from "../constants.js";
+import { CS_GLOBAL_ANCHOR, getLanguageFromExtension } from "../constants.js";
 import type { EdgeKind, SymbolEdge, SymbolKind, SymbolNode } from "../types.js";
 import { analyzeElixirTemplate, isElixirTemplateExtension } from "./elixir-templates.js";
 import { phpFoldCase } from "./graph-php-case.js";
@@ -63,7 +63,8 @@ export interface ExtractedSymbols {
     csMemberReceiver?: boolean;
     callSite: { file: string; line: number };
     /** Receiver expression for method calls (e.g. "fighter" in "fighter.take_damage()").
-     *  Present only for attribute_call nodes; bare calls have no receiver. */
+     *  GDScript: present only for attribute_call nodes; bare calls have no receiver.
+     *  C#: `this`, `base` or `?`; see {@link SymbolEdge.receiver}. */
     receiver?: string;
     /** True when this call represents a GDScript `signal_name.emit()`. */
     signalEmit?: boolean;
@@ -2472,12 +2473,21 @@ function csWithin(inner: CsRange, outer: CsRange): boolean {
   return outer.start <= inner.start && inner.end <= outer.end;
 }
 
+/** The leading path segment for a `global::` anchor, kept wherever the path is recorded. */
+const CS_GLOBAL = CS_GLOBAL_ANCHOR;
+
+/** A name path as an edge records it: `Ns.Calc`, or `global::Ns.Calc` for an anchored one. */
+function csJoin(path: string[]): string {
+  return path[0] === CS_GLOBAL ? CS_GLOBAL + path.slice(1).join(".") : path.join(".");
+}
+
 /**
  * The dotted path a name-only type or expression spells, type arguments
- * dropped: `["Ns", "Calc"]` for `Ns.Calc`, `global::Ns.Calc` and `Ns.Calc<T>`,
- * whether written as a type or as a member-access receiver. `null` when any
- * part is not a name — `this`, `base`, a call, an element access, or an
- * extern alias other than `global`, whose target no symbol records.
+ * dropped: `["Ns", "Calc"]` for `Ns.Calc` and `Ns.Calc<T>`, and
+ * `[CS_GLOBAL, "Ns", "Calc"]` for `global::Ns.Calc`, whether written as a
+ * type or as a member-access receiver. `null` when any part is not a name —
+ * `this`, `base`, a call, an element access, or an extern alias other than
+ * `global`, whose target no symbol records.
  */
 // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
 function csNamePath(node: any): string[] | null {
@@ -2495,8 +2505,11 @@ function csNamePath(node: any): string[] | null {
       const last = csNamePath(csNameField(node));
       return head && last ? [...head, ...last] : null;
     }
-    case "alias_qualified_name":
-      return node.field?.("alias")?.text() === "global" ? csNamePath(csNameField(node)) : null;
+    case "alias_qualified_name": {
+      if (node.field?.("alias")?.text() !== "global") return null;
+      const rest = csNamePath(csNameField(node));
+      return rest ? [CS_GLOBAL, ...rest] : null;
+    }
     default:
       return null;
   }
@@ -2515,7 +2528,7 @@ function csQualifiedNames(root: any): {
   // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
   isSegment: (id: any) => boolean;
   // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
-  writtenQualifier: (id: any) => string | null;
+  writtenQualifier: (id: any) => string[] | null;
 } {
   // Start offsets of the identifiers that are qualifier segments.
   const segments = new Set<number>();
@@ -2534,23 +2547,26 @@ function csQualifiedNames(root: any): {
   // Terminal identifier's start → the path written before it; `null` when it
   // is not a plain path (an extern alias), so no reference is drawn rather
   // than a bare one that would bind whatever same-named type is nearest.
-  const written = new Map<number, string | null>();
+  const written = new Map<number, string[] | null>();
   for (const qn of safeFindAll(root, "qualified_name")) {
     const qualifier = qn.field?.("qualifier") ?? null;
     if (qualifier) markSegments(qualifier);
     const head = csTypeHeadIdentifier(csNameField(qn));
-    const path = csNamePath(qualifier);
-    if (head) written.set(csRange(head).start, path ? path.join(".") : null);
+    if (head) written.set(csRange(head).start, csNamePath(qualifier));
   }
   for (const aqn of safeFindAll(root, "alias_qualified_name")) {
     const alias = aqn.field?.("alias") ?? null;
     if (alias) markSegments(alias);
     const head = csTypeHeadIdentifier(csNameField(aqn));
-    if (head) written.set(csRange(head).start, alias?.text() === "global" ? "" : null);
+    if (head) written.set(csRange(head).start, alias?.text() === "global" ? [CS_GLOBAL] : null);
   }
   return {
     isSegment: (id) => segments.has(csRange(id).start),
-    writtenQualifier: (id) => written.get(csRange(id).start) ?? "",
+    // Only a missing entry means "written bare": `null` must reach the caller's skip.
+    writtenQualifier: (id) => {
+      const path = written.get(csRange(id).start);
+      return path === undefined ? [] : path;
+    },
   };
 }
 
@@ -2623,11 +2639,28 @@ function extractFromCSharp(
   const qualified = csQualifiedNames(root);
   // `using Store = App.Tests.ProductStore;`: an alias stands for the path it
   // names, so every path below is written out through it before it is
-  // recorded. Read file-wide; a `global using` alias declared in another file
-  // is not seen.
-  const aliases = new Map<string, string[]>();
-  // `using App.Billing;`: the namespaces a base type may be imported from.
+  // recorded. `using App.Billing;` and `using static App.Atlas;` name the
+  // namespaces and types whose types a name may be imported from — a static
+  // import brings in the type's nested types. A directive inside a namespace
+  // block applies within that block only, so sibling blocks never share one;
+  // a `global using` also reaches the files of its project (`csGlobalUsings`).
+  // A `global using` alias declared in another file is not seen.
+  const namespaceBlocks = safeFindAll(root, "namespace_declaration").map((n) => {
+    const r = n.range();
+    return { range: csRange(n), line: r.start.line + 1, endLine: r.end.line + 1, usings: [] as string[] };
+  });
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const blockOf = (node: any) => {
+    const r = csRange(node);
+    let best: (typeof namespaceBlocks)[number] | null = null;
+    for (const blk of namespaceBlocks) {
+      if (csWithin(r, blk.range) && (!best || blk.range.start >= best.range.start)) best = blk;
+    }
+    return best;
+  };
+  const aliases = new Map<string, Array<{ block: CsRange | null; target: string[] }>>();
   const usings: string[] = [];
+  const globalUsings: string[] = [];
   for (const u of safeFindAll(root, "using_directive")) {
     const alias = csNameField(u);
     // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
@@ -2635,12 +2668,35 @@ function extractFromCSharp(
     const named = children.filter((c) => c.isNamed());
     const target = named.length > 0 ? csNamePath(named[named.length - 1]) : null;
     if (!target) continue;
-    if (alias && named.length >= 2) aliases.set(alias.text(), target);
-    else if (!alias && !children.some((c) => c.kind() === "static")) usings.push(target.join("."));
+    const block = blockOf(u);
+    if (alias && named.length >= 2) {
+      // A file-level alias is resolved from the global namespace; one in a
+      // block, like any name there, from that block.
+      const anchored = block || target[0] === CS_GLOBAL ? target : [CS_GLOBAL, ...target];
+      const list = aliases.get(alias.text()) ?? [];
+      list.push({ block: block?.range ?? null, target: anchored });
+      aliases.set(alias.text(), list);
+    } else if (!alias) {
+      const imported = (target[0] === CS_GLOBAL ? target.slice(1) : target).join(".");
+      if (block) block.usings.push(imported);
+      else usings.push(imported);
+      if (!block && children.some((c) => c.kind() === "global")) globalUsings.push(imported);
+    }
   }
-  const expand = (path: string[]): string[] => {
-    const target = aliases.get(path[0]);
-    return target ? [...target, ...path.slice(1)] : path;
+  if (usings.length > 0) moduleSym.csUsings = usings;
+  if (globalUsings.length > 0) moduleSym.csGlobalUsings = globalUsings;
+  const scopedUsings = namespaceBlocks
+    .filter((blk) => blk.usings.length > 0)
+    .map(({ line, endLine, usings: u }) => ({ line, endLine, usings: u }));
+  if (scopedUsings.length > 0) moduleSym.csScopedUsings = scopedUsings;
+  // The alias visible at byte offset `at`: the innermost block declaring it, else the file's.
+  const expandAt = (path: string[], at: number): string[] => {
+    let best: { block: CsRange | null; target: string[] } | null = null;
+    for (const a of aliases.get(path[0]) ?? []) {
+      if (a.block && !(a.block.start <= at && at <= a.block.end)) continue;
+      if (!best || (a.block && (!best.block || a.block.start >= best.block.start))) best = a;
+    }
+    return best ? [...best.target, ...path.slice(1)] : path;
   };
   // The written base types of a type declaration: the list's own entries, so
   // a primary-constructor argument (`X` in `: Base(X)`) is never one.
@@ -2691,11 +2747,8 @@ function extractFromCSharp(
           const bases = baseTypes(d)
             .map((b) => csNamePath(b))
             .filter((b): b is string[] => b !== null)
-            .map((b) => expand(b).join("."));
-          if (bases.length > 0) {
-            sym.csBases = bases;
-            if (usings.length > 0) sym.csUsings = usings;
-          }
+            .map((b) => csJoin(expandAt(b, own.start)));
+          if (bases.length > 0) sym.csBases = bases;
         }
       }
     }
@@ -2747,17 +2800,20 @@ function extractFromCSharp(
     });
   };
   // A path's last segment is the type; the segments before it are its written qualifier.
-  const pushPathRef = (written: string[], line: number, memberReceiver = false) => {
-    const path = expand(written);
-    pushTypeRef(path[path.length - 1], path.length > 1 ? path.slice(0, -1).join(".") : undefined, line,
-      memberReceiver && path.length > 1);
+  // `at` is the reference's byte offset, which decides the alias in scope;
+  // `null` for a path already written out through it.
+  const pushPathRef = (written: string[], line: number, at: number | null, memberReceiver = false) => {
+    const path = at === null ? written : expandAt(written, at);
+    const segments = path.filter((p) => p !== CS_GLOBAL).length;
+    pushTypeRef(path[path.length - 1], path.length > 1 ? csJoin(path.slice(0, -1)) : undefined, line,
+      memberReceiver && segments > 1);
   };
   // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
   const pushTypeRefAt = (id: any) => {
     if (qualified.isSegment(id)) return;
     const qualifier = qualified.writtenQualifier(id);
     if (qualifier === null) return;
-    pushPathRef([...(qualifier ? qualifier.split(".") : []), id.text()], id.range().start.line + 1);
+    pushPathRef([...qualifier, id.text()], id.range().start.line + 1, csRange(id).start);
   };
 
   for (const node of safeFindAll(root, "invocation_expression")) {
@@ -2767,12 +2823,21 @@ function extractFromCSharp(
     const fn = node.field?.("function") ?? null;
     let calleeName: string | null = null;
     let calleeQualifier: string | undefined;
+    // A receiver that is no name path: `this`, `base`, or `?` for any other
+    // expression (a call result, `a?.b`, an element access).
+    let receiver: string | undefined;
     if (fn?.kind() === "member_access_expression") {
       calleeName = csTypeHeadIdentifier(csNameField(fn))?.text() ?? null;
-      const receiver = csNamePath(fn.field?.("expression") ?? null);
-      if (receiver && /^[A-Z]/.test(receiver[0])) calleeQualifier = expand(receiver).join(".");
+      // Any name path is kept as written, a lowercase namespace or a variable
+      // included: dropping it would leave a bare name for local-first lookup.
+      const expr = fn.field?.("expression") ?? null;
+      const path = csNamePath(expr);
+      if (path) calleeQualifier = csJoin(expandAt(path, csRange(expr).start));
+      else receiver = expr?.kind() === "this" || expr?.kind() === "base" ? expr.kind() : "?";
     } else if (fn?.kind() === "identifier" || fn?.kind() === "generic_name") {
       calleeName = csTypeHeadIdentifier(fn)?.text() ?? null;
+    } else if (fn) {
+      receiver = "?";
     }
     if (!calleeName) calleeName = extractCalleeNameJs(node.text());
     if (!calleeName) continue;
@@ -2781,6 +2846,7 @@ function extractFromCSharp(
       calleeName,
       kind: "call",
       ...(calleeQualifier ? { calleeQualifier } : {}),
+      ...(receiver ? { receiver } : {}),
       callSite: { file, line: callLine },
     });
   }
@@ -2789,18 +2855,20 @@ function extractFromCSharp(
   // type's whole path, so the repeated `Calc` tells resolution it is a
   // creation. It also references the type.
   for (const node of safeFindAll(root, "object_creation_expression")) {
-    const written = csNamePath(node.field?.("type") ?? null);
-    const path = written ? expand(written) : null;
-    if (!path) continue;
+    const typeNode = node.field?.("type") ?? null;
+    const written = csNamePath(typeNode);
+    if (!written) continue;
+    const at = csRange(typeNode).start;
+    const path = expandAt(written, at);
     const line = node.range().start.line + 1;
     rawCalls.push({
       callerId: findCallerId(scopes, line, moduleSym.id),
       calleeName: path[path.length - 1],
       kind: "call",
-      calleeQualifier: path.join("."),
+      calleeQualifier: csJoin(path),
       callSite: { file, line },
     });
-    pushPathRef(path, line);
+    pushPathRef(written, line, at);
   }
 
   // Type positions: the declaration's `type` field, the base list, type
@@ -2843,19 +2911,25 @@ function extractFromCSharp(
   }
   for (const node of safeFindAll(root, "member_access_expression")) {
     if (innerAccesses.has(rangeKey(csRange(node)))) continue;
-    const receiver = csNamePath(node.field?.("expression") ?? null);
-    if (!receiver || !/^[A-Z]/.test(receiver[0])) continue;
-    pushPathRef(receiver, node.range().start.line + 1, true);
+    const expr = node.field?.("expression") ?? null;
+    const receiver = csNamePath(expr);
+    // A lowercase head is far more often a variable than a namespace, and an
+    // unresolvable reference per field access would drown the type graph; the
+    // call itself still keeps a lowercase receiver as its qualifier.
+    if (!receiver || (receiver[0] !== CS_GLOBAL && !/^[A-Z]/.test(receiver[0]))) continue;
+    pushPathRef(receiver, node.range().start.line + 1, csRange(expr).start, true);
   }
   // `[Foo]` names the class `FooAttribute`; the compiler accepts both spellings.
   for (const a of safeFindAll(root, "attribute")) {
     // Expanded before the suffix: `[Obs]` under `using Obs = System.ObsoleteAttribute;`.
-    const written = csNamePath(csNameField(a));
-    const path = written ? expand(written) : null;
-    if (!path) continue;
+    const nameNode = csNameField(a);
+    const written = csNamePath(nameNode);
+    if (!written) continue;
+    const at = csRange(nameNode).start;
+    const path = expandAt(written, at);
     const last = path[path.length - 1];
     const name = last.endsWith("Attribute") ? last : `${last}Attribute`;
-    pushPathRef([...path.slice(0, -1), name], a.range().start.line + 1);
+    pushPathRef([...path.slice(0, -1), name], a.range().start.line + 1, null);
   }
   return { symbols, rawCalls };
 }

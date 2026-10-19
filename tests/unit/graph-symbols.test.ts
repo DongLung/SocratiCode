@@ -686,7 +686,8 @@ namespace App {
       const src = "using Repo = App.Data.Repository;\nnamespace App { public record R(int X) : Base(X), IFoo; public class C : Repo, Ns.IBar<Item> { } }\n";
       const out = extractSymbolsAndCalls(src, "csharp" as unknown as Lang, ".cs", "R.cs");
       expect(out.symbols.find((s) => s.name === "R")?.csBases).toEqual(["Base", "IFoo"]);
-      expect(out.symbols.find((s) => s.name === "C")?.csBases).toEqual(["App.Data.Repository", "Ns.IBar"]);
+      // A file-level alias names its target from the global namespace.
+      expect(out.symbols.find((s) => s.name === "C")?.csBases).toEqual(["global::App.Data.Repository", "Ns.IBar"]);
       const refs = out.rawCalls.filter((c) => c.kind === "type_reference").map((c) => c.calleeName);
       expect(refs).toEqual(expect.arrayContaining(["Base", "IFoo", "Repository", "IBar", "Item"]));
       expect(refs).not.toContain("X");
@@ -707,7 +708,7 @@ public class Service {
       const out = extractSymbolsAndCalls(src, "csharp" as unknown as Lang, ".cs", "Service.cs");
       const refs = out.rawCalls.filter((c) => c.kind === "type_reference");
       const written = refs.map((c) => (c.calleeQualifier ? `${c.calleeQualifier}.${c.calleeName}` : c.calleeName));
-      expect(written).toEqual(expect.arrayContaining(["Order.Order", "System.Collections.Generic.IList", "MyApp.Domain.Item", "Ns.Calc", "Billing.Calc", "Config.Instance"]));
+      expect(written).toEqual(expect.arrayContaining(["Order.Order", "System.Collections.Generic.IList", "MyApp.Domain.Item", "global::Ns.Calc", "Billing.Calc", "Config.Instance"]));
       // No qualifier segment becomes a type of its own.
       for (const segment of ["System", "Collections", "Generic", "MyApp", "Domain", "Ns", "Billing"]) {
         expect(refs.find((c) => c.calleeName === segment)).toBeUndefined();
@@ -740,8 +741,11 @@ public class Service {
       const calls = out.rawCalls.filter((c) => c.kind === "call");
       expect(calls.find((c) => c.calleeName === "Calc")).toBeTruthy();
       const compute = calls.filter((c) => c.calleeName === "Compute");
-      expect(compute.map((c) => c.calleeQualifier)).toEqual(["Calc", undefined, undefined]);
+      // A variable receiver keeps its written path; the resolver finds no type by that name.
+      expect(compute.map((c) => c.calleeQualifier)).toEqual(["Calc", "_calc", undefined]);
       expect(calls.find((c) => c.calleeName === "Run")?.calleeQualifier).toBeUndefined();
+      expect(calls.find((c) => c.calleeName === "Run")?.receiver).toBe("this");
+      expect(compute.map((c) => c.receiver)).toEqual([undefined, undefined, undefined]);
       expect(calls.find((c) => c.calleeName === "Make")?.calleeQualifier).toBe("Helper");
       // The field type (line 3), `new Calc()` (line 4) and the static call's receiver (line 6) reference `Calc`;
       // `_calc.Compute` and `this.Run` reference no type.
