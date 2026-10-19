@@ -2642,9 +2642,8 @@ function extractFromCSharp(
   // recorded. `using App.Billing;` and `using static App.Atlas;` name the
   // namespaces and types whose types a name may be imported from — a static
   // import brings in the type's nested types. A directive inside a namespace
-  // block applies within that block only, so sibling blocks never share one;
-  // a `global using` also reaches the files of its project (`csGlobalUsings`).
-  // A `global using` alias declared in another file is not seen.
+  // block applies within that block only, so sibling blocks never share one.
+  // A `global using` counts for its own file alone (see `csUsings`).
   const namespaceBlocks = safeFindAll(root, "namespace_declaration").map((n) => {
     const r = n.range();
     return { range: csRange(n), line: r.start.line + 1, endLine: r.end.line + 1, usings: [] as string[] };
@@ -2660,7 +2659,6 @@ function extractFromCSharp(
   };
   const aliases = new Map<string, Array<{ block: CsRange | null; target: string[] }>>();
   const usings: string[] = [];
-  const globalUsings: string[] = [];
   for (const u of safeFindAll(root, "using_directive")) {
     const alias = csNameField(u);
     // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
@@ -2680,11 +2678,9 @@ function extractFromCSharp(
       const imported = (target[0] === CS_GLOBAL ? target.slice(1) : target).join(".");
       if (block) block.usings.push(imported);
       else usings.push(imported);
-      if (!block && children.some((c) => c.kind() === "global")) globalUsings.push(imported);
     }
   }
   if (usings.length > 0) moduleSym.csUsings = usings;
-  if (globalUsings.length > 0) moduleSym.csGlobalUsings = globalUsings;
   const scopedUsings = namespaceBlocks
     .filter((blk) => blk.usings.length > 0)
     .map(({ line, endLine, usings: u }) => ({ line, endLine, usings: u }));
@@ -2893,7 +2889,14 @@ function extractFromCSharp(
       pushTypeRefAt(t);
       continue;
     }
-    for (const id of safeFindAll(t, "identifier")) pushTypeRefAt(id);
+    // A tuple element's label (`Total` in `(int Total, Order Item)`) names no type.
+    const labels = new Set(
+      safeFindAll(t, "tuple_element")
+        .map((e) => csNameField(e))
+        .filter((n) => n?.kind() === "identifier")
+        .map((n) => csRange(n).start),
+    );
+    for (const id of safeFindAll(t, "identifier")) if (!labels.has(csRange(id).start)) pushTypeRefAt(id);
   }
   // `Calc.Run()`, `Mode.A`, `Billing.Calc.Limit`: a member access whose
   // receiver is a PascalCase name path names a type — the C# counterpart of

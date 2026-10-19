@@ -208,7 +208,11 @@ export interface SymbolNode {
    * file-level `using`, and the types it imports with `using static` (whose
    * nested types become visible by name), its own `global using`s included,
    * aliases excluded. A type name the enclosing scopes do not declare is
-   * looked for under them. Absent when the file imports none.
+   * looked for under them. Absent when the file imports none. A `global using`
+   * is not applied to any other file: which files one compilation shares is
+   * set by the project system, which the graph does not read, so a type
+   * imported only through another file's `global using` (a `GlobalUsings.cs`,
+   * or a `<Using Include>` item in a `.csproj`) stays unresolved.
    */
   csUsings?: string[];
   /**
@@ -217,15 +221,6 @@ export interface SymbolNode {
    * so a sibling block's imports never reach them. Absent when no block has any.
    */
   csScopedUsings?: Array<{ line: number; endLine: number; usings: string[] }>;
-  /**
-   * C# `<module>` symbols only: the namespaces and types the file imports
-   * with `global using`. Resolution applies them to every C# file under the file's
-   * directory — the files an SDK-style project rooted there compiles, where
-   * `GlobalUsings.cs` conventionally sits. A `<Using Include>` item in a
-   * `.csproj` is not read, so a type imported only through one stays
-   * unresolved.
-   */
-  csGlobalUsings?: string[];
 }
 
 /** Kind of relationship an edge represents */

@@ -60,6 +60,17 @@ function csFullNameOf(s: SymbolNode): string {
   return s.csFullName ?? s.qualifiedName;
 }
 
+/**
+ * Whether a written C# path names a .NET framework type: a framework type
+ * name alone (`Math`) or under `System` (`System.Math`). After a variable or
+ * a project type the same name is a member (`item.Action`, `Settings.Type`),
+ * no evidence of a framework type.
+ */
+function csFrameworkPath(segments: string[]): boolean {
+  const last = segments[segments.length - 1];
+  return last !== undefined && CS_BUILTIN_TYPES.has(last) && (segments.length === 1 || segments[0] === "System");
+}
+
 type GdscriptSceneEntry = readonly [file: string, symbols: Map<string, SymbolNode[]>];
 
 /** Normalize relative path components like `foo/../bar` -> `bar` */
@@ -940,30 +951,16 @@ export function resolveCallSites(
     }
     return csSymbolIndex.get(id);
   };
-  // `global using`s by the directory of the file declaring them.
-  let csGlobalUsingDirs: Array<[dir: string, namespaces: string[]]> | undefined;
-  const csUsingsCache = new Map<string, string[]>();
   /**
    * What a C# reference at `line` of `file` imports: the file's own top-level
-   * `using`s, those of every namespace block enclosing that line, then the
-   * `global using`s of every file in a directory above it — the project an
-   * SDK-style `.csproj` rooted at that directory compiles.
+   * `using`s, its `global using`s among them, then those of every namespace
+   * block enclosing that line. Another file's `global using` is not applied:
+   * which files share a compilation is a project-system fact the graph does
+   * not record.
    */
   const csUsingsAt = (file: string, line: number): string[] => {
     const module = (symbolsByFile.get(file) ?? []).find((s) => s.kind === "module");
-    let fileWide = csUsingsCache.get(file);
-    if (!fileWide) {
-      if (!csGlobalUsingDirs) {
-        csGlobalUsingDirs = [];
-        for (const [f, syms] of symbolsByFile.entries()) {
-          const globals = syms.find((s) => s.kind === "module")?.csGlobalUsings;
-          if (globals) csGlobalUsingDirs.push([f.includes("/") ? f.slice(0, f.lastIndexOf("/") + 1) : "", globals]);
-        }
-      }
-      const inherited = csGlobalUsingDirs.filter(([dir]) => file.startsWith(dir)).flatMap(([, ns]) => ns);
-      fileWide = Array.from(new Set([...(module?.csUsings ?? []), ...inherited]));
-      csUsingsCache.set(file, fileWide);
-    }
+    const fileWide = module?.csUsings ?? [];
     const scoped = (module?.csScopedUsings ?? []).filter((b) => b.line <= line && line <= b.endLine);
     return scoped.length === 0 ? fileWide : Array.from(new Set([...scoped.flatMap((b) => b.usings), ...fileWide]));
   };
@@ -1767,12 +1764,11 @@ export function resolveCallSites(
           const segments = relative ? [...relative.split("."), name] : [name];
           const shortest = edge.csMemberReceiver ? 1 : segments.length;
           for (let n = segments.length; n >= shortest && found.length === 0; n--) {
-            const prefix = segments[n - 1];
             const path = anchor + segments.slice(0, n).join(".");
             const next = n < segments.length ? segments[n] : null;
             const declaresNext = (t: SymbolNode): boolean => next === null || csMembersOf(t, next, true).length > 0;
             found = lookup(path, (s) => CS_TYPE_KINDS.has(s.kind) && declaresNext(s));
-            if (CS_BUILTIN_TYPES.has(prefix)) framework = true;
+            if (csFrameworkPath(segments.slice(0, n))) framework = true;
           }
         } else if (qualifier && terminal === name) {
           // `new Calc()`: a member cannot share its class's name, so the
@@ -1785,7 +1781,7 @@ export function resolveCallSites(
             );
             found.push(...(ctors.length > 0 ? ctors : [type]));
           }
-          framework = CS_BUILTIN_TYPES.has(name);
+          framework = csFrameworkPath(relative?.split(".") ?? []);
         } else if (qualifier) {
           found = lookup(`${qualifier}.${name}`, (s) => !CS_TYPE_KINDS.has(s.kind));
           if (found.length === 0) {
@@ -1794,7 +1790,7 @@ export function resolveCallSites(
             for (const t of owners) found.push(...csMembersOf(t, name, false));
             // `Math.Max()` with no project `Math` in sight is a framework call;
             // a member a visible project type lacks stays unresolved.
-            framework = owners.length === 0 && terminal !== undefined && CS_BUILTIN_TYPES.has(terminal);
+            framework = owners.length === 0 && csFrameworkPath(relative?.split(".") ?? []);
           }
         } else if ((edge.receiver === "this" || edge.receiver === "base") && caller?.csFullName) {
           // `this.Run()` names the caller's own type, `base.Run()` its bases.

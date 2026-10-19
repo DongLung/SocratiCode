@@ -343,8 +343,9 @@ describe("C# extractor-to-resolver regressions", () => {
       "Kiosk/Check.cs": `using App.Billing;\nusing App.Other;\nnamespace App.Kiosk { public class Check {\n${use(3)}\n} }`,
       // No scope or using of this file declares a `Calc`, nor a `Task`.
       "Lone/Lone.cs": `namespace App.Lone { public class Lone {\n${use(4)}\n  System.Threading.Tasks.Task T() => null; Task U() => null;\n} }`,
-      // A `global using` reaches every file under its directory, and no other.
-      "Tests/GlobalUsings.cs": "global using App.Billing;",
+      // A `global using` counts in its own file. Which other files share its
+      // compilation is the project system's to say, so none is assumed.
+      "Tests/GlobalUsings.cs": `global using App.Billing;\nnamespace App.Tests { public class Fixture {\n${use(6)}\n} }`,
       "Tests/Unit/CalcTests.cs": `namespace App.Tests { public class CalcTests {\n${use(5)}\n} }`,
     };
     const { at } = run(files);
@@ -367,7 +368,8 @@ describe("C# extractor-to-resolver regressions", () => {
       { confidence: "unresolved", targets: [] },
     ]);
     expect(all("Lone/Lone.cs", 2).map((e) => e.confidence)).toEqual(["unresolved", "unresolved", "unresolved"]);
-    expect(all("Tests/Unit/CalcTests.cs", 2).map((e) => e.targets)).toEqual([billing, billing, ["App.Billing.Calc.Compute"]]);
+    expect(all("Tests/GlobalUsings.cs", 3).map((e) => e.targets)).toEqual([billing, billing, ["App.Billing.Calc.Compute"]]);
+    expect(all("Tests/Unit/CalcTests.cs", 2).map((e) => e.confidence)).toEqual(["unresolved", "unresolved", "unresolved"]);
     // `App.Chores.Task` is a project type, but not one this file can see: both `Task`s are .NET's.
     expect(at("Lone/Lone.cs", 3, "type_reference", "Task")).toEqual([
       { confidence: "engine", targets: [] },
@@ -509,6 +511,37 @@ describe("C# extractor-to-resolver regressions", () => {
     // The visible project `Math` declares no `Max`: neither .NET's nor a guess.
     expect(at("Shadow.cs", 3, "call", "Max")).toEqual([{ confidence: "unresolved", targets: [] }]);
     expect(at("Shadow.cs", 3, "call", "Clamp")).toEqual([{ confidence: "unique", targets: ["App.Util.Math.Clamp"] }]);
+  });
+
+  it("takes a framework name as a framework type only alone or under System, never as a member", () => {
+    const files = {
+      "Paths.cs": [
+        "namespace App { public class Paths {",
+        "  object Go(Kiosk kiosk) => Kiosk.Action.Invoke() + Settings.Environment.Get() + System.Math.Abs(1) + Math.PI;",
+        "} }",
+      ].join("\n"),
+    };
+    const { at } = run(files);
+    // `Kiosk` and `Settings` are no visible types: `Action` and `Environment` are their members.
+    expect(at("Paths.cs", 2, "call", "Invoke")).toEqual([{ confidence: "unresolved", targets: [] }]);
+    expect(at("Paths.cs", 2, "call", "Get")).toEqual([{ confidence: "unresolved", targets: [] }]);
+    expect(at("Paths.cs", 2, "type_reference", "Environment")).toEqual([{ confidence: "unresolved", targets: [] }]);
+    expect(at("Paths.cs", 2, "call", "Abs")).toEqual([{ confidence: "engine", targets: [] }]);
+    expect(at("Paths.cs", 2, "type_reference", "Math")).toEqual([
+      { confidence: "engine", targets: [] },
+      { confidence: "engine", targets: [] },
+    ]);
+  });
+
+  it("draws no type reference from a tuple element's label", () => {
+    const files = {
+      "Total.cs": "namespace App { public class Total { } public class Order { } }",
+      "Desk.cs": "namespace App { public class Desk {\n  (int Total, Order Item) Go((Order First, int Total) p) => default;\n} }",
+    };
+    const { at } = run(files);
+    expect(at("Desk.cs", 2, "type_reference", "Total")).toEqual([]);
+    expect(at("Desk.cs", 2, "type_reference", "Item")).toEqual([]);
+    expect(at("Desk.cs", 2, "type_reference", "Order")).toEqual([{ confidence: "unique", targets: ["App.Order"] }]);
   });
 
   it("looks each base up once, so nested types cost no more than their count, and ends a cyclic hierarchy", () => {
