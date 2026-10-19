@@ -2427,6 +2427,70 @@ function extractJvmCallableName(text: string): string | null {
 
 // ── C# ──────────────────────────────────────────────────────────────────
 
+/**
+ * BCL and language-level type names a C# type position names without the
+ * project declaring them. Left out of `type_reference` edges, as
+ * `TS_BUILTIN_TYPES` is for TypeScript, so the unresolved share reads the
+ * project's own types rather than `Task` and `List` on every signature.
+ */
+const CS_BUILTIN_TYPES = new Set([
+  "Object", "String", "Boolean", "Int32", "Int64", "Int16", "Byte", "Char", "Decimal", "Double", "Single",
+  "Guid", "DateTime", "DateTimeOffset", "DateOnly", "TimeOnly", "TimeSpan", "Uri", "Exception", "Enum",
+  "Task", "ValueTask", "CancellationToken", "Func", "Action", "Predicate", "Nullable", "Lazy", "Type",
+  "List", "Dictionary", "HashSet", "Queue", "Stack", "KeyValuePair", "Tuple", "ValueTuple", "Span", "Memory",
+  "IEnumerable", "IAsyncEnumerable", "IQueryable", "ICollection", "IList", "IDictionary", "ISet",
+  "IReadOnlyList", "IReadOnlyCollection", "IReadOnlyDictionary", "IDisposable", "IAsyncDisposable",
+  "IComparable", "IEquatable", "IFormattable", "IServiceProvider", "Stream", "StringBuilder", "Array",
+  "Math", "Console", "Convert", "Environment", "Attribute", "EventArgs", "EventHandler", "Random",
+  "T", "TKey", "TValue", "TResult", "TEntity", "TSource", "TItem", "TRequest", "TResponse",
+]);
+
+/** The `name` field of a declaration, or `null` when the grammar gives none. */
+// biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+function csNameField(node: any): any | null {
+  try {
+    return node.field("name") ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** A C# type expression's own identifier: `Foo` in `Foo`, `Foo<T>`, `Ns.Foo`, `Foo?`, `Foo[]`. */
+// biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+function csTypeHeadIdentifier(node: any): any | null {
+  if (!node) return null;
+  const kind = node.kind();
+  if (kind === "identifier") return node;
+  if (kind === "generic_name") return safeFind(node, "identifier");
+  if (kind === "qualified_name") return csTypeHeadIdentifier(csNameField(node));
+  if (kind === "nullable_type" || kind === "array_type" || kind === "pointer_type" || kind === "ref_type") {
+    return csTypeHeadIdentifier(node.field?.("type") ?? node.children?.()?.[0] ?? null);
+  }
+  return null;
+}
+
+/** The type-like scope enclosing `line`, innermost first, or `null` at file level. */
+function csOwnerAt(owners: ScopeFrame[], line: number): ScopeFrame | null {
+  let best: ScopeFrame | null = null;
+  for (const o of owners) {
+    if (line >= o.startLine && line <= o.endLine && (!best || o.startLine >= best.startLine)) best = o;
+  }
+  return best;
+}
+
+/**
+ * C# declarations are named by their `name` field, never by the first
+ * identifier under them — that is an attribute (`[Fact]`, `[HttpGet]`,
+ * `[ApiController]`) or a return type (`Task<…>`, `DateTime`) whenever one
+ * precedes the name. Members carry `Owner.Name` as their qualified name so a
+ * static call `Owner.Name(...)` can be matched to them at resolution.
+ *
+ * Edges: invocations (with the receiver kept as `calleeQualifier` when it is a
+ * PascalCase identifier — a type, never `this`, `base` or a field), object
+ * creation (a call to the type, as `new Foo()` is for TypeScript), and
+ * `type_reference` for base lists, parameter / field / property / local /
+ * return types, type arguments, `typeof`, casts and attributes.
+ */
 function extractFromCSharp(
   source: string,
   file: string,
@@ -2436,10 +2500,18 @@ function extractFromCSharp(
   const root = parse("csharp" as unknown as Lang, source).root();
   const symbols: SymbolNode[] = [moduleSym];
   const scopes: ScopeFrame[] = [];
+  const owners: ScopeFrame[] = [];
 
-  for (const k of ["class_declaration", "interface_declaration", "record_declaration", "struct_declaration"]) {
+  const typeKinds: Array<[string, SymbolNode["kind"]]> = [
+    ["class_declaration", "class"],
+    ["interface_declaration", "interface"],
+    ["record_declaration", "class"],
+    ["struct_declaration", "struct"],
+    ["enum_declaration", "enum"],
+  ];
+  for (const [k, kind] of typeKinds) {
     for (const cls of safeFindAll(root, k)) {
-      const nameNode = safeFind(cls, "identifier");
+      const nameNode = csNameField(cls) ?? safeFind(cls, "identifier");
       if (!nameNode) continue;
       const name = nameNode.text();
       const r = cls.range();
@@ -2448,25 +2520,26 @@ function extractFromCSharp(
       const sym: SymbolNode = {
         id: makeId(file, name, startLine),
         name, qualifiedName: name,
-        kind: k.includes("interface") ? "interface"
-          : k.includes("struct") ? "struct" : "class",
+        kind,
         file, line: startLine, endLine, language,
       };
       symbols.push(sym);
       scopes.push({ name, startLine, endLine, symbolId: sym.id });
+      owners.push({ name, startLine, endLine, symbolId: sym.id });
     }
   }
   for (const k of ["method_declaration", "constructor_declaration"]) {
     for (const m of safeFindAll(root, k)) {
-      const nameNode = safeFind(m, "identifier");
+      const nameNode = csNameField(m) ?? safeFind(m, "identifier");
       if (!nameNode) continue;
       const name = nameNode.text();
       const r = m.range();
       const startLine = r.start.line + 1;
       const endLine = r.end.line + 1;
+      const owner = csOwnerAt(owners, startLine);
       const sym: SymbolNode = {
         id: makeId(file, name, startLine),
-        name, qualifiedName: name,
+        name, qualifiedName: owner ? `${owner.name}.${name}` : name,
         kind: k.includes("constructor") ? "constructor" : "method",
         file, line: startLine, endLine, language,
       };
@@ -2476,17 +2549,115 @@ function extractFromCSharp(
   }
 
   const rawCalls: ExtractedSymbols["rawCalls"] = [];
+  const seenRefs = new Set<string>();
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const pushTypeRef = (idNode: any) => {
+    if (!idNode) return;
+    const name = idNode.text();
+    if (!/^[A-Z]/.test(name) || CS_BUILTIN_TYPES.has(name)) return;
+    const line = idNode.range().start.line + 1;
+    const callerId = findCallerId(scopes, line, moduleSym.id);
+    const key = `${callerId}|${name}|${line}`;
+    if (seenRefs.has(key)) return;
+    seenRefs.add(key);
+    rawCalls.push({ callerId, calleeName: name, kind: "type_reference", callSite: { file, line } });
+  };
+
   for (const node of safeFindAll(root, "invocation_expression")) {
-    const calleeName = extractCalleeNameJs(node.text());
-    if (!calleeName) continue;
     const r = node.range();
     const callLine = r.start.line + 1;
+    const callerId = findCallerId(scopes, callLine, moduleSym.id);
+    const fn = node.field?.("function") ?? null;
+    let calleeName: string | null = null;
+    let calleeQualifier: string | undefined;
+    if (fn?.kind() === "member_access_expression") {
+      const nameNode = csTypeHeadIdentifier(csNameField(fn));
+      calleeName = nameNode?.text() ?? null;
+      const recv = fn.field?.("expression") ?? null;
+      const recvKind = recv?.kind();
+      if (recvKind === "identifier" || recvKind === "generic_name") {
+        const recvName = recvKind === "identifier" ? recv.text() : (safeFind(recv, "identifier")?.text() ?? "");
+        if (/^[A-Z]/.test(recvName)) calleeQualifier = recvName;
+      }
+    } else if (fn?.kind() === "identifier" || fn?.kind() === "generic_name") {
+      calleeName = csTypeHeadIdentifier(fn)?.text() ?? null;
+    }
+    if (!calleeName) calleeName = extractCalleeNameJs(node.text());
+    if (!calleeName) continue;
     rawCalls.push({
-      callerId: findCallerId(scopes, callLine, moduleSym.id),
+      callerId,
       calleeName,
       kind: "call",
+      ...(calleeQualifier ? { calleeQualifier } : {}),
       callSite: { file, line: callLine },
     });
+  }
+
+  for (const node of safeFindAll(root, "object_creation_expression")) {
+    const head = csTypeHeadIdentifier(node.field?.("type") ?? null);
+    if (!head) continue;
+    const name = head.text();
+    if (CS_BUILTIN_TYPES.has(name)) continue;
+    const line = node.range().start.line + 1;
+    rawCalls.push({
+      callerId: findCallerId(scopes, line, moduleSym.id),
+      calleeName: name,
+      kind: "call",
+      callSite: { file, line },
+    });
+    pushTypeRef(head);
+  }
+
+  // Type positions: the declaration's `type` field, the base list, type
+  // arguments, `typeof` and casts. Every PascalCase identifier under them
+  // names a type; a qualifier segment of `Ns.Foo` does not.
+  const typedKinds = [
+    "parameter", "variable_declaration", "property_declaration", "method_declaration", "typeof_expression",
+    "cast_expression", "event_field_declaration", "delegate_declaration", "indexer_declaration",
+  ];
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const typeNodes: any[] = [];
+  for (const k of typedKinds) {
+    for (const d of safeFindAll(root, k)) {
+      const t = d.field?.("type") ?? d.field?.("returns") ?? null;
+      if (t) typeNodes.push(t);
+    }
+  }
+  for (const k of ["base_list", "type_argument_list"]) typeNodes.push(...safeFindAll(root, k));
+  for (const t of typeNodes) {
+    if (t.kind() === "identifier") {
+      pushTypeRef(t);
+      continue;
+    }
+    for (const id of safeFindAll(t, "identifier")) {
+      const parent = id.parent?.();
+      if (parent?.kind() === "qualified_name" && parent.field?.("qualifier")?.text() === id.text()) continue;
+      pushTypeRef(id);
+    }
+  }
+  // `Calc.Run()`, `Mode.A`, `Calc.Limit`: a member access whose receiver is a
+  // PascalCase identifier names a type — the C# counterpart of the import edge
+  // a TypeScript `import { Calc }` gives the class, since `using` names only a
+  // namespace. The call itself is recorded above with the receiver as its
+  // qualifier; this is the reference to the type.
+  for (const node of safeFindAll(root, "member_access_expression")) {
+    const recv = node.field?.("expression") ?? null;
+    const recvKind = recv?.kind();
+    if (recvKind !== "identifier" && recvKind !== "generic_name") continue;
+    pushTypeRef(recvKind === "identifier" ? recv : safeFind(recv, "identifier"));
+  }
+  // `[Foo]` names the class `FooAttribute`; the compiler accepts both spellings.
+  for (const a of safeFindAll(root, "attribute")) {
+    const head = csTypeHeadIdentifier(csNameField(a));
+    if (!head) continue;
+    const written = head.text();
+    const name = written.endsWith("Attribute") ? written : `${written}Attribute`;
+    const line = head.range().start.line + 1;
+    const callerId = findCallerId(scopes, line, moduleSym.id);
+    const key = `${callerId}|${name}|${line}`;
+    if (seenRefs.has(key)) continue;
+    seenRefs.add(key);
+    rawCalls.push({ callerId, calleeName: name, kind: "type_reference", callSite: { file, line } });
   }
   return { symbols, rawCalls };
 }

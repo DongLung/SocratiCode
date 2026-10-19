@@ -49,6 +49,9 @@ export interface GodotSymbolResolutionContext {
   projectsByRoot: ReadonlyMap<string, GodotSymbolProject>;
 }
 
+/** The symbol kinds a C# type position can name. */
+const CS_TYPE_KINDS: ReadonlySet<SymbolNode["kind"]> = new Set(["class", "interface", "struct", "enum", "type"]);
+
 type GdscriptSceneEntry = readonly [file: string, symbols: Map<string, SymbolNode[]>];
 
 /** Normalize relative path components like `foo/../bar` -> `bar` */
@@ -876,6 +879,40 @@ export function resolveCallSites(
 
   // Re-export traversal is on the hot path for every unresolved edge. Build
   // this once rather than rescanning every edge in a barrel on every lookup.
+  // Project-wide C# indexes, built on first use: a static call or a type
+  // position may name a symbol outside the caller's dependencies (same
+  // namespace, no `using`), and scanning every file per edge is quadratic.
+  let csQualifiedIndex: Map<string, SymbolNode[]> | undefined;
+  let csTypeIndex: Map<string, SymbolNode[]> | undefined;
+  const csByQualifiedName = (): Map<string, SymbolNode[]> => {
+    if (!csQualifiedIndex) {
+      csQualifiedIndex = new Map();
+      for (const syms of symbolsByFile.values()) {
+        for (const s of syms) {
+          if (s.language !== "csharp") continue;
+          const list = csQualifiedIndex.get(s.qualifiedName);
+          if (list) list.push(s);
+          else csQualifiedIndex.set(s.qualifiedName, [s]);
+        }
+      }
+    }
+    return csQualifiedIndex;
+  };
+  const csTypesByName = (): Map<string, SymbolNode[]> => {
+    if (!csTypeIndex) {
+      csTypeIndex = new Map();
+      for (const syms of symbolsByFile.values()) {
+        for (const s of syms) {
+          if (s.language !== "csharp" || !CS_TYPE_KINDS.has(s.kind)) continue;
+          const list = csTypeIndex.get(s.name);
+          if (list) list.push(s);
+          else csTypeIndex.set(s.name, [s]);
+        }
+      }
+    }
+    return csTypeIndex;
+  };
+
   const reexportsByFile = new Map<string, SymbolEdge[]>();
   for (const [file, edges] of outgoingCallsByFile.entries()) {
     const reexports = edges.filter((edge) => edge.kind === "reexport");
@@ -1531,6 +1568,37 @@ export function resolveCallSites(
       // 1. Local (unless edge explicitly specifies an external source module)
       //    Checked BEFORE Godot builtin filtering so a user-defined `func print()`
       //    or `func range()` resolves to the local symbol, not the engine builtin.
+      if (callerLang === "csharp" && (edge.calleeQualifier || edge.kind === "type_reference")) {
+        // A C# static call names its class (`Calc.Run()`), and a type position
+        // names a type. Neither needs a `using` when the target shares the
+        // caller's namespace, so after the caller's own file and its resolved
+        // dependencies the whole project is searched — by `Owner.Name` for the
+        // call, so a same-named method in the caller's file is never answered
+        // for a call that names another class, and by class-like kind for the
+        // type. A name no class declares stays unresolved rather than widening
+        // to every method of that name.
+        const wanted = edge.calleeQualifier ? `${edge.calleeQualifier}.${edge.calleeName}` : edge.calleeName;
+        const accept = (s: SymbolNode): boolean =>
+          edge.calleeQualifier ? s.qualifiedName === wanted : s.name === wanted && CS_TYPE_KINDS.has(s.kind);
+        const matches = (file: string): string[] => {
+          const out: string[] = [];
+          for (const s of symbolsByFile.get(file) ?? []) if (accept(s)) out.push(s.id);
+          return out;
+        };
+        const ids = matches(callerFile);
+        if (ids.length === 0) for (const dep of deps) ids.push(...matches(dep));
+        if (ids.length === 0) {
+          const index = edge.calleeQualifier ? csByQualifiedName() : csTypesByName();
+          for (const s of index.get(wanted) ?? []) ids.push(s.id);
+        }
+        const uniq = Array.from(new Set(ids));
+        edge.calleeCandidates = uniq;
+        if (uniq.length === 0) edge.confidence = "unresolved";
+        else if (uniq.every((id) => fileOfSymbolId.get(id) === callerFile)) edge.confidence = "local";
+        else if (uniq.length === 1) edge.confidence = "unique";
+        else edge.confidence = "multiple-candidates";
+        continue;
+      }
       if (!edge.sourceModule) {
         const local = localIdx?.get(edge.calleeName);
         if (local && local.length > 0) {
