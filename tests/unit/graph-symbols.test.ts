@@ -639,9 +639,86 @@ namespace App {
       expect(typeRefs).toContain("Item");
       expect(typeRefs).toContain("ApiControllerAttribute");
       expect(typeRefs).toContain("HttpGetAttribute");
-      expect(typeRefs).not.toContain("Task");
-      expect(typeRefs).not.toContain("List");
-      expect(typeRefs).not.toContain("DateTime");
+      // Framework names are recorded like any other type: only resolution,
+      // which sees the whole project, can tell its own `Task` from .NET's.
+      expect(typeRefs).toContain("Task");
+    });
+
+    it("assigns members to the class that contains them, even when two classes share a line", () => {
+      const src = "namespace App.Billing; public class A { public void M() {} } public class B { public void M() {} }\n";
+      const out = extractSymbolsAndCalls(src, "csharp" as unknown as Lang, ".cs", "AB.cs");
+      const ms = out.symbols.filter((s) => s.name === "M");
+      expect(ms.map((s) => s.qualifiedName).sort()).toEqual(["A.M", "B.M"]);
+      expect(ms.map((s) => s.csFullName).sort()).toEqual(["App.Billing.A.M", "App.Billing.B.M"]);
+      expect(new Set(ms.map((s) => s.id)).size).toBe(2);
+    });
+
+    it("records nested types, delegates and properties under their full names", () => {
+      const src = `
+namespace App {
+    namespace Billing {
+        public class Outer {
+            [JsonProperty("count")]
+            public int Count { get; set; }
+            [Obsolete]
+            public Task<int> Pending { get; }
+            public delegate Task<bool> Handler(Item item);
+            public class Inner { public Inner() {} }
+        }
+    }
+}
+`;
+      const out = extractSymbolsAndCalls(src, "csharp" as unknown as Lang, ".cs", "Outer.cs");
+      const byName = (n: string) => out.symbols.find((s) => s.name === n);
+      expect(out.symbols.map((s) => s.name)).not.toContain("JsonProperty");
+      expect(byName("Count")).toMatchObject({ kind: "variable", qualifiedName: "Outer.Count", csFullName: "App.Billing.Outer.Count" });
+      expect(byName("Pending")).toMatchObject({ kind: "variable", qualifiedName: "Outer.Pending" });
+      expect(byName("Handler")).toMatchObject({ kind: "type", csFullName: "App.Billing.Outer.Handler" });
+      expect(byName("Inner")).toMatchObject({ kind: "class", csFullName: "App.Billing.Outer.Inner" });
+      expect(out.symbols.find((s) => s.kind === "constructor")).toMatchObject({
+        qualifiedName: "Inner.Inner", csFullName: "App.Billing.Outer.Inner.Inner",
+      });
+      const refs = out.rawCalls.filter((c) => c.kind === "type_reference").map((c) => c.calleeName);
+      expect(refs).toContain("Item");
+    });
+
+    it("records the written bases, and no primary-constructor argument as a type", () => {
+      const src = "using Repo = App.Data.Repository;\nnamespace App { public record R(int X) : Base(X), IFoo; public class C : Repo, Ns.IBar<Item> { } }\n";
+      const out = extractSymbolsAndCalls(src, "csharp" as unknown as Lang, ".cs", "R.cs");
+      expect(out.symbols.find((s) => s.name === "R")?.csBases).toEqual(["Base", "IFoo"]);
+      expect(out.symbols.find((s) => s.name === "C")?.csBases).toEqual(["App.Data.Repository", "Ns.IBar"]);
+      const refs = out.rawCalls.filter((c) => c.kind === "type_reference").map((c) => c.calleeName);
+      expect(refs).toEqual(expect.arrayContaining(["Base", "IFoo", "Repository", "IBar", "Item"]));
+      expect(refs).not.toContain("X");
+      expect(refs).not.toContain("Repo");
+    });
+
+    it("keeps the written path of a qualified call, creation and type, and skips qualifier segments by node", () => {
+      const src = `
+public class Service {
+    public void Run(Order.Order o, System.Collections.Generic.IList<MyApp.Domain.Item> items, global::Ns.Calc g) {
+        Billing.Calc.Compute(1);
+        var c = new Billing.Calc();
+        var l = Billing.Calc.Limit;
+        Config.Instance.Load();
+    }
+}
+`;
+      const out = extractSymbolsAndCalls(src, "csharp" as unknown as Lang, ".cs", "Service.cs");
+      const refs = out.rawCalls.filter((c) => c.kind === "type_reference");
+      const written = refs.map((c) => (c.calleeQualifier ? `${c.calleeQualifier}.${c.calleeName}` : c.calleeName));
+      expect(written).toEqual(expect.arrayContaining(["Order.Order", "System.Collections.Generic.IList", "MyApp.Domain.Item", "Ns.Calc", "Billing.Calc", "Config.Instance"]));
+      // No qualifier segment becomes a type of its own.
+      for (const segment of ["System", "Collections", "Generic", "MyApp", "Domain", "Ns", "Billing"]) {
+        expect(refs.find((c) => c.calleeName === segment)).toBeUndefined();
+      }
+      // A member-access receiver may end in a static member; a type position may not.
+      expect(refs.find((c) => c.calleeName === "Instance")?.csMemberReceiver).toBe(true);
+      expect(refs.find((c) => c.calleeName === "Order")?.csMemberReceiver).toBeUndefined();
+      const calls = out.rawCalls.filter((c) => c.kind === "call");
+      expect(calls.find((c) => c.calleeName === "Compute")?.calleeQualifier).toBe("Billing.Calc");
+      expect(calls.find((c) => c.calleeName === "Calc")?.calleeQualifier).toBe("Billing.Calc");
+      expect(calls.find((c) => c.calleeName === "Load")?.calleeQualifier).toBe("Config.Instance");
     });
 
     it("records object creation as a call to the type and keeps a static call's class as the qualifier", () => {

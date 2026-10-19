@@ -843,3 +843,25 @@ export const GODOT_BUILTIN_FUNCTIONS = new Set<string>([
   "queue_free", "free",
   "connect", "disconnect", "is_connected",
 ]);
+
+/**
+ * .NET framework and language-level type names a C# file names without the
+ * project declaring them: `Task`, `List`, `DateTime`, and the conventional
+ * generic parameter names. Extraction records them like any other type; a
+ * reference to one that no C# file of the project declares — bare or
+ * qualified (`System.Threading.Tasks.Task`) — is marked `engine` at
+ * resolution rather than `unresolved`, as `TS_BUILTIN_TYPES` keeps them out
+ * for TypeScript, so the unresolved share reads the project's own types. A
+ * project that declares its own `Task` keeps its references.
+ */
+export const CS_BUILTIN_TYPES = new Set<string>([
+  "Object", "String", "Boolean", "Int32", "Int64", "Int16", "Byte", "Char", "Decimal", "Double", "Single",
+  "Guid", "DateTime", "DateTimeOffset", "DateOnly", "TimeOnly", "TimeSpan", "Uri", "Exception", "Enum",
+  "Task", "ValueTask", "CancellationToken", "Func", "Action", "Predicate", "Nullable", "Lazy", "Type",
+  "List", "Dictionary", "HashSet", "Queue", "Stack", "KeyValuePair", "Tuple", "ValueTuple", "Span", "Memory",
+  "IEnumerable", "IAsyncEnumerable", "IQueryable", "ICollection", "IList", "IDictionary", "ISet",
+  "IReadOnlyList", "IReadOnlyCollection", "IReadOnlyDictionary", "IDisposable", "IAsyncDisposable",
+  "IComparable", "IEquatable", "IFormattable", "IServiceProvider", "Stream", "StringBuilder", "Array",
+  "Math", "Console", "Convert", "Environment", "Attribute", "EventArgs", "EventHandler", "Random",
+  "T", "TKey", "TValue", "TResult", "TEntity", "TSource", "TItem", "TRequest", "TResponse",
+]);

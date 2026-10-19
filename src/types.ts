@@ -172,6 +172,45 @@ export interface SymbolNode {
    * one. Absent when there are none.
    */
   phpTraits?: string[];
+  /**
+   * C# only: the declaration's name with its namespace and every enclosing
+   * type, as C# itself writes the full name: `App.Billing.Calc` for a class,
+   * `App.Billing.Calc.Compute` for its method, `App.Billing.Calc.Inner` for a
+   * nested type. A qualified C# edge (`Billing.Calc.Compute()`, a parameter of
+   * type `Billing.Calc`) is matched against its trailing segments, so a
+   * namespace the call writes out is never answered by a same-named type in
+   * another one. Absent for every other language and for every graph
+   * persisted before it existed, where resolution reads `qualifiedName`
+   * instead. The symbol's `id` and `qualifiedName` are unchanged by it.
+   */
+  csFullName?: string;
+  /**
+   * C# types only: the fields, constants, events and enum members the type
+   * declares, which are not recorded as symbols of their own. Resolution reads
+   * them as evidence that a member-access receiver ends in a static member —
+   * `Open` in `OrderState.Open.Id` — rather than in a namespace segment.
+   * Absent when the type declares none, and on every graph persisted before it
+   * existed.
+   */
+  csMembers?: string[];
+  /**
+   * C# types only: the base class and interfaces as the declaration writes
+   * them, type arguments dropped and the file's `using` aliases written out
+   * (`App.Data.Repository`, `IFoo`). Resolution looks each one up as C# does —
+   * the enclosing types and namespaces, innermost first, then
+   * {@link csUsings} — and follows it to find a member the type inherits from
+   * another project type. Absent when the type names no base, and on every
+   * graph persisted before it existed.
+   */
+  csBases?: string[];
+  /**
+   * C# types with {@link csBases} only: the namespaces the declaring file
+   * imports with `using` (aliases and `using static` excluded), where a base
+   * the enclosing namespaces do not declare is looked for. A `global using`
+   * in another file is not seen, so a base imported only by one stays
+   * unresolved.
+   */
+  csUsings?: string[];
 }
 
 /** Kind of relationship an edge represents */
@@ -188,7 +227,9 @@ export type SymbolEdgeConfidence =
   | "unique"
   | "multiple-candidates"
   | "unresolved"
-  | "engine"; // Godot engine API call — not a project symbol, excluded from unresolved %
+  // Not a project symbol, excluded from unresolved %: a Godot engine API call,
+  // or a .NET framework type (`Task`, `List`) that no C# file of the project declares.
+  | "engine";
 
 /** A call-site edge between symbols */
 export interface SymbolEdge {
@@ -227,8 +268,24 @@ export interface SymbolEdge {
    * a type hint or `new Invoice()`). Absent on every PHP call it cannot
    * qualify statically — `$obj->m()`, `$class::m()`, `Cls::$m()`, `self::`,
    * `static::`, `parent::` and bare function calls.
+   *
+   * C# writes it as the call site spells it, dots kept and type arguments
+   * dropped: `Billing.Calc` for `Billing.Calc.Compute()`. An object creation
+   * `new Billing.Calc()` carries the whole type path, `Billing.Calc`, with
+   * `Calc` as the callee — a member cannot share its class's name in C#, so
+   * the repeated name marks a constructor call without ambiguity.
    */
   calleeQualifier?: string;
+  /**
+   * C# `type_reference` edges only: the edge names the receiver of a member
+   * access (`Config.Instance` in `Config.Instance.Load()`), whose last segments
+   * may be static members rather than types — an expression does not say
+   * which. Resolution tries the longest prefix of the written path that names
+   * a project type first (`Config.Instance`, then `Config`). Absent on a type
+   * position, where the whole path is the type, and on every graph persisted
+   * before it existed.
+   */
+  csMemberReceiver?: boolean;
   callSite: { file: string; line: number };
   /** Receiver expression for method calls (e.g. "fighter" in "fighter.take_damage()").
    *  Used by GDScript receiver-type resolution. Absent for bare function calls. */

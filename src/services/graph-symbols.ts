@@ -59,6 +59,8 @@ export interface ExtractedSymbols {
      * never part of one.
      */
     qualifierRootedInInlineMod?: boolean;
+    /** C# member-access receiver reference; see {@link SymbolEdge.csMemberReceiver}. */
+    csMemberReceiver?: boolean;
     callSite: { file: string; line: number };
     /** Receiver expression for method calls (e.g. "fighter" in "fighter.take_damage()").
      *  Present only for attribute_call nodes; bare calls have no receiver. */
@@ -2427,22 +2429,21 @@ function extractJvmCallableName(text: string): string | null {
 
 // ── C# ──────────────────────────────────────────────────────────────────
 
-/**
- * BCL and language-level type names a C# type position names without the
- * project declaring them. Left out of `type_reference` edges, as
- * `TS_BUILTIN_TYPES` is for TypeScript, so the unresolved share reads the
- * project's own types rather than `Task` and `List` on every signature.
- */
-const CS_BUILTIN_TYPES = new Set([
-  "Object", "String", "Boolean", "Int32", "Int64", "Int16", "Byte", "Char", "Decimal", "Double", "Single",
-  "Guid", "DateTime", "DateTimeOffset", "DateOnly", "TimeOnly", "TimeSpan", "Uri", "Exception", "Enum",
-  "Task", "ValueTask", "CancellationToken", "Func", "Action", "Predicate", "Nullable", "Lazy", "Type",
-  "List", "Dictionary", "HashSet", "Queue", "Stack", "KeyValuePair", "Tuple", "ValueTuple", "Span", "Memory",
-  "IEnumerable", "IAsyncEnumerable", "IQueryable", "ICollection", "IList", "IDictionary", "ISet",
-  "IReadOnlyList", "IReadOnlyCollection", "IReadOnlyDictionary", "IDisposable", "IAsyncDisposable",
-  "IComparable", "IEquatable", "IFormattable", "IServiceProvider", "Stream", "StringBuilder", "Array",
-  "Math", "Console", "Convert", "Environment", "Attribute", "EventArgs", "EventHandler", "Random",
-  "T", "TKey", "TValue", "TResult", "TEntity", "TSource", "TItem", "TRequest", "TResponse",
+/** The declarations that name a type, with the symbol kind each is recorded as. */
+const CS_TYPE_DECLARATIONS: ReadonlyMap<string, SymbolKind> = new Map<string, SymbolKind>([
+  ["class_declaration", "class"],
+  ["interface_declaration", "interface"],
+  ["record_declaration", "class"],
+  ["struct_declaration", "struct"],
+  ["enum_declaration", "enum"],
+  ["delegate_declaration", "type"],
+]);
+
+/** The member declarations recorded as symbols, with the kind each is recorded as. */
+const CS_MEMBER_DECLARATIONS: ReadonlyMap<string, SymbolKind> = new Map<string, SymbolKind>([
+  ["method_declaration", "method"],
+  ["constructor_declaration", "constructor"],
+  ["property_declaration", "variable"],
 ]);
 
 /** The `name` field of a declaration, or `null` when the grammar gives none. */
@@ -2453,6 +2454,104 @@ function csNameField(node: any): any | null {
   } catch {
     return null;
   }
+}
+
+/** A node's byte range: its identity, since ast-grep hands out a fresh wrapper per traversal. */
+interface CsRange {
+  start: number;
+  end: number;
+}
+
+// biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+function csRange(node: any): CsRange {
+  const r = node.range();
+  return { start: r.start.index, end: r.end.index };
+}
+
+function csWithin(inner: CsRange, outer: CsRange): boolean {
+  return outer.start <= inner.start && inner.end <= outer.end;
+}
+
+/**
+ * The dotted path a name-only type or expression spells, type arguments
+ * dropped: `["Ns", "Calc"]` for `Ns.Calc`, `global::Ns.Calc` and `Ns.Calc<T>`,
+ * whether written as a type or as a member-access receiver. `null` when any
+ * part is not a name — `this`, `base`, a call, an element access, or an
+ * extern alias other than `global`, whose target no symbol records.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+function csNamePath(node: any): string[] | null {
+  if (!node) return null;
+  switch (node.kind()) {
+    case "identifier":
+      return [node.text()];
+    case "generic_name": {
+      const id = safeFind(node, "identifier");
+      return id ? [id.text()] : null;
+    }
+    case "qualified_name":
+    case "member_access_expression": {
+      const head = csNamePath(node.field?.(node.kind() === "qualified_name" ? "qualifier" : "expression") ?? null);
+      const last = csNamePath(csNameField(node));
+      return head && last ? [...head, ...last] : null;
+    }
+    case "alias_qualified_name":
+      return node.field?.("alias")?.text() === "global" ? csNamePath(csNameField(node)) : null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * The qualified type names of one file, read top-down: which identifiers are
+ * qualifier segments (`Ns` and `Inner` in `Ns.Inner.Foo`, never `Foo`), and
+ * the path written before each terminal. Segments are told apart by byte
+ * range, not text, so the terminal `Order` of `Order.Order` is kept, and a
+ * type argument inside a qualifier (`Item` in `Outer<Item>.Inner`) stays a
+ * type of its own.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+function csQualifiedNames(root: any): {
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  isSegment: (id: any) => boolean;
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  writtenQualifier: (id: any) => string | null;
+} {
+  // Start offsets of the identifiers that are qualifier segments.
+  const segments = new Set<number>();
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const markSegments = (qualifier: any) => {
+    if (qualifier.kind() === "identifier") {
+      segments.add(csRange(qualifier).start);
+      return;
+    }
+    const typeArgs = safeFindAll(qualifier, "type_argument_list").map(csRange);
+    for (const id of safeFindAll(qualifier, "identifier")) {
+      const r = csRange(id);
+      if (!typeArgs.some((a) => csWithin(r, a))) segments.add(r.start);
+    }
+  };
+  // Terminal identifier's start → the path written before it; `null` when it
+  // is not a plain path (an extern alias), so no reference is drawn rather
+  // than a bare one that would bind whatever same-named type is nearest.
+  const written = new Map<number, string | null>();
+  for (const qn of safeFindAll(root, "qualified_name")) {
+    const qualifier = qn.field?.("qualifier") ?? null;
+    if (qualifier) markSegments(qualifier);
+    const head = csTypeHeadIdentifier(csNameField(qn));
+    const path = csNamePath(qualifier);
+    if (head) written.set(csRange(head).start, path ? path.join(".") : null);
+  }
+  for (const aqn of safeFindAll(root, "alias_qualified_name")) {
+    const alias = aqn.field?.("alias") ?? null;
+    if (alias) markSegments(alias);
+    const head = csTypeHeadIdentifier(csNameField(aqn));
+    if (head) written.set(csRange(head).start, alias?.text() === "global" ? "" : null);
+  }
+  return {
+    isSegment: (id) => segments.has(csRange(id).start),
+    writtenQualifier: (id) => written.get(csRange(id).start) ?? "",
+  };
 }
 
 /** A C# type expression's own identifier: `Foo` in `Foo`, `Foo<T>`, `Ns.Foo`, `Foo?`, `Foo[]`. */
@@ -2469,27 +2568,45 @@ function csTypeHeadIdentifier(node: any): any | null {
   return null;
 }
 
-/** The type-like scope enclosing `line`, innermost first, or `null` at file level. */
-function csOwnerAt(owners: ScopeFrame[], line: number): ScopeFrame | null {
-  let best: ScopeFrame | null = null;
-  for (const o of owners) {
-    if (line >= o.startLine && line <= o.endLine && (!best || o.startLine >= best.startLine)) best = o;
+/**
+ * The namespaces and types of one file with their byte ranges, outermost
+ * first, so a declaration's enclosing scopes are those whose range contains
+ * its own. Line numbers cannot tell two classes written on one line apart;
+ * ranges can.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+function csContainers(root: any): Array<{ range: CsRange; segments: string[]; isType: boolean }> {
+  const containers: Array<{ range: CsRange; segments: string[]; isType: boolean }> = [];
+  for (const k of CS_TYPE_DECLARATIONS.keys()) {
+    for (const d of safeFindAll(root, k)) {
+      const n = csNameField(d);
+      if (n) containers.push({ range: csRange(d), segments: [n.text()], isType: true });
+    }
   }
-  return best;
+  for (const ns of safeFindAll(root, "namespace_declaration")) {
+    containers.push({ range: csRange(ns), segments: csNamePath(csNameField(ns)) ?? [], isType: false });
+  }
+  return containers.sort((a, b) => a.range.start - b.range.start || b.range.end - a.range.end);
 }
 
 /**
  * C# declarations are named by their `name` field, never by the first
  * identifier under them — that is an attribute (`[Fact]`, `[HttpGet]`,
  * `[ApiController]`) or a return type (`Task<…>`, `DateTime`) whenever one
- * precedes the name. Members carry `Owner.Name` as their qualified name so a
- * static call `Owner.Name(...)` can be matched to them at resolution.
+ * precedes the name. Members carry `Owner.Name` as their qualified name, and
+ * every symbol its full name with namespace and enclosing types as
+ * `csFullName`, so a written `Billing.Calc.Compute(...)` can be matched to
+ * the method it names at resolution. The owner is the type that contains the
+ * declaration in the syntax tree.
  *
- * Edges: invocations (with the receiver kept as `calleeQualifier` when it is a
- * PascalCase identifier — a type, never `this`, `base` or a field), object
- * creation (a call to the type, as `new Foo()` is for TypeScript), and
- * `type_reference` for base lists, parameter / field / property / local /
- * return types, type arguments, `typeof`, casts and attributes.
+ * Edges keep the path the source writes. An invocation's receiver is its
+ * `calleeQualifier` when it is a PascalCase name path (a type, possibly
+ * namespace-qualified — never `this`, `base` or a field). An object creation
+ * is a call whose qualifier is the created type's path. `type_reference`
+ * covers base lists, parameter / field / property / local / return types,
+ * type arguments, `typeof`, casts, attributes and member-access receivers,
+ * each with the written qualifier of a qualified type. Framework types are
+ * recorded too: only resolution can tell a project's own `Task` from .NET's.
  */
 function extractFromCSharp(
   source: string,
@@ -2500,67 +2617,147 @@ function extractFromCSharp(
   const root = parse("csharp" as unknown as Lang, source).root();
   const symbols: SymbolNode[] = [moduleSym];
   const scopes: ScopeFrame[] = [];
-  const owners: ScopeFrame[] = [];
+  // A file-scoped `namespace A.B;` is a sibling of the declarations it covers, not their ancestor.
+  const fileNamespace = csNamePath(csNameField(safeFind(root, "file_scoped_namespace_declaration"))) ?? [];
+  const containers = csContainers(root);
+  const qualified = csQualifiedNames(root);
+  // `using Store = App.Tests.ProductStore;`: an alias stands for the path it
+  // names, so every path below is written out through it before it is
+  // recorded. Read file-wide; a `global using` alias declared in another file
+  // is not seen.
+  const aliases = new Map<string, string[]>();
+  // `using App.Billing;`: the namespaces a base type may be imported from.
+  const usings: string[] = [];
+  for (const u of safeFindAll(root, "using_directive")) {
+    const alias = csNameField(u);
+    // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+    const children: any[] = u.children?.() ?? [];
+    const named = children.filter((c) => c.isNamed());
+    const target = named.length > 0 ? csNamePath(named[named.length - 1]) : null;
+    if (!target) continue;
+    if (alias && named.length >= 2) aliases.set(alias.text(), target);
+    else if (!alias && !children.some((c) => c.kind() === "static")) usings.push(target.join("."));
+  }
+  const expand = (path: string[]): string[] => {
+    const target = aliases.get(path[0]);
+    return target ? [...target, ...path.slice(1)] : path;
+  };
+  // The written base types of a type declaration: the list's own entries, so
+  // a primary-constructor argument (`X` in `: Base(X)`) is never one.
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const baseTypes = (d: any): any[] => {
+    // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+    const list = d.children?.().find((c: any) => c.kind() === "base_list");
+    // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+    return (list?.children?.().filter((c: any) => c.isNamed()) ?? []).map((c: any) =>
+      // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+      c.kind() === "primary_constructor_base_type" ? c.children().find((x: any) => x.isNamed()) : c,
+    );
+  };
 
-  const typeKinds: Array<[string, SymbolNode["kind"]]> = [
-    ["class_declaration", "class"],
-    ["interface_declaration", "interface"],
-    ["record_declaration", "class"],
-    ["struct_declaration", "struct"],
-    ["enum_declaration", "enum"],
+  const declarations: Array<[ReadonlyMap<string, SymbolKind>, boolean]> = [
+    [CS_TYPE_DECLARATIONS, false],
+    [CS_MEMBER_DECLARATIONS, true],
   ];
-  for (const [k, kind] of typeKinds) {
-    for (const cls of safeFindAll(root, k)) {
-      const nameNode = csNameField(cls) ?? safeFind(cls, "identifier");
-      if (!nameNode) continue;
-      const name = nameNode.text();
-      const r = cls.range();
-      const startLine = r.start.line + 1;
-      const endLine = r.end.line + 1;
-      const sym: SymbolNode = {
-        id: makeId(file, name, startLine),
-        name, qualifiedName: name,
-        kind,
-        file, line: startLine, endLine, language,
-      };
-      symbols.push(sym);
-      scopes.push({ name, startLine, endLine, symbolId: sym.id });
-      owners.push({ name, startLine, endLine, symbolId: sym.id });
+  // Type symbols with their ranges, so the members recorded only by name can find their owner.
+  const typeSymbols: Array<{ range: CsRange; sym: SymbolNode }> = [];
+  for (const [kinds, isMember] of declarations) {
+    for (const [k, kind] of kinds) {
+      for (const d of safeFindAll(root, k)) {
+        const nameNode = csNameField(d) ?? safeFind(d, "identifier");
+        if (!nameNode) continue;
+        const name = nameNode.text();
+        const own = csRange(d);
+        const enclosing = containers.filter(
+          (c) => csWithin(own, c.range) && !(c.range.start === own.start && c.range.end === own.end),
+        );
+        const owner = enclosing.filter((c) => c.isType).pop()?.segments[0] ?? null;
+        const path = [...fileNamespace, ...enclosing.flatMap((c) => c.segments)];
+        const qualifiedName = isMember && owner ? `${owner}.${name}` : name;
+        const r = d.range();
+        const startLine = r.start.line + 1;
+        const endLine = r.end.line + 1;
+        const sym: SymbolNode = {
+          id: makeId(file, qualifiedName, startLine),
+          name, qualifiedName,
+          kind,
+          file, line: startLine, endLine, language,
+          csFullName: [...path, name].join("."),
+        };
+        symbols.push(sym);
+        scopes.push({ name, startLine, endLine, symbolId: sym.id });
+        if (!isMember) {
+          typeSymbols.push({ range: own, sym });
+          const bases = baseTypes(d)
+            .map((b) => csNamePath(b))
+            .filter((b): b is string[] => b !== null)
+            .map((b) => expand(b).join("."));
+          if (bases.length > 0) {
+            sym.csBases = bases;
+            if (usings.length > 0) sym.csUsings = usings;
+          }
+        }
+      }
     }
   }
-  for (const k of ["method_declaration", "constructor_declaration"]) {
-    for (const m of safeFindAll(root, k)) {
-      const nameNode = csNameField(m) ?? safeFind(m, "identifier");
-      if (!nameNode) continue;
-      const name = nameNode.text();
-      const r = m.range();
-      const startLine = r.start.line + 1;
-      const endLine = r.end.line + 1;
-      const owner = csOwnerAt(owners, startLine);
-      const sym: SymbolNode = {
-        id: makeId(file, name, startLine),
-        name, qualifiedName: owner ? `${owner.name}.${name}` : name,
-        kind: k.includes("constructor") ? "constructor" : "method",
-        file, line: startLine, endLine, language,
-      };
-      symbols.push(sym);
-      scopes.push({ name, startLine, endLine, symbolId: sym.id });
+  // Fields, constants, events and enum members are not symbols, but a member
+  // access names them (`OrderState.Open.Id`): each type keeps their names so
+  // resolution can tell a static member from a namespace segment.
+  const memberNames: Array<[CsRange, string]> = [];
+  for (const k of ["field_declaration", "event_field_declaration"]) {
+    for (const d of safeFindAll(root, k)) {
+      const declaration = safeFind(d, "variable_declaration");
+      // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+      for (const v of declaration?.children?.().filter((c: any) => c.kind() === "variable_declarator") ?? []) {
+        const n = csNameField(v) ?? safeFind(v, "identifier");
+        if (n) memberNames.push([csRange(d), n.text()]);
+      }
+    }
+  }
+  for (const d of safeFindAll(root, "enum_member_declaration")) {
+    const n = csNameField(d);
+    if (n) memberNames.push([csRange(d), n.text()]);
+  }
+  for (const [range, name] of memberNames) {
+    let owner: { range: CsRange; sym: SymbolNode } | null = null;
+    for (const t of typeSymbols) {
+      if (csWithin(range, t.range) && (!owner || t.range.start >= owner.range.start)) owner = t;
+    }
+    if (owner) {
+      owner.sym.csMembers ??= [];
+      owner.sym.csMembers.push(name);
     }
   }
 
   const rawCalls: ExtractedSymbols["rawCalls"] = [];
   const seenRefs = new Set<string>();
-  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
-  const pushTypeRef = (idNode: any) => {
-    if (!idNode) return;
-    const name = idNode.text();
-    if (!/^[A-Z]/.test(name) || CS_BUILTIN_TYPES.has(name)) return;
-    const line = idNode.range().start.line + 1;
+  const pushTypeRef = (name: string, qualifier: string | undefined, line: number, memberReceiver = false) => {
+    if (!/^[A-Z]/.test(name)) return;
     const callerId = findCallerId(scopes, line, moduleSym.id);
-    const key = `${callerId}|${name}|${line}`;
+    const key = `${callerId}|${qualifier ?? ""}|${name}|${line}`;
     if (seenRefs.has(key)) return;
     seenRefs.add(key);
-    rawCalls.push({ callerId, calleeName: name, kind: "type_reference", callSite: { file, line } });
+    rawCalls.push({
+      callerId,
+      calleeName: name,
+      kind: "type_reference",
+      ...(qualifier ? { calleeQualifier: qualifier } : {}),
+      ...(memberReceiver ? { csMemberReceiver: true } : {}),
+      callSite: { file, line },
+    });
+  };
+  // A path's last segment is the type; the segments before it are its written qualifier.
+  const pushPathRef = (written: string[], line: number, memberReceiver = false) => {
+    const path = expand(written);
+    pushTypeRef(path[path.length - 1], path.length > 1 ? path.slice(0, -1).join(".") : undefined, line,
+      memberReceiver && path.length > 1);
+  };
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const pushTypeRefAt = (id: any) => {
+    if (qualified.isSegment(id)) return;
+    const qualifier = qualified.writtenQualifier(id);
+    if (qualifier === null) return;
+    pushPathRef([...(qualifier ? qualifier.split(".") : []), id.text()], id.range().start.line + 1);
   };
 
   for (const node of safeFindAll(root, "invocation_expression")) {
@@ -2571,14 +2768,9 @@ function extractFromCSharp(
     let calleeName: string | null = null;
     let calleeQualifier: string | undefined;
     if (fn?.kind() === "member_access_expression") {
-      const nameNode = csTypeHeadIdentifier(csNameField(fn));
-      calleeName = nameNode?.text() ?? null;
-      const recv = fn.field?.("expression") ?? null;
-      const recvKind = recv?.kind();
-      if (recvKind === "identifier" || recvKind === "generic_name") {
-        const recvName = recvKind === "identifier" ? recv.text() : (safeFind(recv, "identifier")?.text() ?? "");
-        if (/^[A-Z]/.test(recvName)) calleeQualifier = recvName;
-      }
+      calleeName = csTypeHeadIdentifier(csNameField(fn))?.text() ?? null;
+      const receiver = csNamePath(fn.field?.("expression") ?? null);
+      if (receiver && /^[A-Z]/.test(receiver[0])) calleeQualifier = expand(receiver).join(".");
     } else if (fn?.kind() === "identifier" || fn?.kind() === "generic_name") {
       calleeName = csTypeHeadIdentifier(fn)?.text() ?? null;
     }
@@ -2593,24 +2785,27 @@ function extractFromCSharp(
     });
   }
 
+  // `new Billing.Calc()` calls `Calc`'s constructor: the qualifier is the
+  // type's whole path, so the repeated `Calc` tells resolution it is a
+  // creation. It also references the type.
   for (const node of safeFindAll(root, "object_creation_expression")) {
-    const head = csTypeHeadIdentifier(node.field?.("type") ?? null);
-    if (!head) continue;
-    const name = head.text();
-    if (CS_BUILTIN_TYPES.has(name)) continue;
+    const written = csNamePath(node.field?.("type") ?? null);
+    const path = written ? expand(written) : null;
+    if (!path) continue;
     const line = node.range().start.line + 1;
     rawCalls.push({
       callerId: findCallerId(scopes, line, moduleSym.id),
-      calleeName: name,
+      calleeName: path[path.length - 1],
       kind: "call",
+      calleeQualifier: path.join("."),
       callSite: { file, line },
     });
-    pushTypeRef(head);
+    pushPathRef(path, line);
   }
 
   // Type positions: the declaration's `type` field, the base list, type
   // arguments, `typeof` and casts. Every PascalCase identifier under them
-  // names a type; a qualifier segment of `Ns.Foo` does not.
+  // names a type, except a qualifier segment of a qualified name.
   const typedKinds = [
     "parameter", "variable_declaration", "property_declaration", "method_declaration", "typeof_expression",
     "cast_expression", "event_field_declaration", "delegate_declaration", "indexer_declaration",
@@ -2623,41 +2818,44 @@ function extractFromCSharp(
       if (t) typeNodes.push(t);
     }
   }
-  for (const k of ["base_list", "type_argument_list"]) typeNodes.push(...safeFindAll(root, k));
+  for (const k of CS_TYPE_DECLARATIONS.keys()) for (const d of safeFindAll(root, k)) typeNodes.push(...baseTypes(d));
+  typeNodes.push(...safeFindAll(root, "type_argument_list"));
   for (const t of typeNodes) {
     if (t.kind() === "identifier") {
-      pushTypeRef(t);
+      pushTypeRefAt(t);
       continue;
     }
-    for (const id of safeFindAll(t, "identifier")) {
-      const parent = id.parent?.();
-      if (parent?.kind() === "qualified_name" && parent.field?.("qualifier")?.text() === id.text()) continue;
-      pushTypeRef(id);
-    }
+    for (const id of safeFindAll(t, "identifier")) pushTypeRefAt(id);
   }
-  // `Calc.Run()`, `Mode.A`, `Calc.Limit`: a member access whose receiver is a
-  // PascalCase identifier names a type — the C# counterpart of the import edge
-  // a TypeScript `import { Calc }` gives the class, since `using` names only a
-  // namespace. The call itself is recorded above with the receiver as its
-  // qualifier; this is the reference to the type.
+  // `Calc.Run()`, `Mode.A`, `Billing.Calc.Limit`: a member access whose
+  // receiver is a PascalCase name path names a type — the C# counterpart of
+  // the import edge a TypeScript `import { Calc }` gives the class, since
+  // `using` names only a namespace. Only the outermost access of a chain is
+  // read, so `Billing.Calc.Limit` references `Billing.Calc` and never a type
+  // named `Billing`; which segment of the path is the type is left to
+  // resolution (`csMemberReceiver`).
+  // An inner access shares its start with the outer one, so the key is the whole range.
+  const rangeKey = (r: CsRange) => `${r.start}:${r.end}`;
+  const innerAccesses = new Set<string>();
   for (const node of safeFindAll(root, "member_access_expression")) {
-    const recv = node.field?.("expression") ?? null;
-    const recvKind = recv?.kind();
-    if (recvKind !== "identifier" && recvKind !== "generic_name") continue;
-    pushTypeRef(recvKind === "identifier" ? recv : safeFind(recv, "identifier"));
+    const e = node.field?.("expression") ?? null;
+    if (e?.kind() === "member_access_expression") innerAccesses.add(rangeKey(csRange(e)));
+  }
+  for (const node of safeFindAll(root, "member_access_expression")) {
+    if (innerAccesses.has(rangeKey(csRange(node)))) continue;
+    const receiver = csNamePath(node.field?.("expression") ?? null);
+    if (!receiver || !/^[A-Z]/.test(receiver[0])) continue;
+    pushPathRef(receiver, node.range().start.line + 1, true);
   }
   // `[Foo]` names the class `FooAttribute`; the compiler accepts both spellings.
   for (const a of safeFindAll(root, "attribute")) {
-    const head = csTypeHeadIdentifier(csNameField(a));
-    if (!head) continue;
-    const written = head.text();
-    const name = written.endsWith("Attribute") ? written : `${written}Attribute`;
-    const line = head.range().start.line + 1;
-    const callerId = findCallerId(scopes, line, moduleSym.id);
-    const key = `${callerId}|${name}|${line}`;
-    if (seenRefs.has(key)) continue;
-    seenRefs.add(key);
-    rawCalls.push({ callerId, calleeName: name, kind: "type_reference", callSite: { file, line } });
+    // Expanded before the suffix: `[Obs]` under `using Obs = System.ObsoleteAttribute;`.
+    const written = csNamePath(csNameField(a));
+    const path = written ? expand(written) : null;
+    if (!path) continue;
+    const last = path[path.length - 1];
+    const name = last.endsWith("Attribute") ? last : `${last}Attribute`;
+    pushPathRef([...path.slice(0, -1), name], a.range().start.line + 1);
   }
   return { symbols, rawCalls };
 }
@@ -4752,6 +4950,7 @@ export function rawCallsToUnresolvedEdges(
     importedName: c.importedName,
     localAlias: c.localAlias,
     calleeQualifier: c.calleeQualifier,
+    ...(c.csMemberReceiver ? { csMemberReceiver: true } : {}),
     callSite: c.callSite,
     ...(c.receiver ? { receiver: c.receiver } : {}),
     ...(c.signalEmit ? { signalEmit: true } : {}),
