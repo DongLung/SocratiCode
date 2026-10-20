@@ -130,7 +130,10 @@ describe("C# extractor-to-resolver regressions", () => {
       (edgesByFile.get(file) ?? [])
         .filter((e) => e.callSite.line === line && e.kind === kind && e.calleeName === calleeName)
         .map((e) => ({ confidence: e.confidence, targets: e.calleeCandidates.map((id) => fullName.get(id)).sort() }));
-    return { at };
+    /** The kind the extractor recorded for the type named `full`. */
+    const kindOf = (full: string) =>
+      [...symbolsByFile.values()].flat().find((s) => s.csFullName === full)?.kind;
+    return { at, kindOf };
   };
 
   const BILLING = "namespace App.Billing { public class Calc { public static int Compute(int x) => x; public static int Limit = 1; } }";
@@ -666,6 +669,29 @@ describe("C# extractor-to-resolver regressions", () => {
     expect(parse("Params.cs", 3)).toEqual(phase);
     // `Tier?` of an enum is `Nullable<Tier>`, another type than `Tier`.
     expect(at("Beacon.cs", 3, "type_reference", "Tier")).toEqual(unresolved);
+  });
+
+  it("reads a nullable record struct as Nullable<T>, and a nullable reference record as the record", () => {
+    const files = {
+      "Kinds.cs": [
+        "namespace App { public record struct Pebble(int X) { public static int Parse() => 1; }",
+        "  public record Ribbon(int Y) { public static int Parse() => 2; } }",
+      ].join("\n"),
+      "Use.cs": [
+        "namespace App { public class Use {",
+        "  public Pebble? Pebble { get; }",
+        "  public Ribbon? Ribbon { get; }",
+        "  int A() => Pebble.Parse();",
+        "  int B() => Ribbon.Parse();",
+        "} }",
+      ].join("\n"),
+    };
+    const { at, kindOf } = run(files);
+    expect(kindOf("App.Pebble")).toBe("struct");
+    expect(kindOf("App.Ribbon")).toBe("class");
+    // `Pebble?` is `Nullable<Pebble>`: the receiver is that value, not the record struct.
+    expect(at("Use.cs", 4, "call", "Parse")).toEqual([{ confidence: "unresolved", targets: [] }]);
+    expect(at("Use.cs", 5, "call", "Parse")).toEqual([{ confidence: "unique", targets: ["App.Ribbon.Parse"] }]);
   });
 
   it("keeps a switch arm's pattern variable inside its arm", () => {

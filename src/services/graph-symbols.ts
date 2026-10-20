@@ -2434,7 +2434,7 @@ function extractJvmCallableName(text: string): string | null {
 const CS_TYPE_DECLARATIONS: ReadonlyMap<string, SymbolKind> = new Map<string, SymbolKind>([
   ["class_declaration", "class"],
   ["interface_declaration", "interface"],
-  ["record_declaration", "class"],
+  ["record_declaration", "class"], // a `record struct` is recorded as `struct`
   ["struct_declaration", "struct"],
   ["enum_declaration", "enum"],
   ["delegate_declaration", "type"],
@@ -2778,7 +2778,10 @@ function extractFromCSharp(
         const sym: SymbolNode = {
           id: makeId(file, qualifiedName, startLine),
           name, qualifiedName,
-          kind,
+          // `record struct` is a value type, like `struct`; `record` and `record class` are classes.
+          kind: k === "record_declaration" && d.children?.().some((c: { kind: () => string }) => c.kind() === "struct")
+            ? "struct"
+            : kind,
           file, line: startLine, endLine, language,
           csFullName: [...path, name].join("."),
         };
