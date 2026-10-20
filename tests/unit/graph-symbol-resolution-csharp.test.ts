@@ -603,6 +603,89 @@ describe("C# extractor-to-resolver regressions", () => {
     expect(print("Outer.cs", 3)).toEqual([{ confidence: "local", targets: ["App.Outer.Inner.Report.Print"] }]);
   });
 
+  it("binds a namespace block's alias where it is declared, never where it is used", () => {
+    const files = {
+      "Root.cs": "namespace Billing { public class Calc { public static int Compute() => 1; } }",
+      "Inner.cs": "namespace App.Inner.Billing { public class Calc { public static int Compute() => 2; } }",
+      "Lost.cs": "namespace App.Inner.Missing { public class Calc { public static int Compute() => 3; } }",
+      "Tools.cs": "namespace Tools { public class Kit { public static int Make() => 4; } }",
+      "Shop.cs": [
+        "namespace App { using Tools; using C = Billing.Calc; using D = Missing.Calc; using K = Kit;",
+        "  namespace Inner { public class Shop {",
+        "    int A(C c) => C.Compute();",
+        "    int B() => D.Compute();",
+        "    int E() => K.Make() + Kit.Make();",
+        "  } }",
+        "}",
+      ].join("\n"),
+    };
+    const { at } = run(files);
+    // `Billing.Calc` is read from `App`, where the alias is declared: `App.Inner.Billing` is not in sight there.
+    expect(at("Shop.cs", 3, "call", "Compute")).toEqual([{ confidence: "unique", targets: ["Billing.Calc.Compute"] }]);
+    expect(at("Shop.cs", 3, "type_reference", "Calc")).toEqual([{ confidence: "unique", targets: ["Billing.Calc"] }]);
+    // From `App` no `Missing` exists: the alias names nothing, and the use site is not searched instead.
+    expect(at("Shop.cs", 4, "call", "Compute")).toEqual([{ confidence: "unresolved", targets: [] }]);
+    // An alias target never sees its own block's imports; a use in the block does.
+    expect(at("Shop.cs", 5, "call", "Make")).toEqual([
+      { confidence: "unresolved", targets: [] },
+      { confidence: "unique", targets: ["Tools.Kit.Make"] },
+    ]);
+  });
+
+  it("reads a value typed as itself as the type only when both readings name one type", () => {
+    const files = {
+      "Phase.cs": "namespace App { public class Phase { public static int Parse() => 1; } public enum Tier { Faint } }",
+      "Other.cs": "namespace App.Other { public class Phase { public int Parse() => 2; } }",
+      "Voyage.cs": [
+        "namespace App { public class Voyage {",
+        "  public Other.Phase Phase { get; }",
+        "  int A() => Phase.Parse();",
+        "} }",
+      ].join("\n"),
+      "Lantern.cs": "namespace App { public class Lantern {\n  public App.Phase Phase { get; }\n  int B() => Phase.Parse();\n} }",
+      "Quiver.cs": "namespace App { public class Quiver {\n  public Phase Phase { get; }\n  int C() => Phase.Parse();\n} }",
+      "Beacon.cs": "namespace App { public class Beacon {\n  public Tier? Tier { get; }\n  object D() => Tier.Faint;\n} }",
+      "Params.cs": [
+        "namespace App { public class Params {",
+        "  int E(Other.Phase Phase) => Phase.Parse();",
+        "  int F(Phase Phase) => Phase.Parse();",
+        "} }",
+      ].join("\n"),
+    };
+    const { at } = run(files);
+    const parse = (file: string, line: number) => at(file, line, "call", "Parse");
+    const unresolved = [{ confidence: "unresolved", targets: [] }];
+    const phase = [{ confidence: "unique", targets: ["App.Phase.Parse"] }];
+    // `Other.Phase Phase` is a value: `Phase` alone names another type.
+    expect(parse("Voyage.cs", 3)).toEqual(unresolved);
+    expect(at("Voyage.cs", 3, "type_reference", "Phase")).toEqual(unresolved);
+    expect(parse("Params.cs", 2)).toEqual(unresolved);
+    // Written plain or qualified, the same type both ways: the static method.
+    expect(parse("Lantern.cs", 3)).toEqual(phase);
+    expect(parse("Quiver.cs", 3)).toEqual(phase);
+    expect(parse("Params.cs", 3)).toEqual(phase);
+    // `Tier?` of an enum is `Nullable<Tier>`, another type than `Tier`.
+    expect(at("Beacon.cs", 3, "type_reference", "Tier")).toEqual(unresolved);
+  });
+
+  it("keeps a switch arm's pattern variable inside its arm", () => {
+    const files = {
+      "Calc.cs": "namespace App { public class Calc { public static int Compute() => 1; } public interface IShape { int Print(); } }",
+      "Sorter.cs": [
+        "namespace App { public class Sorter {",
+        "  int Go(object o) => o switch {",
+        "    IShape Calc => Calc.Print(),",
+        "    int n => Calc.Compute(),",
+        "    _ => 0,",
+        "  };",
+        "} }",
+      ].join("\n"),
+    };
+    const { at } = run(files);
+    expect(at("Sorter.cs", 3, "call", "Print")).toEqual([{ confidence: "unresolved", targets: [] }]);
+    expect(at("Sorter.cs", 4, "call", "Compute")).toEqual([{ confidence: "unique", targets: ["App.Calc.Compute"] }]);
+  });
+
   it("leaves a path through an extern alias unresolved", () => {
     const files = {
       "Billing/Calc.cs": "namespace App.Billing { public class Calc { public static int Compute() => 1; } }",

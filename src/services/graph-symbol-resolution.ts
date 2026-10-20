@@ -1038,17 +1038,41 @@ export function resolveCallSites(
    * there. An import brings in types, not namespaces, so `X.Y` is taken from
    * one only when `X` is a type it imports. Two types imported under one name
    * at one level are an ambiguity C# itself rejects, so neither is answered; a
-   * `global::`-anchored path is looked up in the global namespace alone. Every
-   * part of a partial type is answered.
+   * `global::`-anchored path is looked up in the global namespace alone. A
+   * path an alias declared in a namespace block wrote out (`App.Shop::X.Y`)
+   * is looked up as C# resolves the alias: from that namespace outward,
+   * without the declaring block's own imports, never from where it is used.
+   * Every part of a partial type is answered.
    */
   const csLookup = (context: CsContext, written: string, accept: (s: SymbolNode) => boolean): SymbolNode[] => {
-    const anchored = written.startsWith(CS_GLOBAL_ANCHOR);
-    const path = anchored ? written.slice(CS_GLOBAL_ANCHOR.length) : written;
+    const cut = written.indexOf("::");
+    const path = cut >= 0 ? written.slice(cut + 2) : written;
     const name = path.slice(path.lastIndexOf(".") + 1);
     const first = path.split(".")[0];
     const candidates = (csByName().get(name) ?? []).filter(accept);
     const named = (full: string) => candidates.filter((s) => csFullNameOf(s) === full);
-    if (anchored) return named(path);
+    // `null` when no import at this level names `path`, `[]` when two do.
+    const imported = (imports: string[]): SymbolNode[] | null => {
+      const found = imports
+        .filter((u) => first === path || csTypesNamed(`${u}.${first}`).length > 0)
+        .flatMap((u) => named(`${u}.${path}`));
+      const distinct = new Set(found.map(csFullNameOf)).size;
+      return distinct === 0 ? null : distinct === 1 ? found : [];
+    };
+    if (written.startsWith(CS_GLOBAL_ANCHOR)) return named(path);
+    if (cut >= 0) {
+      const parts = written.slice(0, cut).split(".");
+      for (let n = parts.length; n >= 0; n--) {
+        const namespace = parts.slice(0, n).join(".");
+        const found = named(namespace ? `${namespace}.${path}` : path);
+        if (found.length > 0) return found;
+        if (n === parts.length) continue;
+        const level = context.levels.find((l) => l.namespace === namespace);
+        const fromImports = imported(level?.imports ?? []);
+        if (fromImports) return fromImports;
+      }
+      return [];
+    }
     for (const scope of context.types) {
       const found = named(`${scope}.${path}`);
       if (found.length > 0) return found;
@@ -1059,12 +1083,8 @@ export function resolveCallSites(
     for (const { namespace, imports } of context.levels) {
       const found = named(namespace ? `${namespace}.${path}` : path);
       if (found.length > 0) return found;
-      const imported = imports
-        .filter((u) => first === path || csTypesNamed(`${u}.${first}`).length > 0)
-        .flatMap((u) => named(`${u}.${path}`));
-      const distinct = new Set(imported.map(csFullNameOf)).size;
-      if (distinct === 1) return imported;
-      if (distinct > 1) return [];
+      const fromImports = imported(imports);
+      if (fromImports) return fromImports;
     }
     return [];
   };
@@ -1134,19 +1154,23 @@ export function resolveCallSites(
   /**
    * Whether the project type `full` declares `name` as a value — a field,
    * property, constant, event or enum member, its own or inherited from a
-   * project base — other than one typed as itself (`csSelfTypedMembers`).
+   * project base. A member typed as itself (`csSelfTypedMembers`) is a value
+   * unless both readings name one type from `context` (`csSameTypeReading`).
    */
-  const csValueMember = (full: string, name: string, seen = new Set<string>()): boolean => {
+  const csValueMember = (full: string, name: string, context: CsContext, seen = new Set<string>()): boolean => {
     if (seen.has(full)) return false;
     seen.add(full);
     const parts = csTypesNamed(full);
-    if (parts.some((p) => p.csSelfTypedMembers?.includes(name))) return false;
+    for (const part of parts) {
+      const self = part.csSelfTypedMembers?.find((m) => m.name === name);
+      if (self) return !csSameTypeReading(part, self, name, context);
+    }
     if (parts.some((p) => p.csMembers?.includes(name))) return true;
     const member = `${full}.${name}`;
     if ((csByName().get(name) ?? []).some((s) => s.kind === "variable" && csFullNameOf(s) === member)) return true;
     for (const part of parts) {
       for (const base of part.csBases ?? []) {
-        for (const b of csBaseType(part, base)) if (csValueMember(csFullNameOf(b), name, seen)) return true;
+        for (const b of csBaseType(part, base)) if (csValueMember(csFullNameOf(b), name, context, seen)) return true;
       }
     }
     return false;
@@ -1161,9 +1185,32 @@ export function resolveCallSites(
   const csHeadIsValue = (context: CsContext, name: string): boolean => {
     for (const scope of context.types) {
       if (csTypesNamed(`${scope}.${name}`).length > 0 || csInheritedNested(scope, name, csTypesNamed).length > 0) return false;
-      if (csValueMember(scope, name)) return true;
+      if (csValueMember(scope, name, context)) return true;
     }
     return false;
+  };
+  /**
+   * Whether a member typed as itself (`Status Status`) may be read as the type
+   * from `context`, by the C# rule: its declared type, looked up from where it
+   * is declared, is the one type `name` names from `context`. A nullable value
+   * type (`Status?` of an enum) is `Nullable<Status>`, another type. When
+   * either reading names no project type, the binding is not established and
+   * the member stays a value.
+   */
+  const csSameTypeReading = (
+    owner: SymbolNode,
+    member: { type: string; nullable?: boolean },
+    name: string,
+    context: CsContext,
+  ): boolean => {
+    const isType = (s: SymbolNode) => CS_TYPE_KINDS.has(s.kind);
+    const declared = csLookup(csContextOf(owner, owner.file), member.type, isType);
+    const used = csLookup(context, name, isType);
+    const one = (xs: SymbolNode[]) => new Set(xs.map(csFullNameOf));
+    const a = one(declared);
+    const b = one(used);
+    if (a.size !== 1 || b.size !== 1 || [...a][0] !== [...b][0]) return false;
+    return !member.nullable || declared.every((s) => s.kind !== "struct" && s.kind !== "enum");
   };
 
   const reexportsByFile = new Map<string, SymbolEdge[]>();
@@ -1837,9 +1884,11 @@ export function resolveCallSites(
           csLookup(context, path, accept);
         const qualifier = edge.calleeQualifier;
         const name = edge.calleeName;
-        const anchored = qualifier?.startsWith(CS_GLOBAL_ANCHOR) ?? false;
-        const relative = qualifier && anchored ? qualifier.slice(CS_GLOBAL_ANCHOR.length) : qualifier;
-        const anchor = anchored ? CS_GLOBAL_ANCHOR : "";
+        // `global::` or an alias's declaring namespace (`App.Shop::`), kept in front of the path.
+        const cut = qualifier?.indexOf("::") ?? -1;
+        const anchored = cut >= 0;
+        const relative = qualifier && anchored ? qualifier.slice(cut + 2) : qualifier;
+        const anchor = qualifier && anchored ? qualifier.slice(0, cut + 2) : "";
         const terminal = relative ? relative.slice(relative.lastIndexOf(".") + 1) : undefined;
         let found: SymbolNode[] = [];
         let framework = false;

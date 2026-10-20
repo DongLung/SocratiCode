@@ -194,14 +194,16 @@ export interface SymbolNode {
    */
   csMembers?: string[];
   /**
-   * C# types only: the fields and properties whose declared type is written
-   * with their own name (`Status Status`). C# lets such a name be read as the
-   * value or as the type (the "Color Color" rule), so it never hides the type
-   * of that name from an expression. Every other field, property, constant,
-   * event and enum member of the type does: a receiver starting with it is a
-   * value, and its access names no type. Absent when the type declares none.
+   * C# types only: the fields and properties whose declared type ends in
+   * their own name (`Status Status`, `Other.Status Status`, `Status? Status`),
+   * with that type as written (`type`, aliases written out) and whether it is
+   * nullable. C# reads such a name as the value or as the type (the "Color
+   * Color" rule) only when both readings name the same type, which resolution
+   * checks; otherwise it is a value. Every other field, property, constant,
+   * event and enum member of the type is a value: a receiver starting with it
+   * names no type. Absent when the type declares none.
    */
-  csSelfTypedMembers?: string[];
+  csSelfTypedMembers?: Array<{ name: string; type: string; nullable?: boolean }>;
   /**
    * C# types only: the base class and interfaces as the declaration writes
    * them, type arguments dropped and the file's `using` aliases written out

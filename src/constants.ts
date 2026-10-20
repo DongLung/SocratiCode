@@ -847,7 +847,9 @@ export const GODOT_BUILTIN_FUNCTIONS = new Set<string>([
 /**
  * The leading segment a C# edge keeps for a `global::`-anchored path
  * (`global::App.Calc`): the path names members of the global namespace only,
- * never a scope the reference sits in.
+ * never a scope the reference sits in. A path written through a `using`
+ * alias declared in a namespace block carries that namespace as its anchor
+ * instead (`App.Shop::Billing.Calc`), and is looked up from there outward.
  */
 export const CS_GLOBAL_ANCHOR = "global::";
 

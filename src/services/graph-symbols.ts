@@ -2476,9 +2476,13 @@ function csWithin(inner: CsRange, outer: CsRange): boolean {
 /** The leading path segment for a `global::` anchor, kept wherever the path is recorded. */
 const CS_GLOBAL = CS_GLOBAL_ANCHOR;
 
-/** A name path as an edge records it: `Ns.Calc`, or `global::Ns.Calc` for an anchored one. */
+/**
+ * A name path as an edge records it: `Ns.Calc`, or with its anchor segment
+ * (`CS_GLOBAL`, or `App.Shop::` for an alias declared in `namespace App.Shop`)
+ * joined to it: `global::Ns.Calc`, `App.Shop::Ns.Calc`.
+ */
 function csJoin(path: string[]): string {
-  return path[0] === CS_GLOBAL ? CS_GLOBAL + path.slice(1).join(".") : path.join(".");
+  return path[0]?.endsWith("::") ? path[0] + path.slice(1).join(".") : path.join(".");
 }
 
 /**
@@ -2694,9 +2698,12 @@ function extractFromCSharp(
     if (!target) continue;
     const block = blockOf(u);
     if (alias && named.length >= 2) {
-      // A file-level alias is resolved from the global namespace; one in a
-      // block, like any name there, from that block.
-      const anchored = block || target[0] === CS_GLOBAL ? target : [CS_GLOBAL, ...target];
+      // An alias's target is looked up where the alias is declared, never
+      // where it is used: a file-level one from the global namespace, one in a
+      // block from the block's namespace outward (`App.Shop::`), so a nearer
+      // namespace at the use cannot redirect it. `global::` stays as written.
+      const anchor = block ? `${block.namespace}::` : CS_GLOBAL;
+      const anchored = target[0] === CS_GLOBAL ? target : [anchor, ...target];
       const list = aliases.get(alias.text()) ?? [];
       list.push({ block: block?.range ?? null, target: anchored });
       aliases.set(alias.text(), list);
@@ -2798,14 +2805,26 @@ function extractFromCSharp(
     }
     return owner?.sym ?? null;
   };
-  // A value whose declared type is written with its own name (`Status Status`)
-  // may be read as either in C#, the "Color Color" rule: it never hides the
-  // type of that name, and the type lookup decides.
+  // C# reads a value whose type has the value's own name either way (the
+  // "Color Color" rule), so `Status Status` hides no type `Status`, but only
+  // when both readings name the same type. The declared type's written path
+  // is kept when its last segment is the value's name: a plain name or a
+  // qualified one, `?` allowed; an array, a pointer or a generic is another type.
   // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
-  const typedAsItself = (type: any, name: string): boolean => csTypeHeadIdentifier(type)?.text() === name;
+  const typedAsItself = (type: any, name: string): { path: string[]; nullable: boolean } | null => {
+    const nullable = type?.kind() === "nullable_type";
+    const inner = nullable ? (type.field?.("type") ?? type.children?.()?.[0] ?? null) : type;
+    const kind = inner?.kind();
+    if (kind !== "identifier" && kind !== "qualified_name" && kind !== "alias_qualified_name") return null;
+    const path = csNamePath(inner);
+    return path && path[path.length - 1] === name ? { path, nullable } : null;
+  };
   // Each type's value members and nested types by name, read below to tell a
-  // receiver that is a value from one that is a type.
+  // receiver that is a value from one that is a type. A member typed as itself
+  // is neither: whether it hides the type is left to resolution, which can
+  // compare the two readings (`csSelfTypedMembers`).
   const valueMembers = new Map<SymbolNode, Set<string>>();
+  const selfTypedMembers = new Map<SymbolNode, Set<string>>();
   const nestedTypes = new Map<SymbolNode, Set<string>>();
   const addName = (map: Map<SymbolNode, Set<string>>, sym: SymbolNode, name: string) => {
     const names = map.get(sym);
@@ -2823,9 +2842,15 @@ function extractFromCSharp(
       owner.csMembers ??= [];
       owner.csMembers.push(name);
     }
-    if (type && typedAsItself(type, name)) {
+    const self = type ? typedAsItself(type, name) : null;
+    if (self) {
       owner.csSelfTypedMembers ??= [];
-      owner.csSelfTypedMembers.push(name);
+      owner.csSelfTypedMembers.push({
+        name,
+        type: csJoin(expandAt(self.path, csRange(type).start)),
+        ...(self.nullable ? { nullable: true } : {}),
+      });
+      addName(selfTypedMembers, owner, name);
     } else addName(valueMembers, owner, name);
   };
   for (const k of ["field_declaration", "event_field_declaration"]) {
@@ -2859,7 +2884,7 @@ function extractFromCSharp(
   // a parameter. A pattern variable is given its whole block, which over-
   // rather than under-states where it is visible.
   const localScopes = new Set([
-    "block", "switch_section", "for_statement", "foreach_statement", "using_statement", "fixed_statement",
+    "block", "switch_section", "switch_expression_arm", "for_statement", "foreach_statement", "using_statement", "fixed_statement",
     "catch_clause", "lambda_expression", "anonymous_method_expression", "query_expression",
   ]);
   // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
@@ -2878,7 +2903,10 @@ function extractFromCSharp(
       return;
     }
     const name = id.text();
-    if (type && typedAsItself(type, name)) return;
+    // Only a plain `Status Status` is read in one scope both ways; a qualified
+    // or nullable type may be another type than the name finds, so it stays a value.
+    const self = type ? typedAsItself(type, name) : null;
+    if (self && self.path.length === 1 && !self.nullable && !expandAt(self.path, csRange(type).start)[0].endsWith("::")) return;
     const scopes = locals.get(name);
     if (scopes) scopes.push(scope);
     else locals.set(name, [scope]);
@@ -2922,7 +2950,7 @@ function extractFromCSharp(
       .filter((t) => t.range.start <= at && at <= t.range.end)
       .sort((a, b) => b.range.start - a.range.start);
     for (const t of enclosing) {
-      if (nestedTypes.get(t.sym)?.has(name)) return false;
+      if (nestedTypes.get(t.sym)?.has(name) || selfTypedMembers.get(t.sym)?.has(name)) return false;
       if (valueMembers.get(t.sym)?.has(name)) return true;
     }
     return false;
