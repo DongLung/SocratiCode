@@ -607,6 +607,166 @@ namespace App {
       expect(names).toContain("Bar");
       expect(names).toContain("Baz");
     });
+
+    it("names declarations by their name field, not by a preceding attribute or return type", () => {
+      const src = `
+namespace App {
+    [ApiController]
+    public class FooController : ControllerBase, IFoo {
+        [HttpGet("{id}")]
+        public async Task<List<Item>> Get(IRepo repo, int id) { return await repo.Load(id); }
+        public DateTime Stamp() { return DateTime.UtcNow; }
+        public enum Mode { A, B }
+    }
+}
+`;
+      const out = extractSymbolsAndCalls(src, "csharp" as unknown as Lang, ".cs", "FooController.cs");
+      const names = out.symbols.map((s) => s.name);
+      expect(names).toContain("FooController");
+      expect(names).toContain("Get");
+      expect(names).toContain("Stamp");
+      expect(names).toContain("Mode");
+      expect(names).not.toContain("ApiController");
+      expect(names).not.toContain("HttpGet");
+      expect(names).not.toContain("Task");
+      expect(names).not.toContain("DateTime");
+      expect(out.symbols.find((s) => s.name === "Get")?.qualifiedName).toBe("FooController.Get");
+      expect(out.symbols.find((s) => s.name === "Mode")?.kind).toBe("enum");
+      const typeRefs = out.rawCalls.filter((c) => c.kind === "type_reference").map((c) => c.calleeName);
+      expect(typeRefs).toContain("ControllerBase");
+      expect(typeRefs).toContain("IFoo");
+      expect(typeRefs).toContain("IRepo");
+      expect(typeRefs).toContain("Item");
+      expect(typeRefs).toContain("ApiControllerAttribute");
+      expect(typeRefs).toContain("HttpGetAttribute");
+      // Framework names are recorded like any other type: only resolution,
+      // which sees the whole project, can tell its own `Task` from .NET's.
+      expect(typeRefs).toContain("Task");
+    });
+
+    it("assigns members to the class that contains them, even when two classes share a line", () => {
+      const src = "namespace App.Billing; public class A { public void M() {} } public class B { public void M() {} }\n";
+      const out = extractSymbolsAndCalls(src, "csharp" as unknown as Lang, ".cs", "AB.cs");
+      const ms = out.symbols.filter((s) => s.name === "M");
+      expect(ms.map((s) => s.qualifiedName).sort()).toEqual(["A.M", "B.M"]);
+      expect(ms.map((s) => s.csFullName).sort()).toEqual(["App.Billing.A.M", "App.Billing.B.M"]);
+      expect(new Set(ms.map((s) => s.id)).size).toBe(2);
+    });
+
+    it("records nested types, delegates and properties under their full names", () => {
+      const src = `
+namespace App {
+    namespace Billing {
+        public class Outer {
+            [JsonProperty("count")]
+            public int Count { get; set; }
+            [Obsolete]
+            public Task<int> Pending { get; }
+            public delegate Task<bool> Handler(Item item);
+            public class Inner { public Inner() {} }
+        }
+    }
+}
+`;
+      const out = extractSymbolsAndCalls(src, "csharp" as unknown as Lang, ".cs", "Outer.cs");
+      const byName = (n: string) => out.symbols.find((s) => s.name === n);
+      expect(out.symbols.map((s) => s.name)).not.toContain("JsonProperty");
+      expect(byName("Count")).toMatchObject({ kind: "variable", qualifiedName: "Outer.Count", csFullName: "App.Billing.Outer.Count" });
+      expect(byName("Pending")).toMatchObject({ kind: "variable", qualifiedName: "Outer.Pending" });
+      expect(byName("Handler")).toMatchObject({ kind: "type", csFullName: "App.Billing.Outer.Handler" });
+      expect(byName("Inner")).toMatchObject({ kind: "class", csFullName: "App.Billing.Outer.Inner" });
+      expect(out.symbols.find((s) => s.kind === "constructor")).toMatchObject({
+        qualifiedName: "Inner.Inner", csFullName: "App.Billing.Outer.Inner.Inner",
+      });
+      const refs = out.rawCalls.filter((c) => c.kind === "type_reference").map((c) => c.calleeName);
+      expect(refs).toContain("Item");
+    });
+
+    it("records the written bases, and no primary-constructor argument as a type", () => {
+      const src = "using Repo = App.Data.Repository;\nnamespace App { public record R(int X) : Base(X), IFoo; public class C : Repo, Ns.IBar<Item> { } }\n";
+      const out = extractSymbolsAndCalls(src, "csharp" as unknown as Lang, ".cs", "R.cs");
+      expect(out.symbols.find((s) => s.name === "R")?.csBases).toEqual(["Base", "IFoo"]);
+      // A file-level alias names its target from the global namespace.
+      expect(out.symbols.find((s) => s.name === "C")?.csBases).toEqual(["global::App.Data.Repository", "Ns.IBar"]);
+      const refs = out.rawCalls.filter((c) => c.kind === "type_reference").map((c) => c.calleeName);
+      expect(refs).toEqual(expect.arrayContaining(["Base", "IFoo", "Repository", "IBar", "Item"]));
+      expect(refs).not.toContain("X");
+      expect(refs).not.toContain("Repo");
+    });
+
+    it("keeps the written path of a qualified call, creation and type, and skips qualifier segments by node", () => {
+      const src = `
+public class Service {
+    public void Run(Order.Order o, System.Collections.Generic.IList<MyApp.Domain.Item> items, global::Ns.Calc g) {
+        Billing.Calc.Compute(1);
+        var c = new Billing.Calc();
+        var l = Billing.Calc.Limit;
+        Config.Instance.Load();
+    }
+}
+`;
+      const out = extractSymbolsAndCalls(src, "csharp" as unknown as Lang, ".cs", "Service.cs");
+      const refs = out.rawCalls.filter((c) => c.kind === "type_reference");
+      const written = refs.map((c) => (c.calleeQualifier ? `${c.calleeQualifier}.${c.calleeName}` : c.calleeName));
+      expect(written).toEqual(expect.arrayContaining(["Order.Order", "System.Collections.Generic.IList", "MyApp.Domain.Item", "global::Ns.Calc", "Billing.Calc", "Config.Instance"]));
+      // No qualifier segment becomes a type of its own.
+      for (const segment of ["System", "Collections", "Generic", "MyApp", "Domain", "Ns", "Billing"]) {
+        expect(refs.find((c) => c.calleeName === segment)).toBeUndefined();
+      }
+      // A member-access receiver may end in a static member; a type position may not.
+      expect(refs.find((c) => c.calleeName === "Instance")?.csMemberReceiver).toBe(true);
+      expect(refs.find((c) => c.calleeName === "Order")?.csMemberReceiver).toBeUndefined();
+      const calls = out.rawCalls.filter((c) => c.kind === "call");
+      expect(calls.find((c) => c.calleeName === "Compute")?.calleeQualifier).toBe("Billing.Calc");
+      expect(calls.find((c) => c.calleeName === "Calc")?.calleeQualifier).toBe("Billing.Calc");
+      expect(calls.find((c) => c.calleeName === "Load")?.calleeQualifier).toBe("Config.Instance");
+    });
+
+    it("records object creation as a call to the type and keeps a static call's class as the qualifier", () => {
+      const src = `
+public class Service {
+    private readonly Calc _calc;
+    public Service() { _calc = new Calc(); }
+    public int Run(int x) {
+        var a = Calc.Compute(x);
+        var b = _calc.Compute(x);
+        var c = this.Run(x);
+        var d = Helper<int>.Make(x);
+        return Compute(a + b + c + d);
+    }
+    private int Compute(int x) { return x; }
+}
+`;
+      const out = extractSymbolsAndCalls(src, "csharp" as unknown as Lang, ".cs", "Service.cs");
+      const calls = out.rawCalls.filter((c) => c.kind === "call");
+      expect(calls.find((c) => c.calleeName === "Calc")).toBeTruthy();
+      const compute = calls.filter((c) => c.calleeName === "Compute");
+      // A field receiver is a value: an instance call, with no qualifier to look a type up by.
+      expect(compute.map((c) => c.calleeQualifier)).toEqual(["Calc", undefined, undefined]);
+      expect(calls.find((c) => c.calleeName === "Run")?.calleeQualifier).toBeUndefined();
+      expect(calls.find((c) => c.calleeName === "Run")?.receiver).toBe("this");
+      expect(compute.map((c) => c.receiver)).toEqual([undefined, "?", undefined]);
+      expect(calls.find((c) => c.calleeName === "Make")?.calleeQualifier).toBe("Helper");
+      // The field type (line 3), `new Calc()` (line 4) and the static call's receiver (line 6) reference `Calc`;
+      // `_calc.Compute` and `this.Run` reference no type.
+      const calcRefs = out.rawCalls.filter((c) => c.kind === "type_reference" && c.calleeName === "Calc");
+      expect(calcRefs.map((c) => c.callSite.line).sort((a, b) => a - b)).toEqual([3, 4, 6]);
+      expect(out.rawCalls.find((c) => c.kind === "type_reference" && c.calleeName === "_calc")).toBeUndefined();
+      expect(out.rawCalls.find((c) => c.kind === "type_reference" && c.calleeName === "Helper")?.callSite.line).toBe(9);
+    });
+
+    it("references the type an enum member or constant access names", () => {
+      const src = `
+public class Picker {
+    public Mode Pick() { var m = Mode.Fast; return m == Mode.Slow ? Mode.Fast : Limits.Default; }
+}
+`;
+      const out = extractSymbolsAndCalls(src, "csharp" as unknown as Lang, ".cs", "Picker.cs");
+      // Three accesses on one line collapse to one reference per (caller, name, line).
+      const refs = out.rawCalls.filter((c) => c.kind === "type_reference").map((c) => c.calleeName);
+      expect(refs.filter((n) => n === "Mode")).toHaveLength(1);
+      expect(refs).toContain("Limits");
+    });
   });
 
   describe("C / C++", () => {

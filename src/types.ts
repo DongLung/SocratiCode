@@ -172,6 +172,76 @@ export interface SymbolNode {
    * one. Absent when there are none.
    */
   phpTraits?: string[];
+  /**
+   * C# only: the declaration's name with its namespace and every enclosing
+   * type, as C# itself writes the full name: `App.Billing.Calc` for a class,
+   * `App.Billing.Calc.Compute` for its method, `App.Billing.Calc.Inner` for a
+   * nested type. A qualified C# edge (`Billing.Calc.Compute()`, a parameter of
+   * type `Billing.Calc`) is matched against its trailing segments, so a
+   * namespace the call writes out is never answered by a same-named type in
+   * another one. Absent for every other language and for every graph
+   * persisted before it existed, where resolution reads `qualifiedName`
+   * instead. The symbol's `id` and `qualifiedName` are unchanged by it.
+   */
+  csFullName?: string;
+  /**
+   * C# types only: the fields, constants, events and enum members the type
+   * declares, which are not recorded as symbols of their own. Resolution reads
+   * them as evidence that a member-access receiver ends in a static member —
+   * `Open` in `OrderState.Open.Id` — rather than in a namespace segment.
+   * Absent when the type declares none, and on every graph persisted before it
+   * existed.
+   */
+  csMembers?: string[];
+  /**
+   * C# types only: the fields and properties whose declared type ends in
+   * their own name (`Status Status`, `Other.Status Status`, `Status? Status`),
+   * with that type as written (`type`, aliases written out) and whether it is
+   * nullable. C# reads such a name as the value or as the type (the "Color
+   * Color" rule) only when both readings name the same type, which resolution
+   * checks; otherwise it is a value. Every other field, property, constant,
+   * event and enum member of the type is a value: a receiver starting with it
+   * names no type. Absent when the type declares none.
+   */
+  csSelfTypedMembers?: Array<{ name: string; type: string; nullable?: boolean }>;
+  /**
+   * C# types only: the base class and interfaces as the declaration writes
+   * them, type arguments dropped and the file's `using` aliases written out
+   * (`App.Data.Repository`, `IFoo`). Resolution looks each one up as C# does —
+   * the enclosing types and namespaces, innermost first, then the namespaces
+   * its file imports — and follows it to find a member the type inherits from
+   * another project type. Absent when the type names no base, and on every
+   * graph persisted before it existed.
+   */
+  csBases?: string[];
+  /**
+   * C# `<module>` symbols only: the namespaces the file imports with a
+   * file-level `using`, and the types it imports with `using static` (whose
+   * nested types become visible by name), its own `global using`s included,
+   * aliases excluded. A type name the enclosing scopes do not declare is
+   * looked for under them. Absent when the file imports none. A `global using`
+   * is not applied to any other file: which files one compilation shares is
+   * set by the project system, which the graph does not read, so a type
+   * imported only through another file's `global using` (a `GlobalUsings.cs`,
+   * or a `<Using Include>` item in a `.csproj`) stays unresolved.
+   */
+  csUsings?: string[];
+  /**
+   * C# `<module>` symbols only: the namespace blocks that import anything,
+   * each with its full namespace name, its `using`s as written (`global::`
+   * kept) and `outer`, the index of the nearest enclosing block here. A
+   * block's imports apply at its own namespace's level of lookup, and only to
+   * the declarations inside it (`csBlock`), so a sibling block's never reach
+   * them — on the same line or not. A file-scoped namespace is a block over
+   * the rest of its file. Absent when no block imports anything.
+   */
+  csBlockUsings?: Array<{ namespace: string; usings: string[]; outer?: number }>;
+  /**
+   * C# symbols only: the index into the file's `csBlockUsings` of the
+   * innermost importing namespace block that contains the declaration. Absent
+   * outside every such block.
+   */
+  csBlock?: number;
 }
 
 /** Kind of relationship an edge represents */
@@ -188,7 +258,9 @@ export type SymbolEdgeConfidence =
   | "unique"
   | "multiple-candidates"
   | "unresolved"
-  | "engine"; // Godot engine API call — not a project symbol, excluded from unresolved %
+  // Not a project symbol, excluded from unresolved %: a Godot engine API call,
+  // or a .NET framework type (`Task`, `List`) that no C# file of the project declares.
+  | "engine";
 
 /** A call-site edge between symbols */
 export interface SymbolEdge {
@@ -227,11 +299,38 @@ export interface SymbolEdge {
    * a type hint or `new Invoice()`). Absent on every PHP call it cannot
    * qualify statically — `$obj->m()`, `$class::m()`, `Cls::$m()`, `self::`,
    * `static::`, `parent::` and bare function calls.
+   *
+   * C# writes it as the call site spells it, dots kept, type arguments
+   * dropped and the file's `using` alias in scope written out:
+   * `Billing.Calc` for `Billing.Calc.Compute()`, `global::Billing.Calc` when
+   * the source anchors it. A path starting at a local, a parameter or a
+   * member of an enclosing type declared in the file is a value, recorded as
+   * `receiver` `?` instead; one starting at a member declared elsewhere is
+   * kept, and resolution recognises it. Any other path stays a qualifier,
+   * lowercase or not, so the call is never answered by its bare name. An object creation
+   * `new Billing.Calc()` carries the whole type path, `Billing.Calc`, with
+   * `Calc` as the callee — a member cannot share its class's name in C#, so
+   * the repeated name marks a constructor call without ambiguity.
    */
   calleeQualifier?: string;
+  /**
+   * C# `type_reference` edges only: the edge names the receiver of a member
+   * access (`Config.Instance` in `Config.Instance.Load()`), whose last segments
+   * may be static members rather than types — an expression does not say
+   * which. Resolution tries the longest prefix of the written path that names
+   * a project type first (`Config.Instance`, then `Config`). The receiver is
+   * an expression, so a head that names a value (a property the caller's type
+   * inherits) references no type. Absent on a type position, where the whole
+   * path is the type, and on every graph persisted before it existed.
+   */
+  csMemberReceiver?: boolean;
   callSite: { file: string; line: number };
   /** Receiver expression for method calls (e.g. "fighter" in "fighter.take_damage()").
-   *  Used by GDScript receiver-type resolution. Absent for bare function calls. */
+   *  Used by GDScript receiver-type resolution. Absent for bare function calls.
+   *  C# sets it only where the receiver is no type path: `this`, `base`, or `?`
+   *  for any other expression (a value such as a local or parameter, a call
+   *  result, `a?.b`, an element access) — such a call is answered from the
+   *  caller's own type or its bases, or not at all. */
   receiver?: string;
   /** True when a GDScript call edge represents `signal_name.emit()`.
    *  Optional so symbol graphs built before signal-edge support remain readable. */

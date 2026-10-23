@@ -26,7 +26,7 @@
  *   from unresolved callees — they don't count against resolution %.
  */
 
-import { GODOT_BUILTIN_CLASSES, GODOT_BUILTIN_FUNCTIONS } from "../constants.js";
+import { CS_BUILTIN_TYPES, CS_GLOBAL_ANCHOR, GODOT_BUILTIN_CLASSES, GODOT_BUILTIN_FUNCTIONS } from "../constants.js";
 import type { CodeGraph, SymbolEdge, SymbolNode } from "../types.js";
 import { phpFoldCase } from "./graph-php-case.js";
 import type { RustUseBinding } from "./graph-symbols.js";
@@ -47,6 +47,28 @@ export interface GodotSymbolResolutionContext {
   projectRootByFile: ReadonlyMap<string, string>;
   /** Absolute Godot project root to its isolated resolution metadata. */
   projectsByRoot: ReadonlyMap<string, GodotSymbolProject>;
+}
+
+/** The symbol kinds a C# type position can name. */
+const CS_TYPE_KINDS: ReadonlySet<SymbolNode["kind"]> = new Set(["class", "interface", "struct", "enum", "type"]);
+
+/** The symbol kinds `new T()` can create: records are recorded as classes. */
+const CS_CREATABLE_KINDS: ReadonlySet<SymbolNode["kind"]> = new Set(["class", "struct"]);
+
+/** A C# symbol's full name: `csFullName`, or `qualifiedName` on a graph persisted before it. */
+function csFullNameOf(s: SymbolNode): string {
+  return s.csFullName ?? s.qualifiedName;
+}
+
+/**
+ * Whether a written C# path names a .NET framework type: a framework type
+ * name alone (`Math`) or under `System` (`System.Math`). After a variable or
+ * a project type the same name is a member (`item.Action`, `Settings.Type`),
+ * no evidence of a framework type.
+ */
+function csFrameworkPath(segments: string[]): boolean {
+  const last = segments[segments.length - 1];
+  return last !== undefined && CS_BUILTIN_TYPES.has(last) && (segments.length === 1 || segments[0] === "System");
 }
 
 type GdscriptSceneEntry = readonly [file: string, symbols: Map<string, SymbolNode[]>];
@@ -876,6 +898,321 @@ export function resolveCallSites(
 
   // Re-export traversal is on the hot path for every unresolved edge. Build
   // this once rather than rescanning every edge in a barrel on every lookup.
+  // Project-wide C# index by simple name, built on first use: a static call
+  // or a type position may name a symbol outside the caller's dependencies
+  // (same namespace, no `using`), and scanning every file per edge is quadratic.
+  let csNameIndex: Map<string, SymbolNode[]> | undefined;
+  const csByName = (): Map<string, SymbolNode[]> => {
+    if (!csNameIndex) {
+      csNameIndex = new Map();
+      for (const syms of symbolsByFile.values()) {
+        for (const s of syms) {
+          if (s.language !== "csharp") continue;
+          const list = csNameIndex.get(s.name);
+          if (list) list.push(s);
+          else csNameIndex.set(s.name, [s]);
+        }
+      }
+    }
+    return csNameIndex;
+  };
+  /**
+   * The members named `member` that the C# type `t` declares, or else that its
+   * nearest project base declares, followed through `csBases`. A field,
+   * constant, event or enum member is no symbol of its own: with `fields`, a
+   * name among a type's `csMembers` answers with that type. A base outside the
+   * project (`DbContext`) has no symbols, so what it declares is never found.
+   */
+  const csMembersOf = (t: SymbolNode, member: string, fields: boolean, seen = new Set<string>()): SymbolNode[] => {
+    const full = csFullNameOf(t);
+    if (seen.has(full)) return [];
+    seen.add(full);
+    const own = (csByName().get(member) ?? []).filter((m) => csFullNameOf(m) === `${full}.${member}`);
+    if (own.length > 0) return own;
+    // A partial type is one type across its files: every part's fields count.
+    const parts = (csByName().get(t.name) ?? []).filter((p) => CS_TYPE_KINDS.has(p.kind) && csFullNameOf(p) === full);
+    if (fields && parts.some((p) => p.csMembers?.includes(member))) return [t];
+    for (const part of parts) {
+      for (const base of part.csBases ?? []) {
+        for (const b of csBaseType(part, base)) {
+          const inherited = csMembersOf(b, member, fields, seen);
+          if (inherited.length > 0) return inherited;
+        }
+      }
+    }
+    return [];
+  };
+  // C# symbols by id, for the scope an edge's caller sits in.
+  let csSymbolIndex: Map<string, SymbolNode> | undefined;
+  const csSymbolById = (id: string): SymbolNode | undefined => {
+    if (!csSymbolIndex) {
+      csSymbolIndex = new Map();
+      for (const syms of symbolsByFile.values()) for (const s of syms) if (s.language === "csharp") csSymbolIndex.set(s.id, s);
+    }
+    return csSymbolIndex.get(id);
+  };
+  // Every project namespace and type full name, with each of its prefixes.
+  let csNamespaceIndex: Set<string> | undefined;
+  const csIsNamespaceOrType = (full: string): boolean => {
+    if (!csNamespaceIndex) {
+      csNamespaceIndex = new Set();
+      for (const syms of symbolsByFile.values()) {
+        for (const s of syms) {
+          if (s.language !== "csharp" || !CS_TYPE_KINDS.has(s.kind)) continue;
+          const parts = csFullNameOf(s).split(".");
+          for (let n = 1; n <= parts.length; n++) csNamespaceIndex.add(parts.slice(0, n).join("."));
+        }
+      }
+    }
+    return csNamespaceIndex.has(full);
+  };
+  /**
+   * A namespace block's `using`s as full names. Each is resolved as C#
+   * resolves it, from the block's own namespace outward (`using Billing;` in
+   * `namespace App` is `App.Billing` when the project declares one), and from
+   * the global namespace alone when anchored.
+   */
+  const csBlockImportCache = new Map<string, string[]>();
+  const csBlockImports = (file: string, block: { namespace: string; usings: string[] }, index: number): string[] => {
+    const key = `${file}\u0000${index}`;
+    const cached = csBlockImportCache.get(key);
+    if (cached) return cached;
+    const resolved = block.usings.map((u) => {
+      if (u.startsWith(CS_GLOBAL_ANCHOR)) return u.slice(CS_GLOBAL_ANCHOR.length);
+      const parts = block.namespace ? block.namespace.split(".") : [];
+      for (let n = parts.length; n >= 1; n--) {
+        const full = `${parts.slice(0, n).join(".")}.${u}`;
+        if (csIsNamespaceOrType(full)) return full;
+      }
+      return u;
+    });
+    csBlockImportCache.set(key, resolved);
+    return resolved;
+  };
+  /**
+   * Where C# looks a name up from inside `sym` of `file`: its enclosing
+   * types, innermost first (the type itself when `sym` is one), then each
+   * enclosing namespace out to the global one (`""`), with the imports C#
+   * consults at that level — a namespace block's `using`s at the block's own
+   * namespace, the file's at the global namespace. A file-level caller, or one
+   * from a graph persisted before `csFullName`, sees the global level alone.
+   * Another file's `global using` is not applied: which files share a
+   * compilation is a project-system fact the graph does not record.
+   */
+  type CsContext = { types: string[]; levels: Array<{ namespace: string; imports: string[] }> };
+  const csContextCache = new Map<string, CsContext>();
+  const csContextOf = (sym: SymbolNode | undefined, file: string): CsContext => {
+    const key = sym?.id ?? `\u0000${file}`;
+    const cached = csContextCache.get(key);
+    if (cached) return cached;
+    const fileSymbols = symbolsByFile.get(file) ?? [];
+    const module = fileSymbols.find((s) => s.kind === "module");
+    const types: string[] = [];
+    const namespaces: string[] = [];
+    if (sym?.csFullName) {
+      const parts = sym.csFullName.split(".");
+      for (let n = CS_TYPE_KINDS.has(sym.kind) ? parts.length : parts.length - 1; n >= 1; n--) {
+        const prefix = parts.slice(0, n).join(".");
+        // An enclosing type is declared in the same file; any other prefix is a namespace.
+        if (fileSymbols.some((s) => CS_TYPE_KINDS.has(s.kind) && s.csFullName === prefix)) types.push(prefix);
+        else namespaces.push(prefix);
+      }
+    }
+    const blocks = module?.csBlockUsings ?? [];
+    const chain: number[] = [];
+    for (let b = sym?.csBlock; b !== undefined && b < blocks.length && !chain.includes(b); b = blocks[b].outer) chain.push(b);
+    const levels = namespaces.map((namespace) => ({
+      namespace,
+      imports: chain.filter((b) => blocks[b].namespace === namespace).flatMap((b) => csBlockImports(file, blocks[b], b)),
+    }));
+    levels.push({ namespace: "", imports: module?.csUsings ?? [] });
+    const context = { types, levels };
+    csContextCache.set(key, context);
+    return context;
+  };
+  /**
+   * The symbols a dotted `path` names from `context`, looked up as C# looks a
+   * name up rather than by name across the project, and never by file
+   * proximity: an exact full name under each enclosing type, innermost first,
+   * then at each namespace level its members before the imports C# consults
+   * there. An import brings in types, not namespaces, so `X.Y` is taken from
+   * one only when `X` is a type it imports. Two types imported under one name
+   * at one level are an ambiguity C# itself rejects, so neither is answered; a
+   * `global::`-anchored path is looked up in the global namespace alone. A
+   * path an alias declared in a namespace block wrote out (`App.Shop::X.Y`)
+   * is looked up as C# resolves the alias: from that namespace outward,
+   * without the declaring block's own imports, never from where it is used.
+   * Every part of a partial type is answered.
+   */
+  const csLookup = (context: CsContext, written: string, accept: (s: SymbolNode) => boolean): SymbolNode[] => {
+    const cut = written.indexOf("::");
+    const path = cut >= 0 ? written.slice(cut + 2) : written;
+    const name = path.slice(path.lastIndexOf(".") + 1);
+    const first = path.split(".")[0];
+    const candidates = (csByName().get(name) ?? []).filter(accept);
+    const named = (full: string) => candidates.filter((s) => csFullNameOf(s) === full);
+    // `null` when no import at this level names `path`, `[]` when two do.
+    const imported = (imports: string[]): SymbolNode[] | null => {
+      const found = imports
+        .filter((u) => first === path || csTypesNamed(`${u}.${first}`).length > 0)
+        .flatMap((u) => named(`${u}.${path}`));
+      const distinct = new Set(found.map(csFullNameOf)).size;
+      return distinct === 0 ? null : distinct === 1 ? found : [];
+    };
+    if (written.startsWith(CS_GLOBAL_ANCHOR)) return named(path);
+    if (cut >= 0) {
+      const parts = written.slice(0, cut).split(".");
+      for (let n = parts.length; n >= 0; n--) {
+        const namespace = parts.slice(0, n).join(".");
+        const found = named(namespace ? `${namespace}.${path}` : path);
+        if (found.length > 0) return found;
+        if (n === parts.length) continue;
+        const level = context.levels.find((l) => l.namespace === namespace);
+        const fromImports = imported(level?.imports ?? []);
+        if (fromImports) return fromImports;
+      }
+      return [];
+    }
+    for (const scope of context.types) {
+      const found = named(`${scope}.${path}`);
+      if (found.length > 0) return found;
+      // Inside `class A : B`, B's nested types are visible by simple name too.
+      const inherited = csInheritedNested(scope, path, named);
+      if (inherited.length > 0) return inherited;
+    }
+    for (const { namespace, imports } of context.levels) {
+      const found = named(namespace ? `${namespace}.${path}` : path);
+      if (found.length > 0) return found;
+      const fromImports = imported(imports);
+      if (fromImports) return fromImports;
+    }
+    return [];
+  };
+  // C# types by full name, the parts of a partial type together.
+  let csTypeIndex: Map<string, SymbolNode[]> | undefined;
+  const csTypesNamed = (full: string): SymbolNode[] => {
+    if (!csTypeIndex) {
+      csTypeIndex = new Map();
+      for (const syms of symbolsByFile.values()) {
+        for (const s of syms) {
+          if (s.language !== "csharp" || !CS_TYPE_KINDS.has(s.kind)) continue;
+          const key = csFullNameOf(s);
+          const list = csTypeIndex.get(key);
+          if (list) list.push(s);
+          else csTypeIndex.set(key, [s]);
+        }
+      }
+    }
+    return csTypeIndex.get(full) ?? [];
+  };
+  /**
+   * What `path` names among the nested types the project type `scope`
+   * inherits, nearest base first. `named` is the caller's own filter, so the
+   * kind it asks for still holds.
+   */
+  const csInheritedNested = (
+    scope: string,
+    path: string,
+    named: (full: string) => SymbolNode[],
+    seen = new Set<string>(),
+  ): SymbolNode[] => {
+    if (seen.has(scope)) return [];
+    seen.add(scope);
+    for (const part of csTypesNamed(scope)) {
+      for (const base of part.csBases ?? []) {
+        for (const b of csBaseType(part, base)) {
+          const full = csFullNameOf(b);
+          const found = named(`${full}.${path}`);
+          if (found.length > 0) return found;
+          const further = csInheritedNested(full, path, named, seen);
+          if (further.length > 0) return further;
+        }
+      }
+    }
+    return [];
+  };
+  // Base lookups nest: a base is looked up from its type's enclosing types,
+  // whose own bases are looked up in turn. Each base a type declares is
+  // looked up once, or nested types make the walk exponential in their depth;
+  // a lookup still under way answers nothing, which ends a cyclic hierarchy.
+  const csBaseCache = new Map<string, SymbolNode[]>();
+  /** The project type a base written in `t`'s declaration names: looked up from `t`'s enclosing scopes. */
+  const csBaseType = (t: SymbolNode, path: string): SymbolNode[] => {
+    const key = `${t.id}\u0000${path}`;
+    const cached = csBaseCache.get(key);
+    if (cached) return cached;
+    csBaseCache.set(key, []);
+    const self = csFullNameOf(t);
+    // A base list is read outside the type's own members.
+    const own = csContextOf(t, t.file);
+    const context = { types: own.types.filter((s) => s !== self), levels: own.levels };
+    const found = csLookup(context, path, (b) => CS_TYPE_KINDS.has(b.kind) && csFullNameOf(b) !== self);
+    csBaseCache.set(key, found);
+    return found;
+  };
+
+  /**
+   * Whether the project type `full` declares `name` as a value — a field,
+   * property, constant, event or enum member, its own or inherited from a
+   * project base. A member typed as itself (`csSelfTypedMembers`) is a value
+   * unless both readings name one type from `context` (`csSameTypeReading`).
+   */
+  const csValueMember = (full: string, name: string, context: CsContext, seen = new Set<string>()): boolean => {
+    if (seen.has(full)) return false;
+    seen.add(full);
+    const parts = csTypesNamed(full);
+    for (const part of parts) {
+      const self = part.csSelfTypedMembers?.find((m) => m.name === name);
+      if (self) return !csSameTypeReading(part, self, name, context);
+    }
+    if (parts.some((p) => p.csMembers?.includes(name))) return true;
+    const member = `${full}.${name}`;
+    if ((csByName().get(name) ?? []).some((s) => s.kind === "variable" && csFullNameOf(s) === member)) return true;
+    for (const part of parts) {
+      for (const base of part.csBases ?? []) {
+        for (const b of csBaseType(part, base)) if (csValueMember(csFullNameOf(b), name, context, seen)) return true;
+      }
+    }
+    return false;
+  };
+  /**
+   * Whether `name`, heading an expression inside `context`, names a value
+   * rather than a type, as C# decides it: each enclosing type in turn,
+   * innermost first, declares it as a nested type (a type) or as a value
+   * member. The locals and members the extractor sees are already recorded as
+   * receivers; this finds those a type declares in another file or inherits.
+   */
+  const csHeadIsValue = (context: CsContext, name: string): boolean => {
+    for (const scope of context.types) {
+      if (csTypesNamed(`${scope}.${name}`).length > 0 || csInheritedNested(scope, name, csTypesNamed).length > 0) return false;
+      if (csValueMember(scope, name, context)) return true;
+    }
+    return false;
+  };
+  /**
+   * Whether a member typed as itself (`Status Status`) may be read as the type
+   * from `context`, by the C# rule: its declared type, looked up from where it
+   * is declared, is the one type `name` names from `context`. A nullable value
+   * type (`Status?` of an enum) is `Nullable<Status>`, another type. When
+   * either reading names no project type, the binding is not established and
+   * the member stays a value.
+   */
+  const csSameTypeReading = (
+    owner: SymbolNode,
+    member: { type: string; nullable?: boolean },
+    name: string,
+    context: CsContext,
+  ): boolean => {
+    const isType = (s: SymbolNode) => CS_TYPE_KINDS.has(s.kind);
+    const declared = csLookup(csContextOf(owner, owner.file), member.type, isType);
+    const used = csLookup(context, name, isType);
+    const one = (xs: SymbolNode[]) => new Set(xs.map(csFullNameOf));
+    const a = one(declared);
+    const b = one(used);
+    if (a.size !== 1 || b.size !== 1 || [...a][0] !== [...b][0]) return false;
+    return !member.nullable || declared.every((s) => s.kind !== "struct" && s.kind !== "enum");
+  };
+
   const reexportsByFile = new Map<string, SymbolEdge[]>();
   for (const [file, edges] of outgoingCallsByFile.entries()) {
     const reexports = edges.filter((edge) => edge.kind === "reexport");
@@ -1531,6 +1868,95 @@ export function resolveCallSites(
       // 1. Local (unless edge explicitly specifies an external source module)
       //    Checked BEFORE Godot builtin filtering so a user-defined `func print()`
       //    or `func range()` resolves to the local symbol, not the engine builtin.
+      if (callerLang === "csharp" && (edge.calleeQualifier || edge.kind === "type_reference" || edge.receiver)) {
+        // A C# qualified call names its class (`Billing.Calc.Run()`), a
+        // creation its type (`new Calc()`), a type position a type, and
+        // `this.` / `base.` the caller's own type. The written path is looked
+        // up from the caller's scope as C# looks it up (`csLookup`): under the
+        // caller's enclosing types and namespaces, then what is imported there
+        // — so `Calc` is the `Calc` the caller can see, never a same-named
+        // symbol elsewhere, and a path no visible symbol matches stays
+        // unresolved rather than widening to every symbol of that name. A .NET
+        // framework type the caller cannot see a project type for is `engine`.
+        const caller = csSymbolById(edge.callerId);
+        const context = csContextOf(caller, callerFile);
+        const lookup = (path: string, accept: (s: SymbolNode) => boolean): SymbolNode[] =>
+          csLookup(context, path, accept);
+        const qualifier = edge.calleeQualifier;
+        const name = edge.calleeName;
+        // `global::` or an alias's declaring namespace (`App.Shop::`), kept in front of the path.
+        const cut = qualifier?.indexOf("::") ?? -1;
+        const anchored = cut >= 0;
+        const relative = qualifier && anchored ? qualifier.slice(cut + 2) : qualifier;
+        const anchor = qualifier && anchored ? qualifier.slice(0, cut + 2) : "";
+        const terminal = relative ? relative.slice(relative.lastIndexOf(".") + 1) : undefined;
+        let found: SymbolNode[] = [];
+        let framework = false;
+        if (edge.kind === "type_reference") {
+          // A member-access receiver may end in static members
+          // (`Config.Instance`), so its shorter prefixes are tried after the
+          // whole path; a type position is the whole path or nothing. A
+          // shorter prefix is accepted only for a type that declares the next
+          // segment as a member, its own or inherited from a project base
+          // (`App.Config.Instance`, or a field among `csMembers`): otherwise the leading
+          // segments may be a namespace the project does not declare, and the
+          // name alone would bind an unrelated same-named type.
+          const segments = relative ? [...relative.split("."), name] : [name];
+          const shortest = edge.csMemberReceiver ? 1 : segments.length;
+          // A member access on a value (`Config.Load()` on a property) references no type.
+          const value = edge.csMemberReceiver === true && !anchored && csHeadIsValue(context, segments[0]);
+          for (let n = segments.length; !value && n >= shortest && found.length === 0; n--) {
+            const path = anchor + segments.slice(0, n).join(".");
+            const next = n < segments.length ? segments[n] : null;
+            const declaresNext = (t: SymbolNode): boolean => next === null || csMembersOf(t, next, true).length > 0;
+            found = lookup(path, (s) => CS_TYPE_KINDS.has(s.kind) && declaresNext(s));
+            if (csFrameworkPath(segments.slice(0, n))) framework = true;
+          }
+        } else if (qualifier && terminal === name) {
+          // `new Calc()`: a member cannot share its class's name, so the
+          // repeated name is a creation. It calls the type's declared
+          // constructors, or the type itself when it declares none.
+          for (const type of lookup(qualifier, (s) => CS_CREATABLE_KINDS.has(s.kind))) {
+            const ctorName = `${csFullNameOf(type)}.${name}`;
+            const ctors = (csByName().get(name) ?? []).filter(
+              (s) => s.kind === "constructor" && csFullNameOf(s) === ctorName,
+            );
+            found.push(...(ctors.length > 0 ? ctors : [type]));
+          }
+          framework = csFrameworkPath(relative?.split(".") ?? []);
+        } else if (qualifier && !anchored && csHeadIsValue(context, qualifier.split(".")[0])) {
+          // `Report.Print()` on a property `Report` declared in another file or
+          // inherited: an instance call, whose receiver's type is not inferred.
+        } else if (qualifier) {
+          found = lookup(`${qualifier}.${name}`, (s) => !CS_TYPE_KINDS.has(s.kind));
+          if (found.length === 0) {
+            // `Derived.Create()` may call a static method `Derived` inherits.
+            const owners = lookup(qualifier, (s) => CS_TYPE_KINDS.has(s.kind));
+            for (const t of owners) found.push(...csMembersOf(t, name, false));
+            // `Math.Max()` with no project `Math` in sight is a framework call;
+            // a member a visible project type lacks stays unresolved.
+            framework = owners.length === 0 && csFrameworkPath(relative?.split(".") ?? []);
+          }
+        } else if ((edge.receiver === "this" || edge.receiver === "base") && caller?.csFullName) {
+          // `this.Run()` names the caller's own type, `base.Run()` its bases.
+          const own = CS_TYPE_KINDS.has(caller.kind)
+            ? caller.csFullName
+            : caller.csFullName.slice(0, Math.max(0, caller.csFullName.lastIndexOf(".")));
+          for (const t of csTypesNamed(own)) {
+            if (edge.receiver === "this") found.push(...csMembersOf(t, name, false));
+            else for (const base of t.csBases ?? []) for (const b of csBaseType(t, base)) found.push(...csMembersOf(b, name, false));
+          }
+        }
+        // Any other receiver (`?`: a call result, `a?.b`) names no target the
+        // source spells out, so the edge stays unresolved.
+        const uniq = Array.from(new Set(found.map((s) => s.id)));
+        edge.calleeCandidates = uniq;
+        if (uniq.length === 0) edge.confidence = framework ? "engine" : "unresolved";
+        else if (uniq.every((id) => fileOfSymbolId.get(id) === callerFile)) edge.confidence = "local";
+        else if (uniq.length === 1) edge.confidence = "unique";
+        else edge.confidence = "multiple-candidates";
+        continue;
+      }
       if (!edge.sourceModule) {
         const local = localIdx?.get(edge.calleeName);
         if (local && local.length > 0) {
