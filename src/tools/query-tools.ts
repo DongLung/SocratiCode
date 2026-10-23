@@ -118,6 +118,52 @@ async function appendWatcherState(
   }
 }
 
+/** Explain an empty filtered search by the filter, the index state, or both. */
+async function filteredNoResultsLines(
+  query: string,
+  resolvedPath: string,
+  collection: string,
+  fileFilter: string | undefined,
+  languageFilter: string | undefined,
+  includeLinked: boolean | undefined,
+): Promise<string[]> {
+  const indexing = isIndexingInProgress(resolvedPath);
+  if (!includeLinked && !indexing && ((await getCollectionInfo(collection))?.pointsCount ?? 0) === 0) {
+    return [
+      `No results found for "${query}" in project ${resolvedPath}.`,
+      "Make sure the project has been indexed first using codebase_index.",
+    ];
+  }
+
+  const filters: string[] = [];
+  const hints: string[] = [];
+  if (fileFilter) {
+    filters.push(`fileFilter "${fileFilter}"`);
+    hints.push(
+      "fileFilter takes one file path exactly as a result header shows it (e.g. src/index.ts); directories, globs, lists and bare names of files below the root match nothing. Omit fileFilter to search everything.",
+    );
+  }
+  if (languageFilter) {
+    filters.push(`languageFilter "${languageFilter}"`);
+    hints.push(
+      "languageFilter takes a language label exactly as a result header shows it in brackets (e.g. typescript, python, go), not an alias such as ts or py.",
+    );
+  }
+  if (indexing) {
+    hints.push("Indexing is in progress, so matching files may not be indexed yet; codebase_status shows progress.");
+  }
+
+  if (includeLinked) {
+    return [`No results found for "${query}" in project ${resolvedPath} or its linked projects with ${filters.join(" and ")}.`, ...hints];
+  }
+  const miss = filters.length > 1
+    ? `${filters.join(" and ")} together matched no indexed chunk`
+    : fileFilter
+      ? `${filters[0]} matched no indexed file`
+      : `${filters[0]} matched no indexed chunk`;
+  return [`No results found for "${query}" in project ${resolvedPath}: ${miss}.`, ...hints];
+}
+
 /** Run a query or status request with the selected mode's Git freshness notice. */
 export async function handleQueryTool(
   name: string,
@@ -173,6 +219,8 @@ async function dispatchQueryTool(
             `No results above score threshold ${minScore.toFixed(2)} for "${query}" in project ${resolvedPath}.`,
             `${filteredCount} result${filteredCount === 1 ? " was" : "s were"} below the threshold. Try a broader query or lower the minScore parameter.`,
           );
+        } else if (fileFilter || languageFilter) {
+          lines.push(...await filteredNoResultsLines(query, resolvedPath, collection, fileFilter, languageFilter, includeLinked));
         } else {
           lines.push(
             `No results found for "${query}" in project ${resolvedPath}.`,

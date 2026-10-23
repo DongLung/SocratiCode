@@ -1177,8 +1177,8 @@ Parameters:
   query: string           — Natural language search query (required)
   projectPath?: string    — Absolute path (defaults to cwd)
   limit?: number          — 1-50 (default 10)
-  fileFilter?: string     — Filter by relative file path
-  languageFilter?: string — Filter by language name
+  fileFilter?: string     — Exact match on one file's relative path, as a result header shows it
+  languageFilter?: string — Exact match on a language label, as a result header shows it
   minScore?: number       — 0-1, minimum RRF score threshold (default: 0.10, env: SEARCH_MIN_SCORE)
 
 Returns: Ranked code chunks with file paths, line numbers, language, similarity scores, and content

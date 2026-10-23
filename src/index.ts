@@ -153,11 +153,11 @@ server.tool(
       .optional(),
     fileFilter: z
       .string()
-      .describe("Filter results to a specific file path (relative).")
+      .describe("Filter results to one file, given exactly as a result header shows its path (e.g. 'src/index.ts'). Directories, globs, lists and bare names of files below the root match nothing.")
       .optional(),
     languageFilter: z
       .string()
-      .describe("Filter results to a specific language (e.g. 'typescript', 'python').")
+      .describe("Filter results to one language, given exactly as a result header shows its label in brackets (e.g. 'typescript', 'python', 'go'); aliases such as 'ts' or 'py' match nothing.")
       .optional(),
     minScore: z
       .number()

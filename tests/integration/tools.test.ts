@@ -556,6 +556,19 @@ describe.skipIf(!dockerAvailable)(
 
         expect(result).toBeDefined();
       }, 30_000);
+
+      it("restricts results to the exact relative path given as fileFilter", async () => {
+        const result = await handleQueryTool("codebase_search", {
+          query: "authentication user login",
+          projectPath: fixture.root,
+          fileFilter: "src/index.ts",
+          minScore: 0,
+        });
+
+        const headers = result.split("\n").filter((line) => line.startsWith("--- "));
+        expect(headers.length, "an exact relative path must return that file's chunks").toBeGreaterThan(0);
+        expect(headers.every((line) => line.startsWith("--- src/index.ts ")), headers.join("\n")).toBe(true);
+      }, 30_000);
     });
 
     describe("codebase_status builder version (#120)", () => {

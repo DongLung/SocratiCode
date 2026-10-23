@@ -116,9 +116,11 @@ vi.mock("../../src/constants.js", async (importOriginal) => {
 // ── Imports (after mocks) ────────────────────────────────────────────────
 
 import { ensureQdrantReady } from "../../src/services/docker.js";
+import { isIndexingInProgress } from "../../src/services/indexer.js";
 import { handleQueryTool } from "../../src/tools/query-tools.js";
 
 const mockEnsureQdrantReady = vi.mocked(ensureQdrantReady);
+const mockIsIndexingInProgress = vi.mocked(isIndexingInProgress);
 
 // ── Tests ────────────────────────────────────────────────────────────────
 
@@ -276,6 +278,99 @@ describe("manual indexing watcher status", () => {
 
     expect(output).toContain("No index found for project");
     expect(output).toContain("File watcher: inactive (SOCRATICODE_WATCHER=manual");
+  });
+});
+
+describe("codebase_search — filtered search with no results", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetCollectionInfo.mockResolvedValue({ pointsCount: 3, status: "green" });
+    mockSearchChunks.mockResolvedValueOnce([]);
+  });
+
+  afterEach(() => {
+    mockIsIndexingInProgress.mockReturnValue(false);
+  });
+
+  it("blames a fileFilter that matched no file, not the index", async () => {
+    const output = await handleQueryTool("codebase_search", {
+      projectPath: TEST_PATH,
+      query: "value",
+      fileFilter: "src/",
+    });
+
+    expect(output).toContain('fileFilter "src/"');
+    expect(output).toContain("one file path exactly as a result header shows it");
+    expect(output).not.toContain("codebase_index");
+  });
+
+  it("blames a languageFilter that matched no language, not the index", async () => {
+    const output = await handleQueryTool("codebase_search", {
+      projectPath: TEST_PATH,
+      query: "value",
+      languageFilter: "ts",
+    });
+
+    expect(output).toContain('languageFilter "ts"');
+    expect(output).toContain("language label exactly as a result header shows it in brackets");
+    expect(output).not.toContain("codebase_index");
+  });
+
+  it("blames both filters together when both are set, not the file path alone", async () => {
+    const output = await handleQueryTool("codebase_search", {
+      projectPath: TEST_PATH,
+      query: "value",
+      fileFilter: "src/index.ts",
+      languageFilter: "python",
+    });
+
+    expect(output).toContain('fileFilter "src/index.ts" and languageFilter "python" together matched no indexed chunk');
+    expect(output).not.toContain("matched no indexed file");
+  });
+
+  it("states no cause for a filtered miss across linked projects, whose failed searches are skipped", async () => {
+    mockGetCollectionInfo.mockResolvedValue({ pointsCount: 0, status: "green" });
+    mockSearchMultipleCollections.mockResolvedValueOnce([]);
+
+    const output = await handleQueryTool("codebase_search", {
+      projectPath: TEST_PATH,
+      query: "value",
+      fileFilter: "src/",
+      includeLinked: true,
+    });
+
+    expect(output).toContain('with fileFilter "src/"');
+    expect(output).toContain("one file path exactly as a result header shows it");
+    expect(output).not.toContain("matched no indexed");
+    expect(output).not.toContain("codebase_index");
+  });
+
+  it("says a correctly filtered file may not be indexed yet while indexing runs", async () => {
+    mockIsIndexingInProgress.mockReturnValue(true);
+    mockGetCollectionInfo.mockResolvedValue({ pointsCount: 0, status: "green" });
+
+    const output = await handleQueryTool("codebase_search", {
+      projectPath: TEST_PATH,
+      query: "value",
+      fileFilter: "src/index.ts",
+    });
+
+    expect(output).toContain('fileFilter "src/index.ts"');
+    expect(output).toContain("codebase_status");
+    expect(output).not.toContain("codebase_index");
+  });
+
+  it("keeps the indexing hint when the collection holds no chunks", async () => {
+    mockGetCollectionInfo.mockResolvedValue({ pointsCount: 0, status: "green" });
+
+    const output = await handleQueryTool("codebase_search", {
+      projectPath: TEST_PATH,
+      query: "value",
+      fileFilter: "src/index.ts",
+    });
+
+    expect(output).toContain("Make sure the project has been indexed first using codebase_index.");
+    expect(output).not.toContain("one file path exactly as a result header shows it");
   });
 });
 
